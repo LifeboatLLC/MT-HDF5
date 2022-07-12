@@ -1,4 +1,5 @@
-#Toward multi-threaded concurrency in HDF5
+TOWARD MULTI-THREADED CONCURRENCY in HDF5
+------------------------------------------
 
 We work on updating HDF5 software to support multiple concurrent threads to read data stored in HDF5.
 
