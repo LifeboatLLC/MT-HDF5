@@ -17,6 +17,8 @@ The HDF5 library is broken into packages within three layers.  The Virtual Obje
 
 However, if we add multi-threaded support to just six packages (H5VL, H5E, H5CX, H5P, H5I, H5S and H5FD), it would be possible to implement a “Bypass” VOL connector to support multiple concurrent threads in the HDF5 read calls. For these calls, the connector would bypass HDF5 library and perform multi-threaded reads using VFD layer.  Un-supported API calls would be routed to the HDF5 library and be handled as usual.  If desired, the connector could be extended in the future with more capabilities or can be deprecated when HDF5 becomes multi-threaded.  Since the connector is not part of the HDF5 library, its development will not create any technical debt. Similarly, if paired with suitable regression test code and documentation, integration of the retrofitted packages into the HDF5 library should reduce technical debt. This change will not affect existing applications. The sketch design is shown on Figure 1.
 
-![image](https://user-images.githubusercontent.com/14047725/178506375-75cafc42-f40a-4e2a-bac2-59ae582955f0.png)
-Figure 1: “Bypass” VOL integration with HDF5 library
+<p align="center" width="100%"> 
+  <img width="33%" src="https://user-images.githubusercontent.com/14047725/178508458-4e8491a9-6b80-4d63-a899-a3bef93cc84e.png"> 
+</p>
 
+                                      Figure 1: “Bypass” VOL integration with HDF5 library
