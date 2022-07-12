@@ -1,7 +1,7 @@
 TOWARD MULTI-THREADED CONCURRENCY in HDF5
 ------------------------------------------
 
-We propse to update HDF5 software to support multiple concurrent threads to read data stored in HDF5.
+We propse to update HDF5 software to support multiple concurrent threads to access data stored in HDF5.
 
 The lack of concurrent access is a long-standing limitation for the HDF5 library that creates deployment and adoption barriers for commercial multi-threaded applications. To date, there was no effort to overcome this restriction, mostly due to the difficulty of retrofitting a large code base with thread concurrency. 
 
