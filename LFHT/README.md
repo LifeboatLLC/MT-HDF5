@@ -1,0 +1,40 @@
+# Lock Free Hash Table Notes
+
+John Mainzer
+
+August 10, 2023
+
+
+## Background: 
+
+We need a lock free hash table to retrofit multi-thread support on the H5I package. These notes outline the lock free hash table implemented for this purpose, and list the required enhancements to the current version.
+
+
+## Overview:
+
+The lock free hash table (lfht) is based on the lock free hash table algorithm presented in section 13.3 of the second edition of "The Art of Multiprocessor Programming" by Herlihy, Luchangco, Shavit, & Spear. The underlying lock free singly linked list is adapted from section 
+9.8 of the same volume.
+
+At least as presented in the above volume, these algorithms are heavily dependent on garbage collection – which is not available in C.  For purposes of the lock free hash table, this problem is dealt with via a free list that does not release an entry for re-use until all threads that were active in the lfht at the time that an entry was placed on the free list have exited the lfht -- thus guaranteeing that no thread currently in the lfht has a pointer to the entry.
+
+The free list is implemented using the lock free queue presented in section 10.5 of the above volume.  To address the ABA issues endemic in this algorithm, the pointers used are combined with a version number in a 128-bit atomic structure.
+
+As with the lfht, the lock free queue is heavily dependent on garbage collection.  In particular, it is possible for thread local copies of the tail pointer to become wildly out of date, 
+pointing to entries that have already been re-allocated.  This is not a problem for re-allocated entries, but it does cause problems if an entry has been returned to the heap. 
+
+In its current configuration, lfht collects extensive stats, that have proved very helpful in test and debug.
+
+
+## Known Issues to address:
+
+* At present, the garbage collection issues in the free list are addressed by not releasing entries to the heap until the lfht is shut down.  
+* While the size of the hash table in the lfht is adjusted dynamically, its maximum size is currently limited to 1024 hash buckets.  The limitation should be removed.
+* The test suite for the lfht is in lfht_tests.c.  This test suite is extensive, and currently takes about 17 hours to complete.  At of this writing, it completes without failure on the three machines it has been run on (a Debian box, and two Macs).  However, Valgrind / Helgrind complains about multiple issues.  While most of these issues are likely false positives, they must be reviewed and addressed as appropriate. At present, any errors detected by the test suite trigger assertion failures.  This test code will have to be revised to conform with HDF5 regression test standards.
+* Finally, the code needs a cleanup.
+
+## Compile the code and run the tests
+
+`gcc -lpthread  -latomic -g ./lfht_tests.c`
+
+`./a.out`
+
