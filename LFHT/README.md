@@ -5,12 +5,12 @@ John Mainzer
 August 10, 2023
 
 
-## Background: 
+## Background 
 
 We need a lock free hash table to retrofit multi-thread support on the H5I package. These notes outline the lock free hash table implemented for this purpose, and list the required enhancements to the current version.
 
 
-## Overview:
+## Overview
 
 The lock free hash table (lfht) is based on the lock free hash table algorithm presented in section 13.3 of the second edition of "The Art of Multiprocessor Programming" by Herlihy, Luchangco, Shavit, & Spear. The underlying lock free singly linked list is adapted from section 
 9.8 of the same volume.
@@ -25,16 +25,17 @@ pointing to entries that have already been re-allocated.  This is not a problem 
 In its current configuration, lfht collects extensive stats, that have proved very helpful in test and debug.
 
 
-## Known Issues to address:
+## Known Issues 
 
 * At present, the garbage collection issues in the free list are addressed by not releasing entries to the heap until the lfht is shut down.  
 * While the size of the hash table in the lfht is adjusted dynamically, its maximum size is currently limited to 1024 hash buckets.  The limitation should be removed.
 * The test suite for the lfht is in lfht_tests.c.  This test suite is extensive, and currently takes about 17 hours to complete.  At of this writing, it completes without failure on the three machines it has been run on (a Debian box, and two Macs).  However, Valgrind / Helgrind complains about multiple issues.  While most of these issues are likely false positives, they must be reviewed and addressed as appropriate. At present, any errors detected by the test suite trigger assertion failures.  This test code will have to be revised to conform with HDF5 regression test standards.
 * Finally, the code needs a cleanup.
 
-## Compile the code and run the tests
+## Compile and run tests using
 
 `gcc -lpthread  -latomic -g ./lfht_tests.c`
 
 `./a.out`
 
+Please notice that for some compilers (e.g., clang on macOS) you may not need `-latomic`.
