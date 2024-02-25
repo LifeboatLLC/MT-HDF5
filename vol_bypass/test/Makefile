@@ -1,6 +1,5 @@
 #Your HDF5 install path
 HDF5_DIR=~/Lifeboat/HDF/build_hdf5/hdf5
-#HDF5_DIR=/Users/koziol/HDF5/github/hpc-io/async_vol_register_optional/build_parallel_debug/hdf5
 
 H5CC=$(HDF5_DIR)/bin/h5cc
 CC=clang

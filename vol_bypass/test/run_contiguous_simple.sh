@@ -22,7 +22,7 @@ echo "Test 1: Reading single dataset in a single file with straight HDF5 (no Byp
 
 # Set the environment variables to use Bypass VOL. Need to modify them with your own paths 
 export HDF5_PLUGIN_PATH=/Users/raylu/Lifeboat/HDF/vol_bypass
-export HDF5_VOL_CONNECTOR="pass_through_ext under_vol=0;under_info={};"
+export HDF5_VOL_CONNECTOR="bypass under_vol=0;under_info={};"
 export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/Users/raylu/Lifeboat/HDF/build_hdf5/hdf5/lib:$HDF5_PLUGIN_PATH
 
 echo ""
