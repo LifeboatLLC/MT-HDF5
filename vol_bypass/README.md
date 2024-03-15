@@ -13,10 +13,14 @@ If you don't have the shared dynamic libraries, you'll need to reinstall HDF5.
 - make; make install
 
 ### Settings
-Change following paths in the Makefile of the Bypass VOL:
+If using the Makefile directly, change following paths in the Makefile of the Bypass VOL:
 
 - **HDF5_DIR**: path to your hdf5 install/build location, such as hdf5_build/hdf5/
 - **SRC_DIR**: path to this VOL connector source code directory.
+
+If using CMake, change the following path through ccmake or cmake:
+
+- **CMAKE_INSTALL_PREFIX**: path to your hdf5 install/build location, such as hdf5_build/hdf5/
 
 ### Build the Bypass VOL library
 Type *make* in the source dir and you'll see **libh5bypass_vol.so** (on Linux) or **libh5bypass_vol.dylib** (on Mac OS), which is the Bypass VOL connector library.
@@ -37,7 +41,15 @@ After add the $(DEBUG) option, you can run "**HDF5_DIR**/bin/h5ls sample.h5", an
     ------- BYPASS VOL INFO Copy
 
 ### Build the performance benchmark and run it
-The benchmark program is h5_read.c under test/ directory.  Simply run make to compile it.  There are scripts to run the benchmark: run_contiguous_simple.sh, run_chunk_simple.sh, and run_multi_dsets.sh, and run_multi_files.sh.  To run them correctly, you must modify the three environment variables (HDF5_PLUGIN_PATH, HDF5_VOL_CONNECTOR, and LD_LIBRARY_PATH) in them.
+The benchmark program is h5_read.c under test/ directory.  Simply use the Makefile provided and change the following path:
+
+- **HDF5_DIR**: path to your hdf5 install/build location, such as hdf5_build/hdf5/
+
+If using CMake, change the following path through ccmake or cmake:
+
+- **CMAKE_INSTALL_PREFIX**: path to your hdf5 install/build location, such as hdf5_build/hdf5/
+
+There are scripts to run the benchmark: run_contiguous_simple.sh, run_chunk_simple.sh, and run_multi_dsets.sh, and run_multi_files.sh.  To run them correctly, you must modify the three environment variables (HDF5_PLUGIN_PATH, HDF5_VOL_CONNECTOR, and LD_LIBRARY_PATH) in them.
 
 To run it with this VOL by hand, you must set the three environment variables mentioned above (HDF5_PLUGIN_PATH, HDF5_VOL_CONNECTOR, and LD_LIBRARY_PATH).  Example commands are as below:
 >
