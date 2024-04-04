@@ -1,7 +1,7 @@
 #Your HDF5 install path
 HDF5_DIR=~/Lifeboat/HDF/build_hdf5/hdf5
 
-H5CC=$(HDF5_DIR)/bin/h5cc
+H5CC=$(HDF5_DIR)/bin/h5cc -shlib
 CC=clang
 
 CREATESRC = h5_create.c

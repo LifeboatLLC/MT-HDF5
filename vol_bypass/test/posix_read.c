@@ -1,21 +1,3 @@
-/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *
- * Copyright by The HDF Group.                                               *
- * All rights reserved.                                                      *
- *                                                                           *
- * This file is part of HDF5.  The full HDF5 copyright notice, including     *
- * terms governing use, modification, and redistribution, is contained in    *
- * the COPYING file, which can be found at the root of the source code       *
- * distribution tree, or in https://www.hdfgroup.org/licenses.               *
- * If you do not have access to either file, you may request a copy from     *
- * help@hdfgroup.org.                                                        *
- * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
-
-/*
- *   This example reads hyperslab from the SDS.h5 file
- *   created by h5_write.c program into two-dimensional
- *   plane of the three-dimensional array.
- *   Information about dataset in the SDS.h5 file is obtained.
- */
 #include "common.h"
 #include "common.c"
 
@@ -27,7 +9,7 @@ typedef struct {
     int         fp;
     int         thread_id;
     file_info_t *file_info;
-    //int         finfo_entry_num;
+    int         file_info_entry_num;
     int         *data;
 } c_args_t;
 
@@ -149,23 +131,26 @@ int read_info_log_file(int *finfo_entry_num)
         file_info[counter].offset_m = atoll(token);
     }
 
+    /* Total number of entries to be returned */
+    counter++;
+
     fclose(fp);
     free(buf);
 
     /* printf("3. Print out file_info:\n");
     if (hand.num_files == 1 && hand.num_dsets == 1) {
-        for (i = 0; i < hand.num_threads; i++)
-            printf("%s %s %d %d %d %d\n", file_info[i].file_name, file_info[i].dset_name, file_info[i].dset_offset, file_info[i].offset_f, file_info[i].nelmts, file_info[i].offset_m);
+        for (i = 0; i < counter; i++)
+            printf("%s %s %lld %lld %lld %lld\n", file_info[i].file_name, file_info[i].dset_name, file_info[i].dset_offset, file_info[i].offset_f, file_info[i].nelmts, file_info[i].offset_m);
     } else if (hand.num_files == 1 && hand.num_dsets > 1) {
         for (i = 0; i < hand.num_dsets; i++)
-            printf("%s %s %d %d %d %d\n", file_info[i].file_name, file_info[i].dset_name, file_info[i].dset_offset, file_info[i].offset_f, file_info[i].nelmts, file_info[i].offset_m);
+            printf("%s %s %lld %lld %lld %lld\n", file_info[i].file_name, file_info[i].dset_name, file_info[i].dset_offset, file_info[i].offset_f, file_info[i].nelmts, file_info[i].offset_m);
     } else {
         for (i = 0; i < hand.num_files; i++)
-            printf("%s %s %d %d %d %d\n", file_info[i].file_name, file_info[i].dset_name, file_info[i].dset_offset, file_info[i].offset_f, file_info[i].nelmts, file_info[i].offset_m);
+            printf("%s %s %lld %lld %lld %lld\n", file_info[i].file_name, file_info[i].dset_name, file_info[i].dset_offset, file_info[i].offset_f, file_info[i].nelmts, file_info[i].offset_m);
     }
-    printf("\n");*/
+    printf("\n"); */
 
-    return 0;
+    return counter;
 
 error:
     return -1;
@@ -184,11 +169,14 @@ void* read_partial_dset_in_c(void* arg)
     int thread_id = ((c_args_t *)arg)->thread_id;
     int *data = ((c_args_t *)arg)->data;
     file_info_t *file_info = ((c_args_t *)arg)->file_info;
-    int *p;
+    int *p, i;
+    int num_entries = ((c_args_t *)arg)->file_info_entry_num;
 
-    /* printf("thread_id=%d, data = %p, file_name=%s, dset_name=%s, dset_offset=%lld, offset_f=%lld, nelmts=%lld, offset_m=%lld\n", thread_id, data, file_info->file_name, file_info->dset_name, file_info->dset_offset, file_info->offset_f, file_info->nelmts, file_info->offset_m); */
+    for (i = 0; i < num_entries; i++) {
+        //printf("thread_id=%d, num_entries = %d, data = %p, file_name=%s, dset_name=%s, dset_offset=%lld, offset_f=%lld, nelmts=%lld, offset_m=%lld\n", thread_id, num_entries, data, file_info[i].file_name, file_info[i].dset_name, file_info[i].dset_offset, file_info[i].offset_f, file_info[i].nelmts, file_info[i].offset_m);
 
-    read_big_data(fp, data + file_info->offset_m, sizeof(int) * file_info->nelmts, (file_info->dset_offset + file_info->offset_f * sizeof(int)));
+        read_big_data(fp, data + file_info[i].offset_m, sizeof(int) * file_info[i].nelmts, (file_info[i].dset_offset + file_info[i].offset_f * sizeof(int)));
+    }
 
     return NULL;
 }
@@ -294,7 +282,10 @@ launch_single_file_single_dset_read(void)
     c_args_t c_info[hand.num_threads];
     int *p, *data_out = NULL;
     char file_name[1024];
-    int         finfo_entry_num;
+    int finfo_entry_num;
+    int file_info_num_in_group  = 0;
+    int file_info_num_extra     = 0;
+    int file_info_num_allocated = 0;
     int nerrors = 0;
 
     struct timeval begin, end;
@@ -308,7 +299,7 @@ launch_single_file_single_dset_read(void)
 
     finfo_entry_num = hand.num_threads;
 
-    if (read_info_log_file(&finfo_entry_num) < 0) {
+    if ((finfo_entry_num = read_info_log_file(&finfo_entry_num)) < 0) {
 	printf("read_info_log_file failed\n");
 	exit(1);
     }
@@ -321,12 +312,36 @@ launch_single_file_single_dset_read(void)
 
     gettimeofday(&begin, 0);
 
+    /* The number of data pieces that each thread takes at least */
+    file_info_num_in_group = finfo_entry_num / hand.num_threads;
+
+    /* The leftover number of data pieces when the number can't be evenly divided */
+    file_info_num_extra    = finfo_entry_num % hand.num_threads;
+
     /* Create threads to read the data */
     for (i = 0; i < hand.num_threads; i++) {
 	c_info[i].thread_id = i;
-	c_info[i].file_info = &file_info[i];
+
+	c_info[i].file_info = &file_info[file_info_num_allocated];
+
+        /* Assign a number of data pieces to each thread.  For example, there are
+         * 10 pieces of data and 4 threads, the numbers of data pieces for each thread
+         * are 3, 3, 2, 2.
+         */
+        if (file_info_num_extra) {
+            c_info[i].file_info_entry_num = file_info_num_in_group + 1;
+            file_info_num_extra--;
+            file_info_num_allocated += (file_info_num_in_group + 1);
+        } else {
+            c_info[i].file_info_entry_num = file_info_num_in_group;
+            file_info_num_allocated += file_info_num_in_group;
+        }
+
 	c_info[i].data = data_out;
 	c_info[i].fp = fp;
+
+        //printf("c_info[%d].file_info_entry_num = %d, file_info_num_allocated = %d, finfo_entry_num = %d\n", i, c_info[i].file_info_entry_num, file_info_num_allocated, finfo_entry_num);
+
 	pthread_create(&threads[i], NULL, read_partial_dset_in_c, &c_info[i]);
     }
 

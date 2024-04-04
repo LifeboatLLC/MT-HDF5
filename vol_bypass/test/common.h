@@ -33,6 +33,7 @@ typedef struct {
     long long int   chunk_dim1;
     long long int   chunk_dim2;
     int   space_select;
+    bool  chunk_cache;
     bool  check_data;
     bool  random_data;
     bool  plain_hdf5;
@@ -40,8 +41,8 @@ typedef struct {
 } handler_t;
 
 typedef struct {
-    char file_name[32];
-    char dset_name[32];
+    char file_name[64];
+    char dset_name[64];
     long long int  dset_offset;
     long long int  offset_f;
     long long int  nelmts;
