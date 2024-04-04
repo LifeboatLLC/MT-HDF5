@@ -11,7 +11,7 @@
  * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
 /*
- * Purpose:	The private header file for the pass-through VOL connector.
+ * Purpose:	The private header file for the bypass VOL connector.
  */
 
 #ifndef _H5VLbypass_private_H
@@ -20,14 +20,14 @@
 /* Public headers needed by this file */
 #include "H5VLbypass.h"        /* Public header for connector */
 
-/* Private characteristics of the pass-through VOL connector */
+/* Private characteristics of the bypass VOL connector */
 #define H5VL_BYPASS_VERSION     0
 
 #define POSIX_MAX_IO_BYTES INT_MAX
 #define FILE_STUFF_SIZE    32
 #define DSET_INFO_SIZE     32
-#define INFO_SIZE          128
-#define SEL_SIZE           4 
+#define INFO_SIZE          1024
+#define SEL_SIZE           1024
 #define DIM_RANK_MAX       32
 
 #define GB (1024 * 1024 * 1024)
@@ -58,19 +58,24 @@ static dset_t *dset_stuff;
 static int dset_count = 0;
 static int dset_info_size = DSET_INFO_SIZE;
 
-/* Log info for C reading */
+/* Log info to be written out for the C program */
 typedef struct {
-    char file_name[32];
-    char dset_name[32];
-    haddr_t dset_loc;
-    hsize_t data_offset_file;
-    hsize_t nelmts;
-    hsize_t data_offset_mem;
+    char file_name[64];           /* file name to be read or written */
+    char dset_name[64];           /* unused */
+    haddr_t dset_loc;             /* dataset location (for contiguous) or chunk location (for chunked dataset) in bytes */
+    hsize_t data_offset_file;     /* offset from 'dset_loc' in number of elements */
+    hsize_t real_offset;          /* dset_loc + data_offset_file used only for sorting, not outputting to the log file  */
+    hsize_t nelmts;               /* number of elements to be read or written */
+    hsize_t data_offset_mem;      /* in number of elements */
 
 } info_t;
 
 typedef struct {
     size_t  counter;
+
+    char    file_name[64];
+    char    dset_name[64];
+
     hid_t   file_space_id_array[SEL_SIZE];
     hid_t   mem_space_id_array[SEL_SIZE];
     haddr_t chunk_addr_array[SEL_SIZE];

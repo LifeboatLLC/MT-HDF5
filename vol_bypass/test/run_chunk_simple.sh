@@ -7,9 +7,9 @@
 NTHREADS=4
 DIM1=1024
 DIM2=1024
-CHUNK_DIM1=16
-CHUNK_DIM2=16
-SPACE_SELLECTION=1
+CHUNK_DIM1=512
+CHUNK_DIM2=512
+SPACE_SELLECTION=3
 
 # Make sure these two environment variables aren't set in order to run the test without Bypass VOL
 unset HDF5_VOL_CONNECTOR
@@ -33,6 +33,6 @@ echo "Test 2: Reading single dataset in a single file with Bypass VOL"
 
 # Disabled this test as the work is still ongoing
 # The C test must follow the test with Bypass VOL immediately to use info.log file which contains file name and data info
-# echo ""
-# echo "Test 3: Reading single dataset in a single file in C only"
-# ./posix_read -t ${NTHREADS} -d ${DIM1}x${DIM2} -c ${CHUNK_DIM1}x${CHUNK_DIM2}
+echo ""
+echo "Test 3: Reading single dataset in a single file in C only"
+./posix_read -t ${NTHREADS} -d ${DIM1}x${DIM2} -c ${CHUNK_DIM1}x${CHUNK_DIM2} -k

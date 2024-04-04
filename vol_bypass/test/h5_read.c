@@ -297,8 +297,12 @@ int
 launch_single_file_single_dset_read(void)
 {
     int         fp;
-    hid_t       file;
+    hid_t       file, fapl;
     hid_t       dataset; /* handles */
+    int         mdc_nelmts;
+    size_t      rdcc_nelmts;
+    size_t      rdcc_nbytes;
+    double      rdcc_w0;
     int         i, j, k;
     pthread_t threads[hand.num_threads];
     int thread_ids[hand.num_threads];
@@ -322,10 +326,29 @@ launch_single_file_single_dset_read(void)
 	exit(1);
     }
 
+    if ((fapl = H5Pcreate(H5P_FILE_ACCESS)) < 0) {
+        printf("H5Pcreate failed at line %d\n", __LINE__);
+        goto error;
+    }
+
+    /* By default, the chunk cache is turned off for fair performance comparison among the HDF5 library, Bypass VOL, and C only */
+    if (!hand.chunk_cache) {
+        if (H5Pget_cache(fapl, &mdc_nelmts, &rdcc_nelmts, &rdcc_nbytes, &rdcc_w0) < 0) {
+            printf("H5Pget_cache failed at line %d\n", __LINE__);
+            goto error;
+        }
+
+        rdcc_nbytes = 0;
+        if (H5Pset_cache(fapl, mdc_nelmts, rdcc_nelmts, rdcc_nbytes, rdcc_w0) < 0) {
+            printf("H5Pset_cache failed at line %d\n", __LINE__);
+            goto error;
+        }
+    }
+
     /* Open the file and the dataset */
     sprintf(file_name, "%s.h5", FILE_NAME);
 
-    file    = H5Fopen(file_name, H5F_ACC_RDONLY, H5P_DEFAULT);
+    file    = H5Fopen(file_name, H5F_ACC_RDONLY, fapl);
     dataset = H5Dopen2(file, DATASETNAME, H5P_DEFAULT);
 
     gettimeofday(&begin, 0);
@@ -357,6 +380,7 @@ launch_single_file_single_dset_read(void)
     /* Close/release resources */
     H5Dclose(dataset);
     H5Fclose(file);
+    H5Pclose(fapl);
 
     free(data_out);
 

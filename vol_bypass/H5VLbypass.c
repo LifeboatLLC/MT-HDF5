@@ -443,6 +443,40 @@ H5VL_bypass_init(hid_t vipl_id)
     return 0;
 } /* end H5VL_bypass_init() */
 
+/* For sorting */
+static void
+swap(info_t *xp, info_t *yp)
+{
+    info_t temp;
+
+    memcpy(&temp, xp, sizeof(info_t));
+    memcpy(xp, yp, sizeof(info_t));
+    memcpy(yp, &temp, sizeof(info_t));
+}
+
+/* Bubble sorting for convenience, not speed */
+static void
+sort_info(info_t *array, int count)
+{
+    int i, j;
+    bool swapped;
+
+    for (i = 0; i < count - 1; i++) {
+        swapped = false;
+
+        for (j = 0; j < count - i - 1; j++) {
+            if (array[j].real_offset > array[j + 1].real_offset) {
+                swap(&array[j], &array[j + 1]);
+                swapped = true;
+            }
+        }
+
+        /* If no two elements were swapped by inner loop, break */
+        if (swapped == false)
+            break;
+    }
+}
+
 
 /*---------------------------------------------------------------------------
  * Function:    H5VL_bypass_term
@@ -470,7 +504,17 @@ H5VL_bypass_term(void)
     /* Reset VOL ID */
     H5VL_BYPASS_g = H5I_INVALID_HID;
 
-    /* Open the log file and output file name, dataset name, dataset location in file, number of elements to be read, data offset in memory */
+    /* Sort the info first before writing to the log file */
+    sort_info(info_stuff, info_count);
+
+    /* Open the log file and output the following info:
+     * - file name
+     * - dataset name
+     * - dataset (for contiguous) or chunk (for chunked dataset) location in file
+     * - data offset in file
+     * - number of elements to be read
+     * - data offset in memory
+     */
     log_fp = fopen("info.log", "w");
 
     for (i = 0; i < info_count; i++)
@@ -1468,149 +1512,6 @@ read_vectors(int fd, uint32_t count, haddr_t addrs[], size_t sizes[], void *bufs
         read_big_data(fd, bufs[i], sizes[i], addrs[i]);
 }
 
-#ifdef TMP
-/* Delete this function: Retrieve the sequence list of dataspace selection and read the hyperslab selection */
-static void
-read_sequence_list(int fd, haddr_t dset_loc, hid_t dtype_id, hid_t file_space, hid_t mem_space, void *rbuf)
-{
-    hid_t      file_iter_id, mem_iter_id;
-    size_t     nelmts;
-    hssize_t   hss_nelmts;
-    size_t     element_size = 0;
-    size_t     file_seq_i, mem_seq_i, file_nseq, mem_nseq;
-    size_t     seq_nelem;
-    hsize_t    file_off[SEL_SEQ_LIST_LEN], mem_off[SEL_SEQ_LIST_LEN];
-    size_t     file_len[SEL_SEQ_LIST_LEN], mem_len[SEL_SEQ_LIST_LEN];
-    size_t     io_len;
-    haddr_t    addrs_local[LOCAL_VECTOR_LEN];
-    haddr_t   *addrs = addrs_local;
-    size_t     sizes_local[LOCAL_VECTOR_LEN];
-    size_t    *sizes = sizes_local;
-    void      *vec_bufs_local[LOCAL_VECTOR_LEN];
-    void     **vec_bufs = vec_bufs_local;
-    size_t     vec_arr_nalloc = LOCAL_VECTOR_LEN;
-    size_t     vec_arr_nused  = 0;
-    hbool_t    free_mem = false;
-    int        i;
-
-    /* Make sure that the numbers of selection in file and memory are equal */
-    hss_nelmts = H5Sget_select_npoints(file_space);
-    nelmts = (size_t)hss_nelmts;
-
-    hss_nelmts = H5Sget_select_npoints(mem_space);
-    if (nelmts != hss_nelmts)
-        printf("the number of selection in file (%ld) isn't equal to the number in memory (%lld)\n", nelmts, hss_nelmts); 
-
-    element_size = H5Tget_size(dtype_id);
-
-    file_iter_id = H5Ssel_iter_create(file_space, element_size, H5S_SEL_ITER_SHARE_WITH_DATASPACE);
-    mem_iter_id  = H5Ssel_iter_create(mem_space, element_size, H5S_SEL_ITER_SHARE_WITH_DATASPACE);
-
-    /* Initialize values so sequence lists are retrieved on the first iteration */
-    file_seq_i = mem_seq_i = SEL_SEQ_LIST_LEN;
-    file_nseq  = mem_nseq  = 0;
-
-    /* Build data vectors */
-    while (file_seq_i < file_nseq || nelmts > 0) {
-        if (file_seq_i == SEL_SEQ_LIST_LEN) {
-             if (H5Ssel_iter_get_seq_list(file_iter_id, SEL_SEQ_LIST_LEN, SIZE_MAX, &file_nseq, &seq_nelem, file_off, file_len) < 0)
-                 printf("file sequence length retrieval failed");
- 
-             nelmts -= seq_nelem;
-             file_seq_i = 0;
-        }
-
-        /* Fill/refill memory sequence list if necessary */
-        if (mem_seq_i == SEL_SEQ_LIST_LEN) {
-             if (H5Ssel_iter_get_seq_list(mem_iter_id, SEL_SEQ_LIST_LEN, SIZE_MAX, &mem_nseq, &seq_nelem, mem_off, mem_len) < 0)
-                 printf("file sequence length retrieval failed");
-
-                 mem_seq_i = 0;
-        }
-
-        /* Calculate length of this IO */
-        io_len = MIN(file_len[file_seq_i], mem_len[mem_seq_i]);
-
-	if (vec_arr_nused == vec_arr_nalloc) {
-	    /* Check if we're using the static arrays */
-	    if (addrs == addrs_local) {
-                /* Allocate dynamic arrays.  Need to free them later */
-		if (NULL == (addrs = malloc(sizeof(addrs_local) * 2)))
-		    printf("memory allocation failed for address list");
-		if (NULL == (sizes = malloc(sizeof(sizes_local) * 2)))
-		    printf("memory allocation failed for size list");
-		if (NULL == (vec_bufs = malloc(sizeof(vec_bufs_local) * 2)))
-		    printf("memory allocation failed for buffer list");
-
-		/* Copy the existing data */
-		(void)memcpy(addrs, addrs_local, sizeof(addrs_local));
-		(void)memcpy(sizes, sizes_local, sizeof(sizes_local));
-		(void)memcpy(vec_bufs, vec_bufs_local, sizeof(vec_bufs_local));
-
-                /* Need to free the memory later */
-                free_mem = true;
-	    } else {
-		void *tmp_ptr;
-
-		/* Reallocate arrays */
-		if (NULL == (tmp_ptr = realloc(addrs, vec_arr_nalloc * sizeof(*addrs) * 2)))
-		    printf("memory reallocation failed for address list");
-		addrs = tmp_ptr;
-		if (NULL == (tmp_ptr = realloc(sizes, vec_arr_nalloc * sizeof(*sizes) * 2)))
-		    printf("memory reallocation failed for size list");
-		sizes = tmp_ptr;
-		if (NULL == (tmp_ptr = realloc(vec_bufs, vec_arr_nalloc * sizeof(*vec_bufs) * 2)))
-		    printf("memory reallocation failed for buffer list");
-		vec_bufs = tmp_ptr;
-	    }
-
-	    /* Record that we've doubled the array sizes */
-	    vec_arr_nalloc *= 2;
-	}
-
-	/* Add this segment to vector read list */
-	addrs[vec_arr_nused]    = dset_loc + file_off[file_seq_i]; /* Add the base offset of the dataset to the address */
-	sizes[vec_arr_nused]    = io_len;
-	vec_bufs[vec_arr_nused] = (void *)((uint8_t *)rbuf + mem_off[mem_seq_i]);
-	vec_arr_nused++;
-
-        /* Update file sequence */
-        if (io_len == file_len[file_seq_i])
-            file_seq_i++;
-        else {                      
-            file_off[file_seq_i] += io_len;
-            file_len[file_seq_i] -= io_len;
-        }                           
-                    
-        /* Update memory sequence */
-        if (io_len == mem_len[mem_seq_i])
-            mem_seq_i++;
-        else {      
-            mem_off[mem_seq_i] += io_len;
-            mem_len[mem_seq_i] -= io_len;
-        } 
-    }
-
-    /* Read the data vectors */
-    for (i = 0; i < (uint32_t)vec_arr_nused; i++)
-        read_big_data(fd, vec_bufs[i], sizes[i], addrs[i]);
-
-    /* Free the memory used for vectors if they are allocated */
-    if (free_mem) {
-	if (addrs)
-	    free(addrs);
-	if (sizes)
-	    free(sizes);
-	if (vec_bufs)
-	    free(vec_bufs);
-    }
-
-    /* Release iterators */
-    H5Ssel_iter_close(file_iter_id);
-    H5Ssel_iter_close(mem_iter_id);
-}
-#endif
-
 static void
 get_chunk_selections(void *dset, hid_t dcpl_id, hid_t mem_space, hid_t file_space, sel_info_t *selection_info, void **req)
 {
@@ -1634,8 +1535,6 @@ get_chunk_selections(void *dset, hid_t dcpl_id, hid_t mem_space, hid_t file_spac
     H5Pget_chunk(dcpl_id, dset_dim_rank, chunk_dims);
 
     get_num_chunks_helper(dset, file_space, &num_chunks, req);
-
-    //printf("%s: rank=%d, chunk_dims = {%llu, %llu}, nchunks = %llu\n", __func__, dset_dim_rank, chunk_dims[0], chunk_dims[0], num_chunks);
 
     /* Iterate through all chunks and get the selection falling into each chunk and the matching selection in memory */ 
     for (i = 0; i < num_chunks; i++) {
@@ -1694,7 +1593,11 @@ get_chunk_selections(void *dset, hid_t dcpl_id, hid_t mem_space, hid_t file_spac
             for(j = 0; j < dset_dim_rank; j++)
                 selection_offset[j] = chunk_offset[j];    
 
-            /* Move the file space selection in this chunk to upper-left corner and adjust its extent to the size of the chunk */ 
+            /* Move the file space selection in this chunk to upper-left corner and adjust (shrink) its extent to the size of the chunk.
+             * In other words, the 'file_space_copy' that contains the data selection in file which falls into the current chunk is adjusted
+             * from the size of the dataset to the size of chunk which still contains the same data selection. 'chunk_addr' is the original point
+             * for 'file_space_copy'.
+             */
             H5Sselect_adjust(file_space_copy, selection_offset);
             H5Sset_extent_simple(file_space_copy, dset_dim_rank, chunk_dims, chunk_dims);
 
@@ -1708,7 +1611,7 @@ get_chunk_selections(void *dset, hid_t dcpl_id, hid_t mem_space, hid_t file_spac
             H5Sclose(file_space_copy);
         }
     }
-//printf("\t\tIn %s of %s at line %d: counter = %d\n", __func__, __FILE__, __LINE__, counter);
+//printf("\t\tIn %s of %s at line %zu: counter = %d\n", __func__, __FILE__, __LINE__, counter);
 
     selection_info->counter = counter;
 }
@@ -1737,7 +1640,7 @@ get_vectors(int fd, void *rbuf, sel_info_t *selection_info)
     bool       free_memory = false;
     int        i;
 
-    //printf("%s: %d\n", __func__, __LINE__);
+    //printf("%s: %d, counter = %zu\n", __func__, __LINE__, selection_info->counter);
 
     for (i = 0; i < selection_info->counter; i++) {
         hss_nelmts = H5Sget_select_npoints(selection_info->file_spaces[i]);
@@ -1754,7 +1657,8 @@ get_vectors(int fd, void *rbuf, sel_info_t *selection_info)
         file_seq_i = mem_seq_i = SEL_SEQ_LIST_LEN;
         file_nseq  = mem_nseq   = 0;
 
-        /* Loop until all elements are processed */
+        /* Loop until all elements are processed. The algorithm is copied from the function H5FD__read_selection_translate
+         * in H5FDint.c, which is somewhat similar to H5D__select_io in H5Dselect.c */
         while (file_seq_i < file_nseq || nelmts > 0) {
             if (file_seq_i == SEL_SEQ_LIST_LEN) {
                 if (H5Ssel_iter_get_seq_list(file_iter_id, SEL_SEQ_LIST_LEN, SIZE_MAX, &file_nseq,
@@ -1817,7 +1721,31 @@ get_vectors(int fd, void *rbuf, sel_info_t *selection_info)
             addrs[vec_arr_nused]    = selection_info->chunk_addrs[i] + file_off[file_seq_i]; /* Add the base offset of the dataset to the address */
             sizes[vec_arr_nused]    = io_len;
             vec_bufs[vec_arr_nused] = (void *)((uint8_t *)rbuf + mem_off[mem_seq_i]);
+
             vec_arr_nused++;
+
+            /* Save the info for the C log file */
+            {
+		/* Enlarge the size of the info for C and Re-allocate the memory if necessary */
+		if (info_count == info_size) {
+		    info_size  *= 2;
+		    info_stuff = (info_t *)realloc(info_stuff, info_size * sizeof(info_t));
+		}
+
+		/* Save the info in the structure.  It only works for contiguous dset and needs to support chunked dset */
+		strcpy(info_stuff[info_count].file_name, selection_info->file_name);
+		strcpy(info_stuff[info_count].dset_name, selection_info->dset_name);
+		info_stuff[info_count].dset_loc = selection_info->chunk_addrs[i];
+		info_stuff[info_count].data_offset_file = file_off[file_seq_i] / selection_info->dtype_size;
+                info_stuff[info_count].real_offset = info_stuff[info_count].dset_loc + info_stuff[info_count].data_offset_file;
+		info_stuff[info_count].nelmts = io_len / selection_info->dtype_size;
+		info_stuff[info_count].data_offset_mem = mem_off[mem_seq_i] / selection_info->dtype_size;
+
+                //printf("%s: %d, info_count = %d\n", __func__, __LINE__, info_count);
+
+		/* Increment the counter */
+		info_count++;
+            }
 
             /* Update file sequence */
             if (io_len == file_len[file_seq_i])
@@ -1874,14 +1802,11 @@ H5VL_bypass_dataset_read(size_t count, void *dset[],
     hid_t under_vol_id;                     /* VOL ID for all objects */
     herr_t ret_value;
     hsize_t dims_f[2], dims_m[2];;
-    hsize_t count_f[2];      /* size of the hyperslab in the file */
-    hsize_t offset_f[2];     /* hyperslab offset in the file */
-    hsize_t count_m[2];      /* size of the hyperslab in the file */
-    hsize_t offset_m[2];     /* hyperslab offset in the file */
     haddr_t dset_loc = 0;
     H5D_layout_t dset_layout = -1;
     hid_t dset_dtype_id;
     hid_t dcpl_id;
+    int   num_filters = 0;
     char file_name[32];
     char dset_name[32];
     sel_info_t selection_info;
@@ -1904,8 +1829,10 @@ H5VL_bypass_dataset_read(size_t count, void *dset[],
         }
     }
 
-    /* Let the native function handle datatype conversion */
-    if (!H5Tequal(dset_dtype_id, mem_type_id[0])) {
+    num_filters = H5Pget_nfilters(dcpl_id);
+
+    /* Let the native function handle datatype conversion or filters */
+    if (!H5Tequal(dset_dtype_id, mem_type_id[0]) || num_filters > 0) {
         /* Populate the array of under objects */
         under_vol_id = ((H5VL_bypass_t *)(dset[0]))->under_vol_id;
 
@@ -1915,8 +1842,7 @@ H5VL_bypass_dataset_read(size_t count, void *dset[],
         }
 
         ret_value = H5VLdataset_read(count, o_arr, under_vol_id, mem_type_id, mem_space_id, file_space_id, plist_id, buf, req);
-    } else {
-        //printf("Coming into Bypass VOL\n");
+    } else { /* Coming into Bypass VOL when no data conversion and filter */
 
         /* Find out the file name */
 	get_filename_helper((H5VL_bypass_t *)(dset[0]), file_name, H5I_DATASET, req);
@@ -1925,28 +1851,9 @@ H5VL_bypass_dataset_read(size_t count, void *dset[],
         ret_value = H5Sget_simple_extent_dims(file_space_id[0], dims_f, NULL);
         ret_value = H5Sget_simple_extent_dims(mem_space_id[0], dims_m, NULL);
 
-        /* Only for outputing to the info file */
-        ret_value = H5Sget_regular_hyperslab(file_space_id[0], offset_f, NULL, count_f, NULL);
-        ret_value = H5Sget_regular_hyperslab(mem_space_id[0], offset_m, NULL, count_m, NULL);
-
-        /* Enlarge the size of the info for C and Re-allocate the memory */
-        if (info_count == info_size) {
-            info_size  *= 2;
-            info_stuff = (info_t *)realloc(info_stuff, info_size * sizeof(info_t));
-        }
-
-        /* Save the info in the structure.  It only works for contiguous dset and needs to support chunked dset */
-        strcpy(info_stuff[info_count].file_name, file_name);
-        strcpy(info_stuff[info_count].dset_name, dset_name);
-        info_stuff[info_count].dset_loc = dset_loc;
-        info_stuff[info_count].data_offset_file = offset_f[0] * dims_f[1];
-        info_stuff[info_count].nelmts = count_f[0] * count_f[1];
-        info_stuff[info_count].data_offset_mem = offset_m[0] * dims_m[1] + offset_m[1];
-
-        /* Increment the counter */
-        info_count++;
-
 	/* Initialize data selection info */
+        strcpy(selection_info.file_name, file_name);
+        strcpy(selection_info.dset_name, dset_name);
         selection_info.file_spaces   = selection_info.file_space_id_array;
 	selection_info.mem_spaces    = selection_info.mem_space_id_array;
 	selection_info.chunk_addrs   = selection_info.chunk_addr_array;
@@ -1954,9 +1861,8 @@ H5VL_bypass_dataset_read(size_t count, void *dset[],
 
 	selection_info.dtype_size = H5Tget_size(dset_dtype_id);
 
-	/* Only handle contiguous dataset and no datatype conversion */
+	/* Handle contiguous dataset here */
 	if (dset_layout == H5D_CONTIGUOUS && H5Tequal(dset_dtype_id, mem_type_id[0])) {
-	    printf("Handling contiguous datasets here\n");
 
 #ifndef TMP
 
@@ -1976,7 +1882,7 @@ H5VL_bypass_dataset_read(size_t count, void *dset[],
 #else
 	    element_size = H5Tget_size(dset_dtype_id);
 
-	    /* Find the correct data file and read the data with C functions */
+	    /* Find the correct data file and read the data with selection I/O function */
 	    for (i = 0; i < file_stuff_count; i++) {
 		if (!strcmp(file_stuff[i].name, file_name)) {
 		    eof = H5FDget_eof((H5FD_t *)file_stuff[i].vfd_file_handle, H5FD_MEM_DRAW);

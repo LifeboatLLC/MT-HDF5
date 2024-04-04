@@ -7,10 +7,11 @@
 void
 usage(void)
 {
-    printf("    [-h] [-c --dimsChunk] [-d --dimsDset] [-f --nFiles] [-k --checkData] [-n --nDsets] [-r --randomData] [-s --spaceSelect] [-t --nThreads]\n");
+    printf("    [-h] [-c --dimsChunk] [-d --dimsDset] [-e --enableChunkCache] [-f --nFiles] [-k --checkData] [-n --nDsets] [-r --randomData] [-s --spaceSelect] [-t --nThreads]\n");
     printf("    [-h --help]: this help page\n");
     printf("    [-c --dimsChunk]: the 2D dimensions of the chunks.  The default is no chunking.\n");
     printf("    [-d --dimsDset]: the 2D dimensions of the datasets.  The default is 1024 x 1024.\n");
+    printf("    [-e --enableChunkCache]: enable chunk cache for better data I/O performance in HDF5 library (not in Bypass VOL). The default is disabled.\n");
     printf("    [-f --nFiles]: for testing multiple files, this number must be a multiple of the number of threads.  The default is 1.\n");
     printf("    [-k --checkData]: make sure the data is correct while not running for benchmark. The default is false.\n");
     printf("    [-n --nDsets]: number of datasets in a single file.  The default is 1.\n");
@@ -32,6 +33,7 @@ parse_command_line(int argc, char *argv[])
     struct option long_options[] = {
                                     {"dimsChunk=", required_argument, NULL, 'c'},
                                     {"dimsDset=", required_argument, NULL, 'd'},
+                                    {"enableChunkCache", no_argument, NULL, 'e'},
                                     {"nFiles=", required_argument, NULL, 'f'},
                                     {"help", no_argument, NULL, 'h'},
                                     {"checkData", no_argument, NULL, 'k'},
@@ -45,6 +47,7 @@ parse_command_line(int argc, char *argv[])
     hand.num_threads              = 1;
     hand.num_files                = 1;
     hand.num_dsets                = 1;
+    hand.chunk_cache              = false;
     hand.plain_hdf5               = false;
     hand.check_data               = false;
     hand.random_data              = false;
@@ -55,7 +58,7 @@ parse_command_line(int argc, char *argv[])
     hand.chunk_dim2               = 0; /* No chunking.  Contiguous is the default. */
     hand.space_select             = 1;
 
-    while ((opt = getopt_long(argc, argv, "c:d:f:hkn:rs:t:", long_options, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "c:d:ef:hkn:rs:t:", long_options, NULL)) != -1) {
         switch (opt) {
             case 'c':
                 /* The dimensions of the chunks */
@@ -86,6 +89,12 @@ parse_command_line(int argc, char *argv[])
                 }
                 else
                     printf("optarg is null\n");
+                break;
+            case 'e':
+                /* Assign random values to the data during file creation */
+                fprintf(stdout, "enable chunk cache in the HDF5 library:\t\t\tTrue\n");
+                hand.chunk_cache = true;
+
                 break;
             case 'f':
                 /* The number of HDF5 files to be tested */

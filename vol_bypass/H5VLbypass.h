@@ -11,7 +11,7 @@
  * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
 /*
- * Purpose:	The public header file for the pass-through VOL connector.
+ * Purpose:	The public header file for the bypass VOL connector.
  */
 
 #ifndef _H5VLbypass_H
@@ -20,10 +20,10 @@
 /* Public headers needed by this file */
 #include "H5VLpublic.h"        /* Virtual Object Layer                 */
 
-/* Identifier for the pass-through VOL connector */
+/* Identifier for the bypass VOL connector */
 #define H5VL_BYPASS	(H5VL_bypass_register())
 
-/* Public characteristics of the pass-through VOL connector */
+/* Public characteristics of the bypass VOL connector */
 #define H5VL_BYPASS_NAME        "bypass"
 #define H5VL_BYPASS_VALUE       518           /* VOL connector ID */
 
