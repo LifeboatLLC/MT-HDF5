@@ -1,0 +1,14 @@
+\section{Internal VOL Property Frees/Copies}
+\label{sec:internal-vol-property-ops}
+
+The following internal library routines free or copy connector information buffers:
+
+\begin{itemize}
+    \item \texttt{H5CX\_retrieve\_state()} - This is a connector-initiated operation to save the API Context's information to a 'context state'. As part of this process, the connector property is directly copied - which involves incrementing the reference count of the connector class ID and copying the connector information.
+
+    \item \texttt{H5CX\_free\_state()} - This is the release routine associated with  \texttt{H5CX\_retrieve\_state()}.
+
+    \item \texttt{H5F\_\_set\_vol\_conn()} - Copies the connector information buffer as part of copying the entire VOL connector property to a target shared file object.
+
+    \item The previously described VOL connector property callbacks: create, get, set, copy. As a consequence of this, any library routines that copy or free entire property lists also copy or free connector information buffers.
+\end{itemize}

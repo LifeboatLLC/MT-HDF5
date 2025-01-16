@@ -1,0 +1,22 @@
+\section{Large Atomics and Atomic Modification of Untyped Buffers}
+\label{app:large-atomics}
+The atomic C operations provided in \texttt{stdatomic.h} only attempt to provide 'true' atomic read and write operations on types of 128 bits or less. More fundamentally, many processors only physically support truly atomic operations of up to 64 bits. 
+
+When a larger type is qualified as atomic, most compilers will still support effectively atomic operations on it via an internal locking mechanism, although the support for this varies by compiler: \href{https://gcc.gnu.org/onlinedocs/gcc/_005f_005fatomic-Builtins.html}{GCC} and \href{https://llvm.org/docs/Atomics.html}{Clang} support large, locking atomics, but \href{https://devblogs.microsoft.com/cppblog/c11-atomics-in-visual-studio-2022-version-17-5-preview-2/}{MSVC does not}. In the interest of minimizing dependence on compiler-specific workarounds, it would be ideal to keep all atomic operations and types below 64 bits in size.
+
+A related issue is atomic handling of untyped buffers (e.g. a buffer pointed to by \texttt{void*}). The C11 standard does not allow the \texttt{\_Atomic} qualifier to be applied to a void buffer. In order to operate on such a buffer in an atomic fashion, there are two options:
+
+\begin{itemize}
+    \item Use atomic types and operations with an algorithm such that all locking is done internally by the compiler and not by the library itself. See \ref{app:list-versioning}. This is the preferred solution for any operation that is repeated many times whose performance is important.
+    
+    \item Simply use a mutex or other synchronization primitive to lock the buffer during reads and writes. The is the preferred solution for less common operations, where performance is less important than the reduced complexity and overhead.
+\end{itemize}
+ 
+
+\subsection{Atomic Buffers via List Versioning}
+\label{app:list-versioning}
+Large atomic buffers could be implemented via 'versioning' in a lock-free linked list. Each write would add a new entry to the end of the list instead of modifying an existing buffer. Since entries are never modified except for their 'next' pointer (which is not part of the target buffer for reads), concurrent reads are always threadsafe. Concurrent writes have an order enforced upon them, ensuring a consistent data structure.
+
+For larger buffers, allowing this list to grow without bound could cause problematically high memory usage. This can be addressed by using standard mark-for-deletion algorithms, in conjunction with either 1. reference counting entries in the list (with a reference count of zero being cause for logical deletion), or 2. deep-copying target element buffers, rendering reference counting unnecessary and allowing all elements before the tail to be logically marked for deletion. 
+
+For a reference on lock-free singly linked list implementations, see Chapter 9.8 of \textit{The Art of Multiprocessor Programming} by Herlihy, Shavit, Luchangco, and Spear.

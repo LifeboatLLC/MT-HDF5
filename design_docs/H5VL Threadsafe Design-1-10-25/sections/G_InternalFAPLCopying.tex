@@ -1,0 +1,22 @@
+\section{Internal File Access Property List Duplication}
+\label{sec:internal-property-copies}
+
+This is a list of places where the library may internally duplicate properties stored on a FAPL:
+
+\begin{itemize}
+    \item \texttt{H5CX\_get\_vol\_connector\_prop()} - uses \texttt{H5P\_get()}, which causes a property copy. This is currently only used by \texttt{H5F\_\_set\_vol\_conn()} during file open/creation. This is a native VOL operation, and so this copy is trivially thread-safe since the native VOL has no info buffer.
+
+    \item \texttt{H5F\_\_build\_actual\_name()} - If the current VFD is compatible with POSIX I/O calls, then this may copy a FAPL and each of its properties during the file open process. This is performed during file open/creation.
+    
+    \item \texttt{H5VL\_\_file\_open\_find\_connector\_cb()} - Copies the FAPL that was initially provided to a file open operation. This only occurs when the default VOL (as tracked by \texttt{H5\_DEFAULT\_VOL}, currently hardcoded to the Native VOL) fails to open a file. As such, the Native VOL must be the one specified in the VOL connector property of the copied FAPL, and the fact that it has no information buffer makes it thread-safe.
+
+    If future changes to the library lead to a different VOL connector with a non-empty information buffer being a valid 'default' connector, then this will still be thread-safe within the library due to the lock or redesign on H5P.
+
+    \item \texttt{H5FD\_\_splitter\_populate\_config()} - Copies the default FAPL. Since this is done by a VFD which requires use of the Native VOL, there is no information buffer and the access is trivially thread-safe.
+
+    \item \texttt{H5F\_get\_access\_plist()} - Copies the default FAPL. Only used by Native VOL routines, so there is no information buffer and the access is trivially thread-safe.
+
+    \item \texttt{H5P\_\_lacc\_elink\_fapl\_(get/set/copy)()} - If the external link FAPL as specified in the property \texttt{H5L\_ACS\_ELINK\_FAPL\_NAME} is not the default FAPL, then it is duplicated by this set of callbacks.
+
+    \item \texttt{H5FD\_\_copy\_plist()} - A routine used by the splitter and subfiling VFDs to copy FAPLs. Since this is used by VFDs which require use of the Native VOL, there is no information buffer and the access is trivially thread-safe.
+\end{itemize}

@@ -1,0 +1,85 @@
+\section{Reference Count Tracking}
+
+In order to verify that the library can never change the reference count of an object held in another structure to zero, it is necessary to examine how the structs move throughout the library, and which routines perform reference count modification.
+
+\subsection{\texttt{H5VL\_class\_t}}
+
+\subsubsection{Initialization}
+
+\begin{itemize}
+    \item \texttt{H5VLregister\_connector()},  \texttt{H5VL\_\_register\_connector\_by\_(class/value/name)}, \\\texttt{H5VL\_\_register\_connector()} - These routines increment the ref count if the ID is already registered, or register the ID and set its ref count to 1. The corresponding decrement occurs in the application-invoked \texttt{H5VLunregister\_connector()}. With one exception, every invocation of the internal registration functions results from an API-level registration request.
+
+    \item \texttt{H5VL\_\_file\_open\_find\_connector\_cb()} - This is the exception to the statement that all VOL connector registrations result from API-level requests. A registration via this callback may result from failing a file open with the native VOL. The resulting new connector ID is saved on the VOL connector property in the FAPL provided to the file open API call. The corresponding reference count decrement of the connector occurs in \texttt{H5Pclose()} within the VOL connector property's close callback, \texttt{H5P\_\_facc\_vol\_close()}.
+    
+\end{itemize}
+
+\subsubsection{Reference Count Modification}
+
+\begin{itemize}
+
+
+
+    \item \texttt{H5F\_get\_access\_plist()} and \texttt{H5P\_set\_vol()} set the VOL connector property on the FAPL, and increment the ref count accordingly. The reference count incrementing occurs indirectly, via \texttt{H5P\_set()} $\rightarrow$ \texttt{H5VL\_conn\_copy()}.
+
+    \item \texttt{H5F\_\_set\_vol\_conn()} - Increments the reference count of the connector class when it is stored on the shared file object with a new copy of its connector information. It is decremented if a failure occurs. If it succeeds, then the corresponding decrement is in \texttt{H5F\_\_dest()} when the shared file handle is destroyed. 
+
+    \item \texttt{H5CX\_retrieve\_state()} - increments the reference count of the connector ID, since it is stored in a new context state object. Matching decrement in \texttt{H5CX\_free\_state()}. The invocation of these two routines is controlled by VOL connectors.
+
+
+    \item \texttt{H5VL\_new\_connector()} - Reference count of the class is incremented due to the connector being referenced from a new \texttt{H5VL\_t} object. Corresponding decrement is in \texttt{H5VL\_conn\_dec\_rc()}, when the created connector instance eventually has its \texttt{nrefs} dropped to zero.
+
+    \item \texttt{H5VL\_create\_object\_using\_vol\_id()} - Increments the reference count of the connector class due to constructing a new connector instance that references it. The corresponding decrement occurs when the connector is freed by \texttt{H5VL\_conn\_dec\_rc()}, which in this case must occur when the VOL object is freed, since the connector instance is stored on no other structure.
+
+    \item \texttt{H5VL\_\_get\_connector\_id(by\_(name/value))()} - Increases the reference count of the connector class ID due to returning it to the caller. Takes a parameter based on whether the request for the ID originated from a public API call.
+
+    
+    \begin{itemize}
+         \item \texttt{H5VLget\_connector\_id(by\_(name/value))()} - Requests the ID from the API, the corresponding decrement will occur as a result of application-controlled \texttt{H5VLclose()}.
+    
+        \item \texttt{H5VLunregister\_connector()} - Uses this routine internally to prevent unregistration of the native VOL connector. If the reference count incrementing occurs, it is undone at the end of this routine.
+    
+        \item \texttt{H5VL\_\_set\_def\_conn()} - Uses this routine to retrieve the ID of an already-registered connector, which is then stored on the FAPL VOL connector property, and should later be freed at property list cleanup time.
+    \end{itemize}
+
+\end{itemize}
+
+
+\subsection{\texttt{H5VL\_t}}
+
+\subsubsection{Initialization}
+\begin{itemize}
+    \item \texttt{H5VL\_new\_connector()} - Reference count of the new connector object is initialized at zero. Corresponding close routine is \texttt{H5VL\_conn\_dec\_rc()}. \texttt{nrefs} being initialized to zero and the free routine requiring the reference count to be decremented to exactly zero lead this structure potentially never being freed, if it is cleaned up before any references are created.
+    
+    \item \texttt{H5VL\_create\_object\_using\_vol\_id()} - Creates a new connector instance. This connector is not directly returned and is not attached to any structure besides the newly created VOL object; it is managed and freed entirely by the new VOL object that refers to it. The corresponding decrement occurs when the new VOL object is closed.
+    
+\end{itemize}
+
+\subsubsection{Reference Count Modification}
+\begin{itemize}
+    \item \texttt{H5(A/D/F/G/M/O/T)close\_async()} - Reference count increased in preparation for possible async operation, so that the connector is not closed if the object close operation results in a file close. Reference count is decreased at the end of this routine.
+
+    \item \texttt{H5VL\_\_new\_vol\_obj()} - Increments the ref count of the connector instance due to a newly created VOL object referencing it. Corresponding decrement is in \texttt{H5VL\_free\_object()} when the referencing object is freed.
+
+    \item \texttt{H5VL\_create\_object()} - Increments the ref count of the connector instance due to a newly created VOL object referencing it. Corresponding decrement is in \texttt{H5VL\_free\_object()} when the referencing object is freed.
+
+    \item \texttt{H5O\_refresh\_metadata()} - Increments the ref count of the connector instance in order to prevent the connector from being closed due to virtual dataset refreshes. Ref count is decremented later in the same function. These modifications occur directly to the \texttt{nrefs} field and will need to be converted to atomic fetch-and-adds.
+
+    \item \texttt{H5VL\_set\_vol\_wrapper()} - Increments the reference count of connector object due to instantiating a new VOL wrap context that references the connector. The corresponding decrement occurs when the wrapping context is freed by \texttt{H5VL\_\_free\_vol\_wrapper()} as invoked in \texttt{H5VL\_reset\_vol\_wrapper()}.
+
+
+\end{itemize}
+
+\subsection{\texttt{H5VL\_object\_t}}
+
+\begin{itemize}
+    \item \texttt{H5VL\_\_new\_vol\_obj()} - VOL object is created with a reference count of 1. Corresponding destruction is in \texttt{H5VL\_free\_object()} when the VOL object is freed. Invokes VOL wrap callbacks on the provided object data.
+
+    \item \texttt{H5VL\_create\_object()} - VOL object is created with a reference count of 1. Corresponding decrement is in \texttt{H5VL\_free\_object()} when the VOL object is freed. Does not invoke VOL wrap callbacks on the provided object data; it is stored directly on the VOL object.
+
+    \item \texttt{H5VL\_dataset\_(read/write)()} - Instantiates a temporary VOL object with a reference count of 1. The temporary object is allocated with stack memory and automatically released at the end of this routine.
+
+    \item \texttt{H5T\_\_initiate\_copy()} - Increments the reference count of the VOL object underlying a publicly exposed datatype object. This is done because the VOL object in memory is shared between the old and new datatype as a result of the datatype copy.
+
+    \item \texttt{H5T\_own\_vol\_obj()} - This routine changes the VOL object owned by a datatype object. The reference count of the old VOL object is decreases, as the datatype no longer references it, and the reference count of the new VOL object the datatype takes ownership of is increased.
+
+\end{itemize}

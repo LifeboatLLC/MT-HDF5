@@ -1,0 +1,74 @@
+\section{H5PL}
+\label{app:H5PL}
+
+The library's plugin module consists primarily of two global structures: a "plugin path table" of paths to search for dynamic plugins (\texttt{H5PL\_paths\_g}), and a cache of plugins that have been previously loaded (\texttt{H5PL\_cache\_g}). A dynamic plugin is a VOL connector, a virtual file driver, or an I/O filter that is loaded from a dynamically linked library (a library with the \texttt{.dll} extension on Windows, or the \texttt{.so} extension on a POSIX system) during the runtime of the HDF5 library.
+
+\subsection{Plugin Path Table}
+
+The plugin path table is a simple array of paths. When a plugin of a given type is requested, each path in this table is searched to find a dynamic plugin that fits the provided criteria. This search is carried out in the following circumstances:
+
+\begin{itemize}
+    \item During file driver registration (\texttt{H5FD\_register\_driver\_by\_(name/value)()}), to find the provided file driver within the file system
+
+    \item During VOL connector registration (\texttt{H5VL\_\_register\_connector\_by\_(value/name)()})
+
+    \item When searching for a valid VOL connector to open a file in \texttt{H5VL\_file\_open()} in the event that the native VOL connector's file open callback fails. 
+    
+    \item Checking filter availability in \texttt{H5Z\_filter\_avail()}
+
+    \item Loading an unloaded filter during application of the filter pipeline in \texttt{H5Z\_pipeline()}
+\end{itemize}
+
+When the capacity of the path table capacity is reached, it is reallocated and extended by a fixed amount. 
+
+The plugin path search array is exposed to applications. The provided API allows for inserting into or removing from the plugin path table at any arbitrary index. This allows for the target directories to be freely modified during the runtime of an application. Note that the runtime of path insertion operations to non-tail locations on the table scales with the number of plugin paths, since each subsequent path must be shifted forward to 'make room'.
+
+\subsection{Plugin Cache}
+
+The plugin cache is a global array of \texttt{H5PL\_plugin\_t} objects. While it is allocated and expanded in a similar fashion to the global path table, it is not publicly exposed.
+
+\begin{verbatim}
+typedef struct H5PL_plugin_t {
+    H5PL_type_t type;   /* Plugin type                          */
+    H5PL_key_t  key;    /* Unique key to identify the plugin    */
+    H5PL_HANDLE handle; /* Plugin handle                        */
+} H5PL_plugin_t;
+
+typedef enum H5PL_type_t {
+    H5PL_TYPE_ERROR  = -1, /**< Error                */
+    H5PL_TYPE_FILTER = 0,  /**< Filter               */
+    H5PL_TYPE_VOL    = 1,  /**< VOL connector        */
+    H5PL_TYPE_VFD    = 2,  /**< VFD                  */
+    H5PL_TYPE_NONE   = 3   /**< Sentinel: This must be last!   */
+} H5PL_type_t;
+
+typedef union H5PL_key_t {
+    int            id; /* I/O filters */
+    H5PL_vol_key_t vol;
+    H5PL_vfd_key_t vfd;
+} H5PL_key_t;
+
+#define H5PL_HANDLE             void *
+\end{verbatim}
+
+The cache's entries consist of three elements: a \texttt{type} enum specifying the nature of this dynamic plugin, a \texttt{key} used to compare located plugins to the target plugin, and a \texttt{handle} which acts as a pointer to the plugin value itself.
+
+During the routine to load a target plugin, \texttt{H5PL\_load()}, the plugin cache is checked before beginning the search through each directory in the plugin path table. If a match is found in the cache, then the load function returns a set of plugin information defined by the plugin's "get plugin info" callback, which should return a pointer to the \texttt{H5VL\_class\_t} struct for  VOL connector, an \texttt{H5FD\_class\_t} for a file driver, and an \texttt{H5Z\_class2\_t} for a filter. This class information is then copied by the caller before performing registration work - for example, the VOL module copies the provided class in \texttt{H5VL\_\_register\_connector()}.
+
+\subsection{Plugin Loading}
+
+The actual loading of a plugin located in one of the plugin paths is performed in \texttt{H5PL\_\_open()}. First, \texttt{dlopen} is used to load the dynamic library by filename, before the plugin-defined introspection callbacks (\texttt{H5PL\_get\_plugin\_type\_t} and \texttt{H5PL\_get\_plugin\_info\_t}) are loaded and used to retrieve plugin-specific information. If the plugin matches the provided search criteria (filter ID, VOL class/name, VFD class/name), it is added to the plugin cache. Otherwise, the dynamic library is closed.
+
+The motivation for the plugin cache is likely to optimize future searches by avoiding the need to open each dynamic library during a search, as well as the cost of iterating through each item in each provided directory.
+
+\subsection{Thread Safety}
+
+Since it makes heavy use of global variables, the plugin module is not threadsafe. 
+
+Acquiring a mutex on module entry to prevent concurrent access to the plugin cache and plugin path table would suffice to make this module fit into a threadsafe design.
+
+The primary difficulty in converting this module to support multi-threading is the plugin path table, since it allows modification to any entry in the array, preventing the use of lock-free patterns for lists that can only be modified at the head or tail. Any changes to the plugin path table that allowed it to be lock-free would likely be breaking API changes. 
+
+Converting the plugin cache to be lock-free would be much simpler, since it is only ever appended to, and does not support removal of entries. This conversion would likely involve turning the plugin cache into a linked list structure with dynamically allocated individual elements.
+
+Due to the relatively infrequent use of the plugin module during the lifetime of most applications, making H5PL multi-threaded would produce very minor gains in performance. In tandem with the difficulty of converting its global structures to lock-free structures, this suggests that placing it under a mutex is the best solution for the foreseeable future.

@@ -1,0 +1,300 @@
+\section{H5VL Structures}
+\subsection{H5VL\_class\_t}
+
+Represents a class of VOL connector. Contains pointers to its callbacks and metadata.
+
+\begin{verbatim}
+typedef struct H5VL_class_t {
+    /* Overall connector fields & callbacks */
+    unsigned           version;          /**< VOL connector class struct version number */
+    H5VL_class_value_t value;            /**< Value to identify connector               */
+    const char        *name;             /**< Connector name (MUST be unique!)          */
+    unsigned           conn_version;     /**< Version number of connector               */
+    uint64_t           cap_flags;        /**< Capability flags for connector            */
+    herr_t (*initialize)(hid_t vipl_id); /**< Connector initialization callback         */
+    herr_t (*terminate)(void);           /**< Connector termination callback            */
+
+    /* VOL framework */
+    H5VL_info_class_t info_cls; /**< VOL info fields & callbacks  */
+    H5VL_wrap_class_t wrap_cls; /**< VOL object wrap / retrieval callbacks */
+
+    /* Data Model */
+    H5VL_attr_class_t     attr_cls;     /**< Attribute (H5A*) class callbacks */
+    H5VL_dataset_class_t  dataset_cls;  /**< Dataset (H5D*) class callbacks   */
+    H5VL_datatype_class_t datatype_cls; /**< Datatype (H5T*) class callbacks  */
+    H5VL_file_class_t     file_cls;     /**< File (H5F*) class callbacks      */
+    H5VL_group_class_t    group_cls;    /**< Group (H5G*) class callbacks     */
+    H5VL_link_class_t     link_cls;     /**< Link (H5L*) class callbacks      */
+    H5VL_object_class_t   object_cls;   /**< Object (H5O*) class callbacks    */
+
+    /* Infrastructure / Services */
+    H5VL_introspect_class_t introspect_cls; /**< Container/conn introspection class callbacks */
+    H5VL_request_class_t    request_cls;    /**< Asynchronous request class callbacks */
+    H5VL_blob_class_t       blob_cls;       /**< 'Blob' class callbacks */
+    H5VL_token_class_t      token_cls;      /**< VOL connector object token class callbacks */
+
+    /* Catch-all */
+    herr_t (*optional)(void *obj, H5VL_optional_args_t *args, hid_t dxpl_id,
+                       void **req); /**< Optional callback */
+} H5VL_class_t;
+\end{verbatim}
+
+\subsubsection{H5VL\_class\_value\_t}
+
+This structure is a typedef'd integer that stores the ID that uniquely identifies each VOL connector.
+
+
+\subsubsection{H5VL\_info\_class\_t}
+
+This structure holds the size of the VOL information buffer (as stored on the FAPL property \texttt{H5F\_ACS\_VOL\_CONN\_NAME}), and pointers to VOL-defined callbacks to operate on this information.
+
+\begin{verbatim}
+typedef struct H5VL_info_class_t {
+    size_t size;                     /* Size of the VOL info */
+    void *(*copy)(const void *info); /* Callback to create a copy of the VOL info    */
+    herr_t (*cmp)(int *cmp_value, const void *info1, const void *info2); 
+        /* Callback to compare VOL info */
+    herr_t (*free)(void *info); /* Callback to release a VOL info */
+    herr_t (*to_str)(const void *info, char **str);
+    /* Callback to serialize connector's info into a string */
+    herr_t (*from_str)(const char *str, void  **info); 
+                       /* Callback to deserialize a string into connector's info */
+} H5VL_info_class_t;
+\end{verbatim}
+
+\subsubsection{H5VL\_wrap\_class\_t}
+
+This structure holds callbacks used to wrap and unwrap VOL objects by passthrough connectors from outside the usual VOL operation pipeline.
+
+
+\begin{verbatim}
+typedef struct H5VL_wrap_class_t {
+    void *(*get_object)(const void *obj); /* Callback to retrieve underlying object */
+    herr_t (*get_wrap_ctx)(const void *obj, void **wrap_ctx); 
+        /* Callback to retrieve the object wrapping context for the connector */
+    void *(*wrap_object)(void *obj, H5I_type_t obj_type, void *wrap_ctx); 
+        /* Callback to wrap a library object */
+    void *(*unwrap_object)(void *obj);    /* Callback to unwrap a library object */
+    herr_t (*free_wrap_ctx)(void *wrap_ctx); 
+        /* Callback to release the object wrapping context for the connector */
+} H5VL_wrap_class_t;
+\end{verbatim}
+
+
+\subsubsection{H5VL\_attr\_class\_t}
+
+This structure holds pointers to VOL-defined callbacks for operations on attributes.
+\begin{verbatim}
+typedef struct H5VL_attr_class_t {
+    void *(*create)(void *obj, const H5VL_loc_params_t *loc_params, const char *attr_name, 
+        hid_t type_id, hid_t space_id, hid_t acpl_id, hid_t aapl_id, hid_t dxpl_id, void **req);
+    void *(*open)(void *obj, const H5VL_loc_params_t *loc_params, const char *attr_name, 
+        hid_t aapl_id, hid_t dxpl_id, void **req);
+    herr_t (*read)(void *attr, hid_t mem_type_id, void *buf, hid_t dxpl_id, void **req);
+    herr_t (*write)(void *attr, hid_t mem_type_id, const void *buf, hid_t dxpl_id, void **req);
+    herr_t (*get)(void *obj, H5VL_attr_get_args_t *args, hid_t dxpl_id, void **req);
+    herr_t (*specific)(void *obj, const H5VL_loc_params_t *loc_params, 
+        H5VL_attr_specific_args_t *args, hid_t dxpl_id, void **req);
+    herr_t (*optional)(void *obj, H5VL_optional_args_t *args, hid_t dxpl_id, void **req);
+    herr_t (*close)(void *attr, hid_t dxpl_id, void **req);
+} H5VL_attr_class_t;
+\end{verbatim}
+
+\subsubsection{H5VL\_dataset\_class\_t}
+This structure holds pointers to VOL-defined callbacks for operations on datasets.
+\begin{verbatim}
+typedef struct H5VL_dataset_class_t {
+    void *(*create)(void *obj, const H5VL_loc_params_t *loc_params, const char *name, 
+        hid_t lcpl_id, hid_t type_id, hid_t space_id, hid_t dcpl_id, hid_t dapl_id, 
+        hid_t dxpl_id, void **req);
+    void *(*open)(void *obj, const H5VL_loc_params_t *loc_params, const char *name,     
+        hid_t dapl_id, hid_t dxpl_id, void **req);
+    herr_t (*read)(size_t count, void *dset[], hid_t mem_type_id[], hid_t mem_space_id[],
+        hid_t file_space_id[], hid_t dxpl_id, void *buf[], void **req);
+    herr_t (*write)(size_t count, void *dset[], hid_t mem_type_id[], 
+        hid_t mem_space_id[], hid_t file_space_id[], hid_t dxpl_id, const void *buf[], void **req);
+    herr_t (*get)(void *obj, H5VL_dataset_get_args_t *args, hid_t dxpl_id, void **req);
+    herr_t (*specific)(void *obj, H5VL_dataset_specific_args_t *args, hid_t dxpl_id, 
+        void **req);
+    herr_t (*optional)(void *obj, H5VL_optional_args_t *args, hid_t dxpl_id, void **req);
+    herr_t (*close)(void *dset, hid_t dxpl_id, void **req);
+} H5VL_dataset_class_t;
+\end{verbatim}
+
+
+\subsubsection{H5VL\_datatype\_class\_t}
+This structure holds pointers to VOL-defined callbacks for operations on datatypes.
+\begin{verbatim}
+typedef struct H5VL_datatype_class_t {
+    void *(*commit)(void *obj, const H5VL_loc_params_t *loc_params, const char *name, 
+        hid_t type_id, hid_t lcpl_id, hid_t tcpl_id, hid_t tapl_id,
+        hid_t dxpl_id, void **req);
+    void *(*open)(void *obj, const H5VL_loc_params_t *loc_params, 
+        const char *name, hid_t tapl_id, hid_t dxpl_id, void **req);
+    herr_t (*get)(void *obj, H5VL_datatype_get_args_t *args, hid_t dxpl_id, void **req);
+    herr_t (*specific)(void *obj, H5VL_datatype_specific_args_t *args, hid_t dxpl_id, void **req);
+    herr_t (*optional)(void *obj, H5VL_optional_args_t *args, hid_t dxpl_id, void **req);
+    herr_t (*close)(void *dt, hid_t dxpl_id, void **req);
+} H5VL_datatype_class_t;
+\end{verbatim}
+
+\subsubsection{H5VL\_file\_class\_t}
+This structure holds pointers to VOL-defined callbacks for operations on files.
+\begin{verbatim}
+typedef struct H5VL_file_class_t {
+    void *(*create)(const char *name, unsigned flags, hid_t fcpl_id, hid_t fapl_id, 
+        hid_t dxpl_id, void **req);
+    void *(*open)(const char *name, unsigned flags, hid_t fapl_id, hid_t dxpl_id, void **req);
+    herr_t (*get)(void *obj, H5VL_file_get_args_t *args, hid_t dxpl_id, void **req);
+    herr_t (*specific)(void *obj, H5VL_file_specific_args_t *args, hid_t dxpl_id, void **req);
+    herr_t (*optional)(void *obj, H5VL_optional_args_t *args, hid_t dxpl_id, void **req);
+    herr_t (*close)(void *file, hid_t dxpl_id, void **req);
+} H5VL_file_class_t;
+\end{verbatim}
+
+\subsubsection{H5VL\_group\_class\_t}
+This structure holds pointers to VOL-defined callbacks for operations on groups.
+
+\begin{verbatim}
+typedef struct H5VL_group_class_t {
+    void *(*create)(void *obj, const H5VL_loc_params_t *loc_params, const char *name, 
+        hid_t lcpl_id, hid_t gcpl_id, hid_t gapl_id, hid_t dxpl_id, void **req);
+    void *(*open)(void *obj, const H5VL_loc_params_t *loc_params, const char *name, 
+        hid_t gapl_id, hid_t dxpl_id, void **req);
+    herr_t (*get)(void *obj, H5VL_group_get_args_t *args, hid_t dxpl_id, void **req);
+    herr_t (*specific)(void *obj, H5VL_group_specific_args_t *args, hid_t dxpl_id, 
+        void **req);
+    herr_t (*optional)(void *obj, H5VL_optional_args_t *args, hid_t dxpl_id, void **req);
+    herr_t (*close)(void *grp, hid_t dxpl_id, void **req);
+} H5VL_group_class_t;
+\end{verbatim}
+
+\subsubsection{H5VL\_link\_class\_t}
+This structure holds pointers to VOL-defined callbacks for operations on links.
+\begin{verbatim}
+typedef struct H5VL_link_class_t {
+    herr_t (*create)(H5VL_link_create_args_t *args, void *obj, const H5VL_loc_params_t *loc_params,
+        hid_t lcpl_id, hid_t lapl_id, hid_t dxpl_id, void **req);
+    herr_t (*copy)(void *src_obj, const H5VL_loc_params_t *loc_params1, void *dst_obj,
+                   const H5VL_loc_params_t *loc_params2, hid_t lcpl_id, hid_t lapl_id, 
+                   hid_t dxpl_id, void **req);
+    herr_t (*move)(void *src_obj, const H5VL_loc_params_t *loc_params1, void *dst_obj,
+                   const H5VL_loc_params_t *loc_params2, hid_t lcpl_id, hid_t lapl_id, 
+                   hid_t dxpl_id, void **req);
+    herr_t (*get)(void *obj, const H5VL_loc_params_t *loc_params, H5VL_link_get_args_t *args, 
+    hid_t dxpl_id, void **req);
+    herr_t (*specific)(void *obj, const H5VL_loc_params_t *loc_params, 
+    H5VL_link_specific_args_t *args, hid_t dxpl_id, void **req);
+    herr_t (*optional)(void *obj, const H5VL_loc_params_t *loc_params, 
+        H5VL_optional_args_t *args, hid_t dxpl_id, void **req);
+} H5VL_link_class_t;
+\end{verbatim}
+
+\subsubsection{H5VL\_object\_class\_t}
+This structure holds pointers to VOL-defined callbacks for operations on objects.
+\begin{verbatim}
+typedef struct H5VL_object_class_t {
+    void *(*open)(void *obj, const H5VL_loc_params_t *loc_params, H5I_type_t *opened_type, 
+        hid_t dxpl_id, void **req);
+    herr_t (*copy)(void *src_obj, const H5VL_loc_params_t *loc_params1, const char *src_name, 
+        void *dst_obj, const H5VL_loc_params_t *loc_params2, const char *dst_name, 
+        hid_t ocpypl_id, hid_t lcpl_id, hid_t dxpl_id, void **req);
+    herr_t (*get)(void *obj, const H5VL_loc_params_t *loc_params, H5VL_object_get_args_t *args, 
+        hid_t dxpl_id, void **req);
+    herr_t (*specific)(void *obj, const H5VL_loc_params_t *loc_params, 
+        H5VL_object_specific_args_t *args, hid_t dxpl_id, void **req);
+    herr_t (*optional)(void *obj, const H5VL_loc_params_t *loc_params, H5VL_optional_args_t *args,
+                       hid_t dxpl_id, void **req);
+} H5VL_object_class_t;
+\end{verbatim}
+
+\subsubsection{H5VL\_introspect\_class\_t}
+
+This structure contains pointers to callbacks to introspect VOL connector metadata such as capability flags and optional operations.
+\begin{verbatim}
+typedef struct H5VL_introspect_class_t {
+    herr_t (*get_conn_cls)(void *obj, H5VL_get_conn_lvl_t lvl, 
+        const struct H5VL_class_t **conn_cls);
+    herr_t (*get_cap_flags)(const void *info, uint64_t *cap_flags);
+    herr_t (*opt_query)(void *obj, H5VL_subclass_t cls, int opt_type, uint64_t *flags);
+} H5VL_introspect_class_t;
+\end{verbatim}
+
+\subsubsection{H5VL\_request\_class\_t}
+
+This structure contains pointers to callbacks used for asynchronous requests by VOL connectors.
+\begin{verbatim}
+typedef struct H5VL_request_class_t {
+    herr_t (*wait)(void *req, uint64_t timeout, H5VL_request_status_t *status);
+    herr_t (*notify)(void *req, H5VL_request_notify_t cb, void *ctx);
+    herr_t (*cancel)(void *req, H5VL_request_status_t *status);
+    herr_t (*specific)(void *req, H5VL_request_specific_args_t *args);
+    herr_t (*optional)(void *req, H5VL_optional_args_t *args);
+    herr_t (*free)(void *req);
+} H5VL_request_class_t;
+\end{verbatim}
+
+\subsubsection{H5VL\_blob\_class\_t}
+
+This structure containers pointers to callbacks used by VOL connectors for operations on 'blob' objects.
+\begin{verbatim}
+typedef struct H5VL_blob_class_t {
+    herr_t (*put)(void *obj, const void *buf, size_t size, void *blob_id, void *ctx);
+    herr_t (*get)(void *obj, const void *blob_id, void *buf, size_t size, void *ctx);
+    herr_t (*specific)(void *obj, void *blob_id, H5VL_blob_specific_args_t *args);
+    herr_t (*optional)(void *obj, void *blob_id, H5VL_optional_args_t *args);
+} H5VL_blob_class_t;
+\end{verbatim}
+
+\subsubsection{H5VL\_token\_class\_t}
+
+This structure contains pointers to callbacks used by VOL connectors for operations on object tokens.
+\begin{verbatim}
+typedef struct H5VL_token_class_t {
+    herr_t (*cmp)(void *obj, const H5O_token_t *token1, const H5O_token_t *token2, int *cmp_value);
+    herr_t (*to_str)(void *obj, H5I_type_t obj_type, const H5O_token_t *token, char **token_str);
+    herr_t (*from_str)(void *obj, H5I_type_t obj_type, const char *token_str, H5O_token_t *token);
+} H5VL_token_class_t;
+
+\end{verbatim}
+
+
+
+
+
+
+\subsection{H5VL\_t}
+
+A particular instance of a VOL class defined by an \texttt{H5VL\_class\_t}.
+
+\begin{verbatim}
+typedef struct H5VL_t {
+    const H5VL_class_t *cls;   /* Pointer to connector class struct                    */
+    int64_t             nrefs; /* Number of references by objects using this struct    */
+    hid_t               id;    /* Identifier for the VOL connector                     */
+} H5VL_t;
+\end{verbatim}
+
+
+\subsection{H5VL\_object\_t}
+
+A wrapper structure for objects returned from the VOL layer.
+
+\begin{verbatim}
+typedef struct H5VL_object_t {
+    void   *data;      /* Pointer to connector-managed data for this object    */
+    H5VL_t *connector; /* Pointer to VOL connector struct                      */
+    size_t  rc;        /* Reference count                                      */
+} H5VL_object_t;
+\end{verbatim}
+
+\subsection{H5VL\_connector\_prop\_t}
+
+Information about a connector to be stored on a FAPL.
+
+\begin{verbatim}
+typedef struct H5VL_connector_prop_t {
+    hid_t       connector_id;   /* VOL connector's ID                                   */
+    const void *connector_info; /* VOL connector info, for open callbacks               */
+} H5VL_connector_prop_t;
+\end{verbatim}

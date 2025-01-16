@@ -1,0 +1,15 @@
+\section{Limitations of the Global Mutex}
+
+Modules that are not thread-safe are planned to be placed under a 'global mutex' which prevents concurrent execution from threads in those modules. Only a single thread will be able to execute in those modules at a time. However, threads in thread-safe modules may continue operating concurrently with a thread under the global lock. Due to this fact, the global mutex does not necessarily suffice to prevent all thread-safety issues. Consider the following example:
+
+\begin{enumerate}
+    \item Module A is thread-safe, and Module B is not. Module B operations occur under a global mutex.
+
+    \item Module A invokes a Module B operation that deep copies from a buffer owned by Module A.
+
+    \item During the Module B deep copy, another thread in Module A concurrently writes to the buffer which is being deep copied.
+\end{enumerate}
+
+In order for the global mutex to suffice, operations in non-thread-safe modules must not read from buffers which thread-safe modules may concurrently write to, and must not write to buffers which thread-safe modules may concurrently read from.
+
+If the buffer in the earlier example were wrapped in a Module B-controlled object, such that all read or write operation must proceed through Module B, then the global mutex would suffice to let Module A be thread-safe while using Module B. This basic pattern is used by H5P and will suffice to protect property buffers from concurrent access.

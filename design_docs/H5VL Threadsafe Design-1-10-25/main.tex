@@ -1,0 +1,860 @@
+\documentclass{article}
+
+% Language setting
+% Replace `english' with e.g. `spanish' to change the document language
+\usepackage[english]{babel}
+
+% For colored text
+% \usepackage{xcolor}
+\usepackage[dvipsnames]{xcolor}
+
+\usepackage{subfiles}
+% Set page size and margins
+% Replace `letterpaper' with `a4paper' for UK/EU standard size
+\usepackage[letterpaper,top=2cm,bottom=2cm,left=3cm,right=3cm,marginparwidth=1.75cm]{geometry}
+
+% Useful packages
+\usepackage{amsmath}
+\usepackage{graphicx}
+
+
+% For tables
+\usepackage{array}
+% Bibliography
+\usepackage{biblatex}
+\usepackage{csquotes}
+
+\usepackage[colorlinks=true, allcolors=blue]{hyperref}
+
+\title{Threadsafe H5VL Design}
+\author{Matthew Larson}
+
+\begin{document}
+\maketitle
+
+\tableofcontents
+
+\newpage
+\section{Introduction}
+
+This document is an overview of the necessary changes (as in HDF5 1.14.2) to make the H5VL module thread-safe, with the goal of supporting concurrent operations at and eventually below the virtual object layer. Some modules which H5VL makes use of, such as H5P or H5CX, have existing thread-safe design proposals which will be referenced when relevant.
+
+Each major section of this document begins with an outline of the current library behavior, before describing the necessary changes to make the described sections multi-thread safe.
+
+\subsection{Assumptions}
+
+This document makes a number of assumptions about the implementation of multi-threading within the library.
+
+\begin{itemize}
+    \item Library initialization and shutdown will be performed a single-threaded manner. This will likely not be the case in the final production version, but for an initial prototype it will suffice.
+
+    \item The multi-threaded rework of H5I described in \href{https://github.com/LifeboatLLC/MT-HDF5/blob/main/design_docs/H5I-2024-07-30.pdf}{this document} and implemented in \href{https://github.com/LifeboatLLC/Experimental/tree/1_14_2_multithread}{this branch} is in use.
+
+    \item Most internal library modules will remain under the global mutex. Some (H5P, H5CX) will eventually have a multi-thread-safe implementation, but for now will remain under the global mutex.
+\end{itemize}
+
+\subsection{Overview of H5VL}
+
+The Virtual Object Layer (VOL) portion of the HDF5 library separates the low-level implementations of operations from the HDF5 API routines that invoke them. A write to a dataset may correspond to writing a block of bytes on a filesystem, creating an object in a cloud storage bucket, or something else entirely based on the active VOL connector(s). The application-visible behavior of the library is (ideally) identical regardless of the active VOL connector, allowing the VOL layer to be entirely transparent.
+
+A VOL connector consists primarily of a set of several callbacks implementing major operations on each major HDF5 object class - files, datasets, groups, etc. Most HDF5 API operations on objects eventually invokes one or more of these callbacks, delegating control to the VOL connector. 
+
+The VOL connector used by a given operation is determined by the File Access Property List (FAPL) provided as an argument for file open, create, and delete operations. For all other operations, the VOL connector is determined by the library objects provided as arguments. Each library object stored information about the VOL connector used to create or access it, and this information is used to decide the VOL connector used for the majority of library operations.
+
+A 'stack' of multiple VOL connectors may be active on any given operation. There are two kinds of VOL connectors: passthrough and terminal. Passthrough VOL connectors perform some kind of operation, such as logging, before delegating control to the next VOL connector in the stack. Terminal VOL connectors exist at the bottom of the stack and actually implement the expected operation, interacting with storage or a storage-equivalent. Only one terminal connector may exist in the stack at one time.
+
+The H5VL module exists between the high-level API and the VOL connector callbacks. It handles the creation and destruction of generic VOL objects, associates those objects with their VOL connector and with library-defined high level objects, performs the registration and unregistration of VOL connectors, and routes operations to the appropriate VOL callbacks.
+
+\subsubsection{H5VL Files}
+The 'H5VL module' consists of the following files:
+
+\begin{itemize}
+    \item H5VL.c
+    \item H5VLcallback.c
+    \item H5VLdyn\_ops.c
+    \item H5VLint.c
+    \item H5VLconnector.h
+    \item H5VLpkg.h
+    \item H5VLprivate.h
+    \item H5VLpublic.h
+    \item H5VLmodule.h
+\end{itemize}
+
+The following files compose the Native VOL connector and the Internal Passthrough connector, and while they are not part of the H5VL module proper, some minor changes to them are necessary for multi-thread safety:
+\begin{itemize}
+    \item H5VLpassthru.c
+    \item H5VLpassthru.h
+    \item H5VLconnector\_passthru.h
+
+    \item H5VLnative.c
+    \item H5VLnative\_private.h
+    \item H5VLnative\_attr.c
+    \item H5VLnative\_blob.c
+    \item H5VLnative\_dataset.c
+    \item H5VLnative\_datatype.c
+    \item H5VLnative\_file.c
+    \item H5VLnative\_group.c
+    \item H5VLnative\_introspect.c
+    \item H5VLnative\_link.c
+    \item H5VLnative\_object.c
+    \item H5VLnative\_token.c
+    \item H5VLnative.h
+\end{itemize}
+
+\section{Global Variables}
+\subsection{Global Connector IDs}
+
+\subsubsection{Overview}
+The HDF5 library uses global variables to track the registration status and ID of the native VOL connector and the Internal Passthrough VOL connector.
+
+Each of these global IDs is used during the respective VOL's registration and termination, and is read from in a handful of other places in the library. Each ID is publicly exposed for reading via a macro that returns the result of their registration callback - \texttt{H5VL\_NATIVE} and \texttt{H5VL\_PASSTHRU}.
+
+\subsubsection{Changes for Multi-Thread Safety}
+
+Since the native connector is registered during library initialization, cannot be unregistered, and cannot have its H5I-assigned ID change over the lifetime of the library, placing its registration under a lock should ensure thread safety with a minimal impact on performance. 
+
+The passthrough connector can be registered and unregistered multiple times, and so it makes more sense to convert it to an atomic variable.
+
+\subsection{Default VOL Connector}
+\label{sec:defaultconnector}
+
+\subsubsection{Overview}
+The phrase 'default VOL connector' is used at various points within the library and its documentation to refer to any of the following:
+
+\begin{itemize}
+    \item The VOL connector identified by the library's default FAPL. This is the connector used by API routines provided with the \texttt{H5P\_DEFAULT} property list.
+
+    \item The static connector property \texttt{H5VL\_def\_conn\_s}, a global instance of the VOL connector property structure \texttt{H5VL\_connector\_prop\_t}. This is set once during library initialization, released during library shutdown, and used for just a single check during file open.
+
+    \item The Native VOL Connector. This is always considered 'the default VOL' by \texttt{H5VL\_\_is\_default\_conn()} and \texttt{H5\_DEFAULT\_VOL}.
+\end{itemize}
+
+The static connector property and the VOL on the default FAPL refer to different instances of the same VOL connector, unless \texttt{H5Pset\_vol()} is used to modify the VOL connector property of the default FAPL. In this case, the static connector property will not change and the two will diverge. This behavior is likely unintentional.
+
+\subsubsection{Changes for Multi-Thread Safety}
+
+Because the static VOL connector property is constant after library initialization (with the exception of tests in \texttt{vol.c}), no changes are needed to make concurrent access to this structure thread-safe. 
+
+If any future need arises which motivates allowing the static connector to be changed during the runtime of the library, that operation will likely be uncommon enough to placing the operation under the global mutex a suitable solution. Note that the static connector property does not have access to its value mediated by H5P routines, which makes it a special case from all other connector properties, and prevents access and modification of the static connector property from automatically being threadsafe as a consequence of H5P being threadsafe (either due to the global mutex or the H5P redesign). 
+
+Given the relatively few places the static connector property is used within the library, and the potential it has to introduce threadsafety problems, it may prove useful to remove it entirely.
+
+To prevent unexpected behavior from concurrent modification of the active VOL on the default FAPL, \texttt{H5Pset\_vol()} should throw an error if it is used on the default FAPL. Technically, the library could allow this behavior, but no valid use case is known of and it seems far more likely to lead only to confusion and unexpected behavior.
+
+\section{The VOL Connector Property}
+
+\subsection{Overview}
+
+The VOL connector used for file open, create, and delete operations is decided by the FAPL provided to that operation. Specifically, by the VOL connector property on the provided FAPL. The VOL connector property (\texttt{H5VL\_connector\_prop\_t}) consists of an H5I-assigned VOL connector ID and a connector-defined information buffer.
+
+Some specific details of H5P's property handling are relevant here. Each property on a property list is associated with a set of unique callbacks: create, get, set, copy, delete, and close. The create, get, set, and copy callbacks for a property are expected to duplicate the underlying property information in way that must later be cleaned up by either the delete or close callback.
+
+In general, property callbacks occur not only as a direct result of API-level operations on H5P, but can also be indirectly triggered by internal library operations. A list of places where internal library operations can trigger property copy callbacks on FAPLs is included in Appendix \ref{sec:internal-property-copies}.
+
+For a VOL connector property specifically, duplication consists of increasing the ID's reference count and copying the connector information buffer. Correspondingly, a delete or close consists of decreasing the reference count and releasing the information buffer.
+
+An individual analysis of each internal operation that can trigger property duplication is unnecessary for a thread safety analysis, because all access to the VOL property is routed through H5P, which either acquires the global mutex or is thread safe. 
+
+\subsection{Connector Information Buffer}
+\label{sec:conn-info}
+\subsubsection{Overview}
+
+The connector information buffer is part of the VOL connector property. Each VOL connector may, through the callbacks and fields of the \texttt{info\_cls} portion of the VOL connector class structure, define an expected size and structure for its information buffer. 
+
+\paragraph{Purpose}
+
+The information buffer is primarily used by passthrough VOL connectors, which are required to define it to contain at least the H5I-assigned ID of the next connector in the connector stack and the information buffer of the next connector in the connector stack. Passthrough connectors use this information to delegate control to the next connector in the connector stack during a handful of VOL operations, most notably file create, file open, and file delete.
+
+However, it is possible for any VOL connector, not just passthrough connectors, to introspect the information buffer within those operations and perform arbitrary actions based on the information found. 
+
+\paragraph{Source}
+
+The connector information buffer is provided to a VOL property on a property list in one of two ways:
+
+\begin{itemize}
+    \item When H5Pset\_vol() is used to set the VOL property on a file access property list, a connector information buffer may be provided.
+    
+    \item During library initialization, the environment variable HDF5\_VOL\_CONNECTOR may optionally contain VOL connector information in addition to a connector name. The information is expected to separated from the VOL name by a space. If this variable is defined and contains information, that information is set on both the default FAPL and the static connector property.
+    
+    The information buffer on the static connector property is properly set up at library initialization and released at library termination, but is otherwise unused at present.
+\end{itemize}
+
+\paragraph{Handling}
+
+Connector information buffers are always bundled with the connector ID as part of a connector property. As such, copying of information buffers is performed indirectly whenever a property copy, create, get, or set operation is performed. At these times, the VOL property's internal info duplication routine (\texttt{H5VL\_copy\_connector\_info()})  delegates copying to info\_cls.copy() if it is defined, or memcpy() and malloc() otherwise.
+
+Similarly, release of connector information buffers happens indirectly whenever a VOL connector property is closed or deleted, at which point the VOL property's internal info release routine (\texttt{H5VL\_free\_connector\_info()}) delegates the release operation to info\_cls.free() if it is defined, or free() otherwise.
+
+There are several internal library routines which may free or copy connector information buffers as an indirect result of freeing or copying a FAPL. A list of these internal operations can be found in Appendix \ref{sec:internal-vol-property-ops}. An individual analysis of each is unnecessary for a thread safety analysis, because all accesses to the VOL property are routed through H5P, which either acquires the global mutex or is thread safe due to the redesign.
+
+
+
+\subsubsection{Thread Safety Analysis}
+
+The global mutex acquisition within H5P does not suffice to automatically make the connector information buffer operations thread safe because invocation of VOL property callbacks is not always routed through H5P. For example, use of the to\_str and from\_str callbacks is exposed through the public API. 
+
+There are two independent factors to consider: whether or not the application provides an information buffer, and whether or not the active connector expects an information buffer (i.e. whether it is a passthrough connector, has info\_cls callbacks defined, or introspects the connector information buffer during any other operations).
+
+\paragraph{Application does not provide an info buffer, and VOL does not expect an info buffer}
+
+No connector information-related operations are performed. Trivially thread safe.
+
+\paragraph{Application does not provide an info buffer, and VOL expects an info buffer}
+
+Operations that expect connector information will fail in a manner unrelated to thread safety. Trivially thread safe.
+
+\paragraph{Application provides an info buffer, and VOL does not expect an info buffer}
+
+The provided info buffer is only handled by the generic malloc(), memcpy() and free() routines. Since the information is deep copied to a new buffer at each property copy, the underlying info buffer is never shared between two property instances.
+
+\paragraph{Application provides an info buffer, and VOL expects an info buffer}
+
+Thread safe only if the connector information copy callback does one of the following:
+
+\begin{itemize}
+    \item performs a deep copy to a new buffer on each invocation
+    \item returns a pointer to a buffer that is constant after connector initialization and is not modified until connector shutdown
+\end{itemize}
+
+If the buffer is non-constant and shared, it would be possible for e.g. the library to free a connector information buffer that a VOL callback is reading from, or for the library to read an information buffer that a VOL callback is modifying.
+
+Consider the following scenario as an example:
+
+\begin{enumerate}
+    \item Thread 1 and Thread 2 begin an operation within a multi-threaded VOL callback that receives a FAPL. Each receives the ID indicating a FAPL that is properly being shared between threads
+
+    \item Thread 1 uses H5Pget\_vol() to retrieve the VOL connector property. Recall that this implicitly invokes the info copy callback. Thread 1 now has direct access to an information buffer. 
+
+    \item Thread 2 also uses H5Pget\_vol() to retrieve the VOL connector property, and then begins a read from the information buffer.
+
+    \item Thread 1 modifies its connector information buffer. 
+\end{enumerate}
+
+If the information copy callback does not allocate a new buffer, then a torn write may occur. A deep-copying callback prevents scenarios such as this from being unsafe, since any operation on a information buffer after H5Pget\_vol() will operate on a unique, independent information buffer.
+
+Note that even connector-level locking within information callbacks won't prevent a scenario such as this from being unsafe, if the copy callback does not allocate a new buffer.
+
+\subsubsection{Changes for Multi-Thread Safety}
+
+No changes are necessary within the library proper to make the connector information buffer multi-thread safe. It need only be documented that the connector-defined information copy callback, if defined, should perform an actual deep copy of the underlying buffer, or return a pointer to a constant buffer. This is not required by the property callback interface, which permits properties to reference count and share buffers to emulate deep copies.
+
+\section{The VOL Object Wrapping Context}
+
+\subsection{Overview}
+
+\subsubsection{Object Wrapping}
+
+Different VOL connectors within a connector stack are likely to have different representations of the same object. As a concrete example, consider using the library's Internal Passthrough connector and the Native VOL connector to open a file. The Native VOL represents a file as an \texttt{H5F\_t} instance, and the Internal Passthrough represents it as an instance of \texttt{H5VL\_pass\_through\_t}. The translation between the \texttt{H5F\_t} and \texttt{H5VL\_pass\_through\_t} is referred to as "wrapping" the object, and the reverse is "unwrapping" it.
+
+In the majority of cases, this process of wrapping and unwrapping is performed directly by the passthrough VOL callbacks that interact with objects. In some cases, however, the library needs to create or unwrap an ID or object pointer from somewhere that does not pass through the connector callbacks. As such, it is necessary for the library to have some way to directly invoke the VOL connector stack's object wrapping and unwrapping functionality.
+
+The VOL object wrapping context and its associated callbacks exist to support these cases. The wrapping context stores information needed to properly pass individual objects between connectors.
+
+\subsubsection{The Object Wrapping Context}
+
+There are a number of architectural parallels between the object wrapping context and the connector information buffer:
+
+\begin{itemize}
+    \item Both are treated as untyped buffers which are never introspected by the library
+
+    \item Both have callbacks defined in a section of the VOL class (\texttt{wrap\_cls} and \texttt{info\_cls})
+
+    \item Both are required for Passthrough connectors to properly pass on control to lower connectors in the stack and both must include, at a minimum, the H5I-assigned ID of the next connector as well as its own counterpart for the next connector in the stack, e.g. the wrapping context structure must contain the context of the next connector, and the connector information must contain the information of the next connector.
+\end{itemize}
+
+The most significant high-level difference between the connector information buffer and the object wrapping context is how the library treats copying. The connector information has its copying delegated to a connector-defined callback, with a default fallback to malloc and free. By contrast, the wrapping context has no copy callback, and is always referenced counted by the library itself through the \texttt{H5VL\_wrap\_ctx\_t} structure.
+
+Note that the library is agnostic as to the specific implementation of \texttt{get\_wrap\_ctx}. The connector may implement this routine to provide a pointer to a global wrapping context, or allocate a new context each time. Similarly, no constraints are imposed upon what may be done with the wrapping context within the callbacks - connectors are free to modify it.
+
+Because the wrapping context is not exposed to applications, neither an application nor the library itself will ever share the wrapping context between multiple threads. The reference count exists to manage multiple clients from within a single thread.
+
+\subsubsection{Object Wrapping Callbacks}
+
+The object wrapping class provides five connector-defined callbacks: get object, wrap object, unwrap object, get wrap context, and free wrap context. Of those, only the wrap object, get wrap context, and free wrap context callbacks interact with the wrap context itself.
+
+\begin{itemize}
+    \item \texttt{herr\_t get\_wrap\_ctx(const void *obj, void **wrap\_ctx)} - Retrieves the VOL object wrapping context for the current connector and, implicitly, all connectors below it. \texttt{obj} is an object wrapped by this VOL connector and all connectors below it. The wrap context should be dynamically allocated under \texttt{wrap\_ctx} in a manner such that it can later be released by a call to \texttt{free\_wrap\_ctx()}. This routine should involve recursive allocation of resources for lower VOL connectors through \texttt{H5VLget\_wrap\_ctx()}.
+    
+    \item \texttt{void *wrap\_object(void *obj, H5I\_type\_t obj\_type, void *wrap\_ctx)} - Perform this VOL's wrapping operation on the provided object and return it. The provided \texttt{obj} buffer should not be modified, since it was provided by another connector and its contents cannot be introspected.
+
+    \item \texttt{herr\_t free\_wrap\_ctx(void *wrap\_ctx)} - Releases the VOL wrapping context \texttt{wrap\_ctx}, freeing any resources that were allocated within \texttt{get\_wrap\_ctx()}. This routine will involve directly freeing this connector's own allocated resources before recursively freeing the resources allocated by all lower VOLs through \texttt{H5VLfree\_wrap\_ctx()}.
+\end{itemize}
+
+\subsection{Changes for Multi-Threading}
+
+The wrapping context's reference count should be made atomic.
+
+It should be documented that all multi-threaded VOL connectors which define a wrapping context must allocate a separate wrapping context on each invocation of \texttt{get\_wrap\_ctx}. This ensures thread safety by preventing a wrapping context from ever being shared between threads, similar to the connector information buffer.
+
+
+\section{H5VL Structures}
+\label{sec:refcounting}
+
+\subsection{Overview}
+
+The H5VL module defines and works with three major structures:
+
+\begin{itemize}
+    \item VOL Connector Classes - \texttt{H5VL\_class\_t}. Each VOL class is a collection of callbacks, VOL capability flags, and other information that defines a VOL connector.
+    
+    VOL classes are reference-counted by H5I.
+
+    \item VOL Connector Instances - \texttt{H5VL\_t}. Each VOL Connector instance exists to track information pertaining to a VOL class, and is used to indirectly associate VOL objects with their connector class. 
+    
+    VOL connector instances track their own reference count, and track their corresponding VOL class both by direct pointer and by H5I-assigned ID.
+
+    \item VOL Objects - \texttt{H5VL\_object\_t}. Each VOL object represents a particular high-level HDF5 object (file, group, dataset, etc.) as represented by a particular VOL connector. When the H5VL module and other high level modules in the library receive objects from or pass objects down to the VOL layer, the objects are exchanged as VOL objects in order to abstract away the differences in object representations between different VOL connectors.
+
+    VOL objects track their own reference count, and store a pointer to their associated VOL connector instance. They contain an untyped data buffer which is only interpreted by the active VOL connector(s).
+\end{itemize}
+
+\subsection{Changes for Multi-Thread Safety}
+
+\texttt{H5VL\_t} and \texttt{H5VL\_object\_t} must have their reference counts converted into atomic variables. \texttt{H5VL\_class\_t} has its reference counts handled by H5I, which already has a multi-thread safe implementation. 
+
+In addition, there tare several constraints that must hold for operations on these structures to be multi-thread-safe:
+
+
+\begin{enumerate}
+    \item These objects must have their reference count incremented \textit{before} a thread attempts to acquire them from the global index or copy them, not after the acquisition or copy succeeds. To accomplish this, a memory fence must exist between the increment and subsequent verify/copy operations. 
+
+    This precaution should ideally be unnecessary: if the internal interface is being used correctly, these operations will always be passed an object that holds a reference to the structure, and so the structure should never have its reference count drop to zero before the operation is over. Regardless, it is best to proactively detect and prevent this behavior.
+
+    \item Similarly, any 'ownership transfer' operations must perform the incrementing of reference count due to the new owner's reference before the corresponding decrement due to removal of the original owner's reference.
+
+    \item Any modification of the objects must occur atomically. 
+    
+    \begin{itemize}
+        \item For \texttt{H5VL\_class\_t}, the only potential violation of this constraint is in its \texttt{size} field of its \texttt{info\_cls} subclass. As part of the redesign, the entire \texttt{H5VL\_class\_t} instance should be considered read-only after creation. Marking the individual \texttt{size} field as a constant is a possible solution, but would introduce backwards compatibility issues with existing connectors and so is not preferred. 
+
+        \item For \texttt{H5VL\_t}, the reference count will be converted to an atomic. The stored pointer to the VOL class and the class ID are constant after initialization.
+
+        \item For \texttt{H5VL\_object\_t}, the pointer to the connector is already constant after creation, since the connector that an object belongs to can never be changed. The reference count will be converted to an atomic variable. The \texttt{data} buffer is dependent upon multi-threaded VOL connectors to modify it only in a thread-safe manner, but as long as the top-level pointer is not modified, the VOL layer itself can treat it as a constant value.
+    \end{itemize}
+    
+    \item After the reference count of an structure is decremented as part of a free or close operation, the operation must not reference or read from the object. This constraint also applies to single-threaded programs and already holds for all library operations.
+\end{enumerate}
+
+
+
+ The following is a list of  H5VL routines which require changes in order to uphold these constraints. While some of these routines are in modules that reside under the global mutex, it is still necessary to make their access and modification patterns multi-thread-safe, as the global mutex only prevent concurrent execution of two routines that both attempt to acquire it. It is still possible for an operation under the global mutex to occur concurrently with any multi-thread-safe routine in H5VL.
+
+
+\paragraph{Functions That Need Atomic Ref Count Handling}
+
+These functions already handle reference counts and H5VL structure duplication in the correct manner, and just need slight changes to modify the reference counts through atomic increment/decrement routines.
+
+
+\begin{itemize}
+    \item \texttt{H5VL\_conn\_copy()} - This function must also properly decrement the reference count on failure. The fact that it does not do so is currently an issue even in HDF5 1.14.2.
+
+    \item \texttt{H5(A/D/F/G/M/O/T)close\_async()}
+
+    \item \texttt{H5O\_refresh\_metadata()}
+\end{itemize}
+
+
+\paragraph{Functions That Need Operation Reordering}
+
+These functions need to have reference-count incrementing re-ordered to occur before operations that duplicate (directly or through IDs/handles) VOL structures.
+
+\begin{itemize}
+    \item \texttt{H5VL\_new\_connector()}
+    \item \texttt{H5VL\_create\_object\_using\_vol\_id()}
+    \item \texttt{H5VL\_\_new\_vol\_obj()}
+    \item \texttt{H5VL\_\_set\_def\_conn()}
+    \item \texttt{H5VL\_create\_object()}
+
+\end{itemize}
+
+
+\paragraph{Functions That Need Operation Reordering and Failure Handling}
+
+These operations need to have reference-count incrementing re-ordered to occur before operations that duplicate (directly or through IDs/handles) VOL structures, but also require additional logic to undo the reference count incrementing if a failure occurs at certain times (e.g. the reference count of a connector is speculatively incremented for a new object, but the creation of that object fails).
+
+\begin{itemize}
+    \item \texttt{H5F\_\_set\_vol\_conn()}
+
+    \item \texttt{H5CX\_retrieve\_state()}
+
+    \item \texttt{H5T\_own\_vol\_obj()}
+\end{itemize}
+
+\section{VOL Connector Registration}
+\label{sec:registration}
+
+\subsection{Overview}
+
+Before they can be used, VOL connectors must be registered with the library and assigned an ID by H5I. The same connector may be registered multiple times, in which case the previous registration is to be discovered and its reference count incremented, to avoid needless internal duplication. VOL connectors may be unregistered by applications, and are automatically unregistered during library shutdown.
+
+
+At present, the registration for a VOL connector proceeds as follows:
+
+\begin{itemize}
+    \item \texttt{H5VL\_\_register\_connector\_by\_(class/name/value)()} is invoked.
+
+    \item \texttt{H5I\_iterate()} searches the global index for an already-registered VOL connector class that matches the provided class/name/value.
+
+    \item If a connector is found:
+
+    \begin{itemize}
+    \item \texttt{H5VL\_\_get\_connector\_cb()} returns the connector class's ID to the registration function.
+
+    \item The registration function increments the reference count of the connector ID, to represent that another view into the underlying VOL class object will be created and returned to the caller.
+    \end{itemize}
+
+
+    \item If a registered connector is not found:
+    
+    \begin{itemize}
+        \item If attempting to register a connector by name or value, instead attempt to load a matching connector class from H5PL's cache and register it.
+
+        \item If attempting to register a connector by class, directly register the provided connector class.
+    \end{itemize}
+\end{itemize}
+
+\subsection{Changes for Multi-Thread Safety}
+
+The VOL connector registration process has a region of time between when the registered VOL connector is retrieved from H5I/H5PL and the point at which its reference count is incremented, during which time another thread could free the connector.
+
+To eliminate this region, the process of searching for a registered connector will be reworked for the multi-threaded case. The present multi-threaded H5I implementation exposes a new interface for iterating through IDs within an index: \texttt{H5I\_get\_first()} and \texttt{H5I\_get\_next()}. The multi-threaded H5VL design will replace its use of \texttt{H5I\_iterate()} with these functions, in a manner that increments the reference count before attempting any other operations using a retrieved connector.
+
+\subsection{Connector Registration on File Open Failure}
+
+\subsubsection{Overview}
+
+The H5VL routine that invokes the VOL connector's file open callback may perform VOL connector registration if the initial file open attempt fails. It searches through the plugin cache for a cached connector class to register and use for another attempt at opening the file. However, the VOL class it actually for this file open attempt is not the newly registered instance, but is instead the non-reference-counted connector class stored in the plugin cache. Since the plugin cache is only emptied at library shutdown, the reference to this class should always be valid, and this behavior is safe if somewhat unintuitive.
+
+\subsubsection{Changes for Multi-Thread Safety}
+
+While the use of a cached connector class is not strictly a thread-safety issue, it still warrants changing to prevent subtle issues from creeping into the library at a later date. 
+
+The following set of changes will remove the dependence on a cached plugin:
+
+\begin{itemize}
+    \item Remove the \texttt{cls} field from \texttt{H5VL\_file\_open\_find\_connector\_t}. It is redundant since the desired information can be found by unwrapping the connector ID under the connector property. Also remove the write to this field from \texttt{H5VL\_\_file\_open\_find\_connector\_cb()}.
+
+    \item Modify \texttt{H5VL\_file\_open()} to use \texttt{H5I\_object()} to unwrap the new VOL class object provided by \texttt{H5VL\_\_file\_open\_find\_connector\_cb()} via the connector property's ID field. 
+
+    Then, use this unwrapped VOL class in the subsequent \texttt{H5VL\_\_file\_open()} call.
+\end{itemize}
+
+This is the only place in the library where \texttt{H5VL\_\_file\_open\_find\_connector\_cb()} and \\\texttt{H5VL\_file\_open\_find\_connector\_t} used, so no other considerations for their behavior are necessary.
+
+\subsection{VOL Connector Unregistration}
+\label{sec:unregistration}
+
+\subsubsection{Overview}
+
+VOL connector unregistration may occur as a result of the following operations:
+\begin{itemize}
+    \item \texttt{H5VLunregister\_connector()} or \texttt{H5VLclose()} invocation by application
+
+    \item The freeing/deletion of a VOL connector property on a FAPL (this results in the use of \texttt{H5VL\_conn\_free()}).
+
+    \item During failure cleanup in \texttt{H5VL\_\_set\_def\_conn()}
+\end{itemize}
+
+Note that if the library is operating properly, failures during \texttt{H5VL\_new\_connector()} and \\ \texttt{H5VL\_create\_object\_using\_id()} will not be able to result in connector unregistration, since these routines receive pre-existing references to the connector ID as a parameter which should never be cleaned up during the course of the routine, even on failure.
+
+The actual process of connector unregistration is done through \texttt{H5I\_dec\_ref()} or \texttt{H5I\_dec\_app\_ref()}. If these routines would decrease the ref count of the VOL connector ID to zero, then they first invoke the VOL connector ID's ID free callback (\texttt{H5VL\_\_free\_cls()}) before removing the VOL connector ID from the global index.
+
+\subsubsection{Changes for Multi-Threading}
+
+Because unregistration of connectors is handled through H5I, which already has a multi-thread safe implementation, no changes to the unregistration process are necessary.
+
+
+\section{Dynamic Optional Operations}
+
+\subsection{Overview}
+Dynamic optional operations are a system for allowing VOL connectors to have an arbitrary number of optional operations. Optional operations may be provided for each object subclass (e.g. file, group, datatype) or provided directly to a VOL connector. 
+
+For a full overview of how optional VOL operations work, see Appendix ~\ref{app:optionaloperations}. This section will focus on the parts of the dynamic operations module directly relevant to multi-threading in H5VL.
+
+\subsection{The Global Optional Operations Array}
+\subsubsection{Overview}
+Dynamically registered optional operations on VOL connectors are stored in a global array of pointers to skip lists, \texttt{H5VL\_opt\_ops\_g}, with one skip list per object subclass (file, group, dataset, etc.). \texttt{H5VL\_\_register\_opt\_operation()} is used both to initialize these skip lists, and to add individual operations into each skip list. The skips lists of optional operations for each object subclass are indexed by operation name. No provision is made within the table itself for distinctions between VOL connectors; any connector querying a given operation name will receive the same operation back. 
+
+The motivation for storing dynamic operations in a global array, rather than as attachments to individual VOL connectors, seems to have been passthrough VOL connectors. The dynamic operation table being shared allows passthrough VOL connectors to look up the operations registered by lower VOL connectors, and then invoke them by providing the retrieved operation type to \texttt{H5VL<object>\_optional\_op()} or \texttt{H5VLoptional()}. 
+
+If the array were not global, then in order for a passthrough VOL to invoke a particular optional operation on a lower VOL connector, the operation type information would have to be passed up and down the VOL connector stack in some way. While it might be possible to achieve this in principle with the connector information buffer or VOL wrap context, this would require inter-connector memory management of shared buffers to store operation names dynamically. The global array simplifies the process by only requiring passthrough VOLs to know the names of the optional operations.
+
+
+
+\subsubsection{Changes for Multi-Threading}
+
+A multi-thread safe implementation of the dynamic optional operations routines would require substantial locking to control access to the global operations table. Simply converting it to an atomic array and using atomic operations to access and modify it would not ensure thread safety. Consider two concurrent threads that each retrieve the pointer to a skip list from the array atomically. The first releases the skip list's memory, and then the second thread attempts to perform an operation on the freed skip list, leading to undefined behavior.
+
+Given the substantial amount of locking that a threadsafe dynamic optional operations implementation would require, and the extremely infrequent of the dynamic operations routines during typical library usage, it makes the most sense to simply keep all dynamic operations routines under the global mutex. This may be revisited after the initial prototype if it proves harmful to performance.
+
+\section{Dependencies}
+\label{sec:dependencies}
+
+\subsection{H5I}
+
+A thread-safe implementation of H5VL requires a thread-safe implementation of H5I. Just placing H5I operations under the global mutex would not be enough to prevent thread-safety issues. A threadsafe implementation of H5I already exists, and this design was created with it in mind.
+
+\subsection{H5P}
+
+Acquisition of the global mutex on entry to H5P routines will suffice for a thread-safe H5VL implementation. This is because reads and writes to properties occur through the H5P routines \texttt{H5P\_get()} and \texttt{H5P\_set()}. When properties are read, their value should be deep copied by H5P (either via \texttt{memcpy()} or a property-specific callback). Thus, no buffers are exposed in a non-thread-safe way. 
+
+\subsection{H5CX}
+\label{sec:dependencies-h5cx}
+
+\subsubsection{Overview}
+
+The API Context may be thought of as a threadlocal, operation-local collection of global variables. Internal library routines may either write to or query to determine the behavior of certain operations, similar to a property list.
+
+Values in the API Context may be retrieved through getters of the form \texttt{H5CXget\_<field>()} and modified through setters of the form \texttt{H5CXget\_<field>()}.
+
+The API context allows VOL connectors to save its values to an "API Context State" object from which they may be re-loaded at a later time, in order to support pausing and resuming API operations while keeping the API context consistent. Unlike when values are set on the API Context itself, saving the API Context's values to state object involving deep-copying the value, whether by incremeting a reference count or allocating new memory.
+
+\subsubsection{The VOL Wrapping Context}
+
+The H5CX setter and getter for the VOL wrapping context simply store and return a pointer to the original buffer, performing no copy operation and not incrementing the wrapping context's reference count. As a result, multiple clients to H5CX within the same thread may end up referring to the same VOL wrapping context. 
+
+During API Context State creation, the wrapping context is copied to the state object by incrementing its reference count and copying its pointer.
+
+\subsubsection{The VOL Connector Property}
+
+Because the API Context stores fields from property lists provided to API operations, it also stores the VOL connector property for the current API operation. It stores the connector property in an untyped buffer, without incrementing the reference count of the class ID or attempting to copy the connector information buffer. The VOL Connector Property field of the API Context allows the property value to be accessed while bypassing H5P routines.
+
+During API Context State creation, the class ID ref count is increased, and the connector information buffer is copied by the usual process - see Section \ref{sec:conn-info}.
+
+The API Context stores two seemingly independent references to the same underlying VOL Connector Property for a given operation. One is the VOL Connector Property field \texttt{vol\_connector\_prop}, and one is indirect through the stored FAPL. While this is a point of interest for an H5CX redesign, it presents no multi-threading problems itself since the API Context is threadlocal and these two fields cannot be accessed concurrently. 
+
+\subsubsection{Changes for Multi-Threading}
+
+H5CX requires no changes for the H5VL multi-thread implementation. The potentially-shared resources to which it has access (the VOL connector property, the VOL wrap context) have access mediated by H5VL, H5I, and the VOL connector itself. The constraints imposed on the connector information buffer and the VOL wrap context ensure that access through H5CX is safe, as long as API-level objects are reference counted correcly by the application.
+
+\subsection{H5E}
+
+H5E is currently not thread-safe itself due to an API which allows the error stacks of other threads to be directly modified by applications. However, H5VL's usage of H5E never provides it with access to any shared buffers, and never makes use of the problematic API calls. Thus, once H5E is placed under the global mutex, there are only two points to consider:
+
+\begin{enumerate}
+    \item The macros \texttt{HGOTO\_ERROR}, \texttt{HERROR}, and  \texttt{HDONE\_ERROR} as used from H5VL must not be provided with buffers that are shared between threads for their error messages. This constraint already holds for all H5VL routines. 
+    
+    \texttt{H5VLunregister\_opt\_operation()} references a user-provided buffer (\texttt{op\_name}) within an error macro. This buffer must be treated as constant by the user, and this should be documented.
+
+    \item H5E allows for arbitrary user-defined callbacks to be executed when iterating through an error stack. If a user does define such a callback, it must not reference any shared state that may be accessed outside H5E. 
+\end{enumerate}
+
+H5E is planned for a thread-safe implementation, but the global mutex should suffice for an initial prototype of H5VL.
+
+\subsection{H5SL}
+
+Skip lists are not thread safe. However, only the dynamic optional operations routines within H5VL are clients to H5SL. Since the dynamic optional operation routines are already planned to stay under the global mutex, no changes to H5SL are necessary. 
+
+\subsection{H5FL}
+
+The HDF5 free lists that optimize memory allocation are not multi-thread safe, so free lists should not be used from modules that support multi-threading.
+
+For the sake of performance, when the library is built with multi-threading enabled, the free lists that are only used by single-thread modules will be unaffected. Only free lists that could be accessed by multiple threads concurrently will be disabled.
+
+Note that some free lists are shared between multi-threaded and single-threaded regions. For example, the free list for instances of the datatype structure \texttt{H5T\_t} is declared and used in the single-threaded \texttt{H5T.c}, but is shared with the primarily multi-threaded \texttt{H5Tcommit.c}. (Recall that in order for top-level H5T operations to be truly-multithreaded at the VOL layer, the global mutex had to be pushed down below most H5T operations.) In the future it may be worthwhile to divide these into distinct free lists so that they may be more precisely enabled and disabled, but for an initial implementation it will suffice to disable any free list that is ever shared with a multi-threaded module.
+
+\subsection{Other Dependencies}
+
+Most modules are not planned for a thread-safe implementation and will need to acquire the global mutex on entry. 
+
+The modules H5VL directly uses which are not planned for thread-safety are:
+
+\begin{itemize}
+    \item H5T - H5VL uses the following H5T routines:
+
+    \begin{itemize}
+        \item \texttt{H5T\_construct\_datatype()} is invoked on a newly constructed VOL object that is not yet public and cannot be exposed to other threads. As such, all operations conducted within this routine should be thread-safe.
+    
+        \item \texttt{H5T\_get\_named\_type()} is a wrapper around retrieving the VOL object pointer from an H5T\_t.
+    
+        \item \texttt{H5T\_already\_vol\_managed()} - Compares the \texttt{vol\_obj} field of an \texttt{H5T\_t} to NULL.
+    
+    \end{itemize}
+
+    These invocations are all safe, as long as modifications to \texttt{H5T\_t} instances by the library are always conducted under a global mutex. If they were not, then it is possible (albeit unlikely) for a concurrent write to an \texttt{H5T\_t} to be interrupted, and for one of these reads to find a malformed partially-written \texttt{vol\_obj} pointer under \texttt{H5T\_t}.
+
+    \item H5PL - Placing this under the global mutex will suffice for a thread-safe H5VL. See Appendix ~\ref{app:H5PL} for details.
+    
+    \item H5MM - This module is a wrapper around system memory allocation routines, which are thread-safe.
+
+\end{itemize}    
+
+Several more modules which are not planned for thread-safety are used by H5VL only during library initialization, which (at least during the initial implementation of multi-threading) will be carried out in a single-threaded manner. As such, these use of these modules during initialization does not technically impose any additional constraints. These modules are:
+
+\begin{itemize}
+    \item H5T
+    \item H5O
+    \item H5D
+    \item H5F
+    \item H5G
+    \item H5A
+    \item H5M
+    \item H5CX
+    \item H5ES
+    \item H5Z
+    \item H5R
+\end{itemize}
+
+Any module not specifically planned for thread-safety is also assumed to be under the global mutex. 
+
+The acquisition of the global lock by routines in these modules will most likely be done through a set of \texttt{FUNC\_ENTER\_*} macros. This method of implementation allows for routines within a module to be considered thread-safe or not thread-safe on an individual basis. 
+
+\section{Lock Acquisition}
+\label{sec:locks-outside}
+
+\subsection{Overview}
+
+Multi-thread support to key library packages such as H5VL and H5I will not suffice to allow applications to fully utilize multi-threaded VOL operations. While H5VL will be able handle multiple threads and execute VOL operations concurrently in isolation, higher-level routines such as H5Fcreate() and H5Dread() still acquire a global mutex at entry and hold it until exit, preventing multiple threads from reaching H5VL concurrently in the first place. Since thorough multi-threaded testing of the H5VL design and VOL callbacks is necessary before moving on to other modules, some change is necessary.
+
+\subsection{Changes for Multi-Thread Safety}
+
+The planned solution is to implement multi-thread safety for select operations within the H5F, H5D, H5A, H5T, H5L, H5G, and H5O modules that mainly delegate tasks to VOL operations. These tasks include create, open, read, write, get, close, as well as 'specific' and 'optional' operations. Since these routines do little to no internal processing before invoking a VOL callback, the solution should consist of little more than removing the global mutex acquisition, enabling concurrent execution without significant overhead.
+
+In order to support the removal of global lock acquisition from these top-level HDF5 routines, the acquisition of the lock should be 'pushed down' to wrap around all non-multithread-safe calls that these routines make before invoking H5VL. This primarily applies to routines in H5P and H5CX, as these are the most commonly used modules during operation setup. Since these modules are planned for a thread-safe implementation in the near future, this locking should be a relatively short-term solution. 
+
+The order of events for a typical VOL operations would then be
+
+\begin{enumerate}
+\item Application invokes API routine corresponding to a VOL operation in a multi-threaded manner, without acquiring the global mutex
+\item During setup, the lock is acquired before and released after \textit{only} those operations that are part of non-multithread-safe modules
+\item The corresponding H5VL operation is invoked without the global mutex
+\item If the active VOL connector supports multi-threading, the corresponding VOL callback is invoked by H5VL without the global mutex.
+\item Otherwise, the global mutex is acquired before and released after the VOL callback execution
+
+\end{enumerate}
+
+\section{Miscellaneous}
+
+\subsection{VOL Connector Callbacks}
+
+Existing VOL connectors were not created with concurrency in mind, since the HDF5 library did not provide support for it. As such, the H5VL layer needs to be able to dynamically decide whether or not the acquire the lock before invoking VOL callbacks, depending on the active VOL connector.
+
+To accomplish this, we can query the existing VOL capability flag \texttt{H5VL\_CAP\_FLAG\_THREADSAFE}, which should be set if the VOL connector supports concurrency. The global mutex will be acquired only if this flag is not set.
+
+Connectors for which some but not all callbacks are thread-safe may set this flag as true, and then grab the global mutex in their own callbacks via \texttt{H5TSmutex\_acquire()} on a callback-by-callback basis as necessary.
+
+
+\subsection{Issues with single-threaded reference counting}
+\label{sec:single-thread-issues}
+\subsubsection{H5VL\_t Free with Zero Ref Count}
+
+The constructor for \texttt{H5VL\_t} initializes its \texttt{nrefs} field to zero, before any VOL objects that reference the connector are instantiated. If a failure occurs before such a VOL object is created, then the cleanup routine which decrements the reference count of \texttt{H5VL\_t}, \texttt{H5VL\_conn\_dec\_rc()}, will make its reference count negative (since it is stored as a signed integer). This will prevent the object's memory from being freed.
+
+This issue can potentially occur during \texttt{H5ESinsert\_request()} and \texttt{H5VL\_register\_using\_vol\_id}.
+
+In the short term, this can be resolved by special failure handling in the \texttt{H5VL\_t} constructor. In the longer term, the reference count handling of \texttt{H5VL\_t} should be reworked. It would be best to deal with this when integrating with changes made to the HDF5 library after version 1.14.5, since a side effect of those changes is to remove this special case. 
+
+\section{Testing}
+\label{sec:testing}
+
+\subsection{Framework}
+
+The library's existing test framework, testframe, has no support for running tests in a multi-threaded manner. Support for running a test in multiple threads concurrently will be added through a new set of flags, provided to the test framework at the time a test is added. The number of threads that the flagged tests are run with will be decided by a command-line argument. 
+
+It will be necessary to integrate the existing API tests with testframe to take advantage of this multi-thread support. 
+
+It will also be necessary to expand the test framework to properly aggregate the results of tests. For example, if a tests passes in most threads but fails in one, the overall result should be reported as a failure.
+
+\subsection{Test Scenarios}
+In general, completely exhaustive testing of multi-threaded systems is nearly impossible due to the myriad ways thread scheduling and instruction reordering can vary across compilers, architectures, machines, and individual testing runs. As such, this test framework aims to maximize the chance of bug discovery by using as much of the VOL interface as possible from a varying number of threads with a variety of VOL connector stack setups. 
+
+Each test scenario outlined in this section should be conducted with a number of concurrent threads ranging from one to the upper bound supported by the current machine. If this makes testing take a prohibitively long time, then a random selection of threadcounts in this range can be selected for testing. Testing some pattern of fixed thread counts (e.g. power-of-2) is less likely to elicit unusual thread scheduling issues. 
+
+Two new VOL connectors will be necessary for comprehensive testing:
+
+\begin{itemize}
+    \item A multi-threaded terminal connector that transparently replicates Native VOL operations, so that it may be tested using the existing API tests.
+
+    \item A multi-threaded passthrough connector
+\end{itemize}
+
+The test scenarios should also be conducted with each of the following VOL connector stack permutations:
+
+\begin{itemize}
+    \item A single-threaded terminal connector
+    \item A multi-threaded terminal connector
+    \item A single-threaded passthrough connector and a single-threaded terminal connector
+    \item A single-threaded passthrough connector and a multi-threaded terminal connector
+
+    \item A multi-threaded passthrough connector and a single-threaded terminal connector
+    \item A multi-threaded passthrough connector and a multi-threaded terminal connector
+
+    \item Two passthrough connectors, both single-threaded, and a single-threaded terminal connector
+
+    \item Two passthrough connectors, the top single-threaded and the lower multi-threaded, and a single-threaded terminal connector
+    
+    \item Two passthrough connectors, the top multi-threaded and the lower single-threaded, and a single-threaded terminal connector
+        
+    \item Two passthrough connectors, both multi-threaded, and a single-threaded terminal connector
+\end{itemize}  
+
+Scenarios with two passthrough connectors are included in order to test the passthrough-to-passthrough use case. It is not necessary to vary the terminal connector's threadedness in these scenarios, since all permutations of the passthrough-to-terminal connector use case are already tested.
+
+Any single-threaded connector will implicitly throttle all connectors below it to also be single threaded due to the global mutex, but it is worth testing to make sure that this behavior is honored in each of these cases.
+
+It is likely that the extensive nature of this testing will make it much more time and resource-intensive than the rest of the HDF5 testing suite, and so it may make sense to offer a reduced multi-threaded testing suite for users, while the main library runs the extensive testing suite at some regular interval (e.g. once per week).
+
+\subsection{VOL Connector Testing}
+\subsubsection{API Tests}
+
+The library already has a test suite specifically for use by VOL connectors: the HDF5 API tests, or 'h5 api' tests. Through the existing dynamic plugin loading system (i.e. the environment variables \texttt{HDF5\_VOL\_CONNECTOR} and \texttt{HDF5\_PLUGIN\_PATH}), it is simple to change the active VOL connector stack and re-execute this test suite.
+
+This test suite does not support testing manually linked connectors. Testing manually-linked connectors in this fashion is not planned for the following reasons:
+
+\begin{itemize}
+    \item Manually linked connectors generally use an H5P routine defined in their own custom header files to set that connector on a FAPL. Incorporating this into the test suite is implausible.
+
+    \item Aside from the use of H5PL for loading previous dynamic connectors, the registration process is largely the same regardless of how the connector is linked, so it is unlikely that any bad behavior would be unearthed by specially testing the manual linking case.
+\end{itemize}
+
+\subsubsection{Other Tests}
+
+In addition to the API tests, the library has a suite of tests meant only to be used with the Native VOL. 
+
+Whether or not these tests should be run with a variable number of threads varies from test-to-test, based on whether or not library-internal functions are directly used.
+
+Any test which uses library-internal functions should not be run concurrently from multiple threads, since this would be a violation of the global mutex and likely lead to errors that would never occur during actual library operation.
+
+Any test which uses purely the public API should be run concurrently from multiple threads, in order to more thoroughly test that the global mutex allows for proper operation of the native VOL.
+
+\subsubsection{Dummy Multi-Threaded Terminal VOL}
+To elicit usage patterns in H5VL specific to multi-threaded VOL connectors, a dummy multi-threaded terminal VOL connector is needed. This connector should allow concurrent thread execution within VOL callbacks. 
+Since creating a fully multi-threaded VOL that can handle operations within the same file would be a substantial task, each thread in this connector will perform operations on its own file. Since the testing harness will execute a sequence of HDF5 operations that are expected to be API-compliant within each individual thread, all API tests within each thread should pass. 
+
+This connector will consist almost entirely of a small wrapper around the Native VOL that acquires the global mutex.
+
+This dummy multi-threaded terminal VOL will be used in testing all permutations of the VOL connector stack that end with a multi-threaded connector. 
+
+\subsubsection{Dummy Multi-threaded Passthrough VOL}
+
+The interest in testing passthrough VOL connectors specifically is due to the fact that they re-enter the H5VL module from the API layer during their callback operations, a pattern that may elicit issues not detected during testing of terminal connectors alone.
+
+The existing internal passthrough connector performs no-ops before passing execution down to the terminal connector. It should be straightforward to create a multi-threaded passthrough counterpart that does the same, but with the thread-safe capability flag enabled to allow multiple concurrent threads. Since this passthrough VOL will not do any meaningful wrapping or memory work, it should be trivially thread-safe.
+
+\subsection{VOL Layer Testing}
+\label{sec:vol-layer-testing}
+
+Testing of H5VL should be able to take place largely without any VOL connectors that support multi-threaded functionality, since the issues that a multi-threaded H5VL design must resolve exist above the VOL connector's callback implementations. The exception is testing the thread-safe capability flag and the application-level mutex control, which will require a new dummy VOL.
+
+Specific scenarios which should have dedicated tests include:
+
+\begin{itemize}
+    \item Concurrent registration and subsequent use of the same VOL connector from multiple threads. This should work without issue as long as the application does not modify the class during registration. Specifically, the expected behavior is that an order is imposed on the registration operations and the registration which occurs second results in reference-counted usage of the first connector class.
+
+    \item Concurrent registration and unregistration of the same VOL connector from different threads. Unregistrations should safely decrement the reference count of the VOL class ID, as long as the API to acquire the connector ID is used. 
+
+    \item Use of a VOL connector that is registered as a result of a file open failure with the native VOL (e.g. a plugin loaded and registered from the plugin cache). This will guard against any future changes in the internal memory management of H5PL. This will require construction of a test with a forced file open failure, which can likely be achieved with a built-in malformed file.
+
+    \item Use of a VOL connector that uses the thread-safe capability flag, but acquires the global mutex internally in some or all of its callbacks that are not thread-safe. This primarily evaluates the library's public thread-safety module rather than H5VL. However, since the thread-safety flag for VOL connectors relies on the application-controlled mutex, it is logical to include this in the testing process.
+
+     \item Concurrent registration of dynamic operations, to test that the atomic creation of lists in \texttt{H5VLdyn\_ops} does not result in any additions being skipped.
+     
+\end{itemize}
+
+\subsection{Systems Which Should Not Require Unique Testing}
+
+\begin{itemize}
+     \item Unregistration of dynamic optional operations, and unregistration of dynamic optional operations while those operations are in use by other threads. Only the \textit{registration} of dynamic operations is planned for thread-safe changes beyond global mutex usage.
+
+
+    \item Invocation of dynamic optional operations. The only difference between these operations and regular VOL operations is their usage of a module that lies under a global mutex, so additional tests shouldn't be required. 
+
+    Similarly, 'intended-for-native' optional operations should not require custom testing, since the H5VL layer treats these operations exactly the same as it treats other callback invocations that are routed to VOL connectors.
+
+     \item Concurrent Registration and unregistration of VOL connectors as dynamic plugins. This is controlled by H5PL which resides under the global mutex.
+
+\end{itemize}
+
+
+\section{Implementation}
+
+\subsection{Order of Changes}
+
+Implementation of the various changes required for multi-threading within H5VL should take place in the following order. This ordering was constructed with the intent that after each discrete step the library should be completely functional, in order to divide the potentially very large set of changes necessary for a thread-safe H5VL into manageable stages.
+
+\begin{enumerate}
+
+    \item The single-threaded reference counting issues specified in Section ~\ref{sec:single-thread-issues} should be fixed
+
+    \item The dynamic optional operations routines should be pushed under the global mutex.
+
+    \item Atomic reference count handling of H5VL objects. Specifically, reference count operations on H5VL structures should be re-ordered as described in Section ~\ref{sec:refcounting}, with the corresponding failure handling when necessary, and the reference counts for \texttt{H5VL\_t} and \texttt{H5VL\_object\_t} converted to atomic variables.
+
+    \item The global connector IDs should be made atomic.
+
+    \item The requirement that connector information be constant after initialization should be documented, both in comments and through the \texttt{const} modifier.
+    
+    \item If necessary, in preparation for supporting multi-threaded library shutdown, the default VOL connector should have its information field wrapped in one of the LargeAtomic structures described in Appendix E.
+
+    
+    
+    \item The VOL connector registration process should be made thread-safe as described in Section ~\ref{sec:registration}
+
+    \item The lock acquisition in API routines that use VOL operations should be 'pushed down' as described in Section ~\ref{sec:locks-outside}.
+    
+    \item The multi-threaded test framework described in Section ~\ref{sec:testing} should be implemented. This step includes:
+
+    \begin{itemize}
+        \item A framework to run the library's tests with a variable number of threads
+
+        \item A new set of test cases meant to elicit multi-threading specific errors as described in Section \ref{sec:vol-layer-testing} 
+
+        \item Dummy multi-threaded passthrough and terminal VOL Connectors 
+    \end{itemize}
+    
+    Note that at this point, none of these systems will be able to be run with actual multi-threading due to H5VL still remaining under the global mutex.
+
+    \item The global mutex should be refactored to be acquired below H5VL in non-thread-safe modules, exposing H5VL for multi-threading by applications.
+\end{enumerate}
+
+\subsection{Implementation Details}
+
+\subsubsection{Multi-Thread Safe Connector Iteration}
+
+ In the present design, this is done through the new \texttt{H5VL\_\_get\_registered\_connector()} routine. If the library is built without multi-threading, this compiles the same \texttt{H5I\_iterate()} behavior as before. If multi-threading is enabled, then it uses the new iteration routines in a loop to search for the target connector.
+
+Because some routines which search for the ID intend to create a new reference \\ (\texttt{H5VL\_\_register\_connector\_by\_(value/class/name)}) and others do not \\ (\texttt{H5VL\_\_peek\_connector\_id\_by\_(name/value)}), the routine to get a registered connector takes an \texttt{inc\_ref} parameter to decide whether to increment the ref count of the returned connector. This avoids having to decrement the ref count after retrieval in some routines, and guarantees that if a valid ID is returned, then it should be valid until it is released by the calling thread.
+
+The current implementation of \texttt{H5VL\_\_get\_registered\_connector()} restarts its search of the index if the current ID it is checking is released before it can perform the comparison. If this behavior were treated as an error, then iteration could stop prematurely due to a non-targeted VOL ID being freed and not find the target VOL ID later in the index. Restarting the iteration allows the search to fully traverse the index at least once, although no guarantees can be made if entries are being concurrently added or removed.
+
+Note that the present implementation of \texttt{H5I\_get\_next()} allows iteration to successfully continue even if the provided ID has been concurrently deleted. Once the implementation of ID iteration has stabilized and threadsafety concerns are addressed, it will likely be worthwhile to modify connector iteration to take advantage of this feature to improve performance through reduced repetition.
+
+
+Note that not all increment/decrement failures within  \texttt{H5VL\_\_get\_registered\_connector()}  can fail as a result of concurrent free, and so several instances will still raise an error on failure (e.g. failure to decrement a ref count when it was incremented earlier in this routine).
+
+The new iteration routine will be used in the following places:
+
+\begin{enumerate}
+    \item \texttt{H5VL\_\_register\_connector\_by\_(value/name/class)}, with \texttt{inc\_ref} = true
+
+    \item \texttt{H5VL\_\_get\_connector\_id\_by\_(value/name)}, with \texttt{inc\_ref} = true
+    
+    \item \texttt{H5VL\_\_peek\_connector\_id\_by\_(name/value)()}, with \texttt{inc\_ref} = false
+
+    \item \texttt{H5VL\_\_is\_connector\_registered\_by\_(name/value)()}, with \texttt{inc\_ref} = false  
+
+\end{enumerate}
+
+
+\appendix
+\newpage
+\subfile{sections/A_structs.tex}
+
+\newpage
+\subfile{sections/B_H5PL.tex}
+
+\newpage
+\subfile{sections/C_TracingRefCount.tex}
+
+\newpage
+\subfile{sections/D_OptionalOperations.tex}
+
+\newpage
+\subfile{sections/E_LargeAtomicOperations.tex}
+
+\subfile{sections/F_LimitsOfGlobalMutex.tex}
+
+\subfile{sections/G_InternalFAPLCopying.tex}
+
+\subfile{sections/H_InternalVOLPropertyOps.tex}
+\end{document}

@@ -1,0 +1,45 @@
+\section{Detailed Dynamic Optional Operations Overview}
+\label{app:optionaloperations}
+
+Dynamic optional operations are a system for allowing VOL connectors to have an arbitrary number of optional operations. Optional operations may be provided for each object subclass (e.g. file, group, datatype) or provided directly to a VOL connector.
+
+The Dynamic Optional operations module itself, \texttt{H5VLdyn\_ops}, exists only to create a mapping between application/VOL-defined operation names and integer "op type" values which uniquely identify an optional operation for an object subclass. The general pattern for intended usage within a VOL connector/application is as follows: 
+
+
+\begin{enumerate}
+    \item \texttt{H5VLregister\_opt\_operation()} is used to associate an operation name with a library-determined \texttt{op\_type} value. The VOL connector saves the returned \texttt{op\_type} value.
+
+    \item Later, when an optional operation is to be used, the op type value of the operation is retrieved via \texttt{H5VL\_find\_opt\_operation()}.
+
+    \item This op type value is provided to \texttt{H5VL<object>\_optional\_op()} via the \texttt{args} parameter.
+
+    \item The VOL-defined optional callback should compare the provided op type value to the op type values saved in the global structure to determine which optional operation to perform.
+\end{enumerate}
+
+In most cases, optional VOL operations are not directly used by any library API calls. The design philosophy seems to have been that operations other than the primary ones defined in the VOL interface (create, open, read, write, close, delete, etc.) would all fall under optional VOL operations, and should be specially registered and invoked by VOL connectors or the applications using them.
+
+However, this pattern is broken by some special cases that seem to have been intended for use only with the native VOL connector. These "intended for native" API functions violate the patterns outlined above in the following ways:
+
+\begin{enumerate}
+    \item Intended-for-native functions define their own op type values in their module rather than acquiring them through dynamic registration. These op type values generally have names of the form \texttt{H5VL\_NATIVE\_<OBJECT>\_<OP>}, although some such as \texttt{H5VL\_MAP\_<OP>} do not include the 'NATIVE' qualifier.
+
+    Since these values are not registered through \texttt{H5VLdyn\_ops}, they cannot be found later by operation name. They are, however, public to applications.
+
+    \item Intended-for-native functions invoke the corresponding VOL-defined optional callback (if it exists) from within the library itself.
+
+    \item Intended-for-native functions are intended to operate on structures that are only guaranteed to be meaningful for the native VOL and file format, such as chunks, free sections, page buffers, the metadata cache, and file size.
+\end{enumerate}
+
+The following modules make use of intended-for-native functions:
+
+\begin{itemize}
+    \item H5Adeprec
+    \item H5D
+    \item H5F, H5Fdeprec, H5Fmpi
+    \item H5Gdeprec
+    \item H5M
+    \item H5O, H5Odeprec
+    \item H5Rint
+\end{itemize}
+
+While it is possible for VOL connectors to define optional callbacks for each of the intended-for-native functions, since the defined op type values are public, most VOL connectors are unable to implement most of them in a meaningful way. However, some of these functions are useful for some VOL connectors: \texttt{H5Fget\_filesize()} can be useful for VOL connectors that still work within a single file or file analog, and VOL connectors such as the Async VOL still work with the native file format and can operate on native file structures like chunks. The Async VOL in particular makes use of several intended-for-native functions: \texttt{H5VL\_NATIVE\_DATASET\_GET\_NUM\_CHUNKS}, \texttt{H5VL\_NATIVE\_DATASET\_GET\_CHUNK\_INFO\_BY\_IDX}, and \texttt{H5VL\_NATIVE\_FILE\_GET\_VFD\_HANDLE} among others.
