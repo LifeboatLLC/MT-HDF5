@@ -20,14 +20,18 @@
 #include <errno.h>
 #include <fcntl.h>
 
+#define DATA_SECTION_NUM   4
+#define SECTION_BREAK      "\n###\n"
 #define POSIX_MAX_IO_BYTES INT_MAX
-#define MB (1024 * 1024)
-#define GB (1024 * 1024 * 1024)
+#define MIN(a, b)          (((a) < (b)) ? (a) : (b))
+#define MB                 (1024 * 1024)
+#define GB                 (1024 * 1024 * 1024)
 
 typedef struct {
     int   num_threads;
     int   num_files;
     int   num_dsets;
+    int   step_size;
     long long int   dset_dim1;
     long long int   dset_dim2;
     long long int   chunk_dim1;
@@ -38,9 +42,11 @@ typedef struct {
     bool  random_data;
     bool  plain_hdf5;
     bool  read_in_c;
+    bool  multi_dsets;
 } handler_t;
 
 typedef struct {
+    int  fp;
     char file_name[64];
     char dset_name[64];
     long long int  dset_offset;
@@ -58,10 +64,17 @@ typedef struct {
 
 handler_t    hand;
 file_info_t  *file_info;
+file_info_t  **file_info_array;
+int          file_info_count[32];
+int          file_info_nsections;
 statistics_t statistics;
+
+bool data_in_section = false;
 
 void usage(void);
 void parse_command_line(int argc, char *argv[]);
 int read_data(int fd, int *buf, size_t size, off_t offset);
+int read_info_log_file(int *finfo_entry_num);
+void free_file_info_array();
 
 #endif /* COMMON_H */

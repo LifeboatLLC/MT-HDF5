@@ -34,18 +34,41 @@ int create_files()
     char    dset_name[1024];
     hid_t   file, dataset;       /* file and dataset handles */
     hid_t   datatype, dataspace; /* handles */
+    hid_t   memspace;
+    hsize_t dimsm[2];
     hsize_t dimsf[2];            /* dataset dimensions */
     hsize_t chunk_dims[2];       /* chunk dimensions */
     hid_t   dcpl;
+    hsize_t count[2], offset[2];
     time_t  t;
     herr_t  status;
     int     *data, *p;
-    int     i, j, k, n;
+    int     i, j, k, m, n;
 
     /* Initializing random generator */
     srand((unsigned) time(&t));
 
-    data = (int *)malloc(hand.dset_dim1 * hand.dset_dim2 * sizeof(int)); /* output buffer */
+    /* Break down the data buffer into DATA_SECTION_NUM sections if the dataset is greater than 16GB */
+    if (hand.dset_dim1 * hand.dset_dim2 > (long long int)4 * GB && hand.dset_dim1 % DATA_SECTION_NUM == 0) {
+    //if (hand.dset_dim1 * hand.dset_dim2 > (long long int)1 && hand.dset_dim1 % DATA_SECTION_NUM == 0) {
+        data_in_section = true;
+
+	/* Define the memory dataspace */
+	dimsm[0] = hand.dset_dim1 / DATA_SECTION_NUM;
+	dimsm[1] = hand.dset_dim2;
+
+	memspace = H5Screate_simple(RANK, dimsm, NULL);
+
+        data = (int *)malloc((hand.dset_dim1 / DATA_SECTION_NUM) * hand.dset_dim2 * sizeof(int)); /* output buffer */
+    } else {
+	/* Define the memory dataspace */
+	dimsm[0] = hand.dset_dim1;
+	dimsm[1] = hand.dset_dim2;
+
+	memspace = H5Screate_simple(RANK, dimsm, NULL);
+
+        data = (int *)malloc(hand.dset_dim1 * hand.dset_dim2 * sizeof(int)); /* output buffer */
+    }
 
     dcpl = H5Pcreate(H5P_DATASET_CREATE);
 
@@ -57,6 +80,15 @@ int create_files()
         H5Pset_chunk(dcpl, RANK, chunk_dims); 
     }
 
+    /* Create the dataspace */
+    dimsf[0]  = hand.dset_dim1;
+    dimsf[1]  = hand.dset_dim2;
+    dataspace = H5Screate_simple(RANK, dimsf, NULL);
+
+    /* Define datatype for the data in the file */
+    datatype = H5Tcopy(H5T_NATIVE_INT);
+    status   = H5Tset_order(datatype, H5T_ORDER_LE);
+
     for (k = 0; k < hand.num_files; k++) {
         /* Create a new file using H5F_ACC_TRUNC access */
         if (hand.num_files == 1) 
@@ -65,15 +97,6 @@ int create_files()
             sprintf(file_name, "%s%d.h5", FILE_NAME, k + 1);
 
         file = H5Fcreate(file_name, H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT);
-
-        /* Create the dataspace */
-        dimsf[0]  = hand.dset_dim1;
-        dimsf[1]  = hand.dset_dim2;
-        dataspace = H5Screate_simple(RANK, dimsf, NULL);
-
-        /* Define datatype for the data in the file */
-        datatype = H5Tcopy(H5T_NATIVE_INT);
-        status   = H5Tset_order(datatype, H5T_ORDER_LE);
 
         /* Create and writes data to dataset(s) */
         for (n = 0; n < hand.num_dsets; n++) {
@@ -85,17 +108,6 @@ int create_files()
             /* Create a new dataset */
             dataset = H5Dcreate2(file, dset_name, datatype, dataspace, H5P_DEFAULT, dcpl, H5P_DEFAULT);
 
-            /* Data buffer initialization */
-            p = data;
-
-            /* Writes random numbers to the dataset */
-            for (j = 0; j < hand.dset_dim1; j++)
-                for (i = 0; i < hand.dset_dim2; i++)
-                    if (hand.random_data)
-                        *p++ = i + j + rand() % 50;
-                    else
-                        *p++ = i + j + k * hand.dset_dim1 * hand.dset_dim2 + n * hand.dset_dim1 * hand.dset_dim2;
-
             /* 
              * dset1        dset2
              * 0 1 2 3 4 5  ... ...
@@ -106,17 +118,64 @@ int create_files()
              */
 
             /* Write the data to the dataset */
-            status = H5Dwrite(dataset, H5T_NATIVE_INT, H5S_ALL, H5S_ALL, H5P_DEFAULT, data);
+            if (data_in_section) {
+                for (m = 0; m < DATA_SECTION_NUM; m++) {
+		    /* Define hyperslab in the dataset. Each time it writes DATA_SECTION_NUM rows of data. The number of rows must be 
+		     * evenly divided by the number of threads.
+		     *    
+		     *    0 0 0 0 
+		     *    0 0 0 0 
+		     *    1 1 1 1
+		     *    1 1 1 1
+		     *    2 2 2 2   
+		     *    2 2 2 2   
+		     *    3 3 3 3
+		     *    3 3 3 3
+		     */
+		    offset[0] = m * (hand.dset_dim1 / DATA_SECTION_NUM);
+		    offset[1] = 0;
+		    count[0]  = hand.dset_dim1 / DATA_SECTION_NUM;
+		    count[1]  = hand.dset_dim2;
+
+                    status = H5Sselect_none(dataspace);
+		    status = H5Sselect_hyperslab(dataspace, H5S_SELECT_SET, offset, NULL, count, NULL);
+
+                    /* Data buffer initialization */
+                    p = data;
+
+		    for (j = 0; j < hand.dset_dim1 / DATA_SECTION_NUM; j++)
+			for (i = 0; i < hand.dset_dim2; i++)
+			    if (hand.random_data)
+				*p++ = i + j + rand() % 50;
+			    else
+				*p++ = i + j + m * 10 + k * hand.dset_dim1 * hand.dset_dim2 + n * hand.dset_dim1 * hand.dset_dim2;
+
+                    status = H5Dwrite(dataset, H5T_NATIVE_INT, memspace, dataspace, H5P_DEFAULT, data);
+                }
+            } else {
+		/* Data buffer initialization */
+		p = data;
+
+		for (j = 0; j < hand.dset_dim1; j++)
+		    for (i = 0; i < hand.dset_dim2; i++)
+			if (hand.random_data)
+			    *p++ = i + j + rand() % 50;
+			else
+			    *p++ = i + j + k * hand.dset_dim1 * hand.dset_dim2 + n * hand.dset_dim1 * hand.dset_dim2;
+
+                status = H5Dwrite(dataset, H5T_NATIVE_INT, H5S_ALL, H5S_ALL, H5P_DEFAULT, data);
+            }
 
             H5Dclose(dataset);
         }
 
-        /* Close/release resources */
-        H5Sclose(dataspace);
-        H5Tclose(datatype);
         H5Fclose(file);
     }
 
+    /* Close/release resources */
+    H5Sclose(memspace);
+    H5Sclose(dataspace);
+    H5Tclose(datatype);
     H5Pclose(dcpl);
 
     free(data);

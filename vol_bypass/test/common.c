@@ -7,18 +7,20 @@
 void
 usage(void)
 {
-    printf("    [-h] [-c --dimsChunk] [-d --dimsDset] [-e --enableChunkCache] [-f --nFiles] [-k --checkData] [-n --nDsets] [-r --randomData] [-s --spaceSelect] [-t --nThreads]\n");
+    printf("    [-h] [-c --dimsChunk] [-d --dimsDset] [-e --enableChunkCache] [-f --nFiles] [-k --checkData] [-m -stepSize] [-n --nDsets] [-r --randomData] [-s --spaceSelect] [-t --nThreads]\n");
     printf("    [-h --help]: this help page\n");
     printf("    [-c --dimsChunk]: the 2D dimensions of the chunks.  The default is no chunking.\n");
     printf("    [-d --dimsDset]: the 2D dimensions of the datasets.  The default is 1024 x 1024.\n");
     printf("    [-e --enableChunkCache]: enable chunk cache for better data I/O performance in HDF5 library (not in Bypass VOL). The default is disabled.\n");
     printf("    [-f --nFiles]: for testing multiple files, this number must be a multiple of the number of threads.  The default is 1.\n");
     printf("    [-k --checkData]: make sure the data is correct while not running for benchmark. The default is false.\n");
+    printf("    [-l --multiDsets]: read multiple datasets using H5Dread_multi. The default is false.\n");
+    printf("    [-m --stepSize]: the number of data pieces passed into the thread pool.  The default is 1.\n");
     printf("    [-n --nDsets]: number of datasets in a single file.  The default is 1.\n");
     printf("    [-r --randomData]: the data has random values. The default is false.\n");
     printf("    [-s --spaceSelect]: hyperslab selection of data space.  The default is the rows divided by the number of threads (value 1)\n");
     printf("            The other options are each thread reads a row alternatively (value 2) and the columns divided by the number of threads (value 3)\n");
-    printf("    [-t --nThreads]: number of threads.  The default is 1.\n");
+    printf("    [-t --nThreads]: number of child threads in addition to the main process.  The default is 1.\n");
     printf("\n");
 }
 
@@ -37,28 +39,32 @@ parse_command_line(int argc, char *argv[])
                                     {"nFiles=", required_argument, NULL, 'f'},
                                     {"help", no_argument, NULL, 'h'},
                                     {"checkData", no_argument, NULL, 'k'},
+                                    {"stepSize=", required_argument, NULL, 'm'},
                                     {"nDsets=", required_argument, NULL, 'n'},
                                     {"randomData", no_argument, NULL, 'r'},
                                     {"spaceSelect=", required_argument, NULL, 's'},
                                     {"nThreads=", required_argument, NULL, 't'},
+                                    {"multiDsets", no_argument, NULL, 'l'},
                                     {NULL, 0, NULL, 0}};
 
     /* Initialize the command line options */
-    hand.num_threads              = 1;
+    hand.num_threads              = 0; /* No child thread. Serial only            */
     hand.num_files                = 1;
     hand.num_dsets                = 1;
+    hand.step_size                = 1;
     hand.chunk_cache              = false;
     hand.plain_hdf5               = false;
     hand.check_data               = false;
     hand.random_data              = false;
     hand.read_in_c                = false;
+    hand.multi_dsets              = false;
     hand.dset_dim1                = 1024;
     hand.dset_dim2                = 1024;
     hand.chunk_dim1               = 0; /* No chunking.  Contiguous is the default. */
     hand.chunk_dim2               = 0; /* No chunking.  Contiguous is the default. */
     hand.space_select             = 1;
 
-    while ((opt = getopt_long(argc, argv, "c:d:ef:hkn:rs:t:", long_options, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "c:d:ef:hklm:n:rs:t:", long_options, NULL)) != -1) {
         switch (opt) {
             case 'c':
                 /* The dimensions of the chunks */
@@ -118,6 +124,21 @@ parse_command_line(int argc, char *argv[])
                 hand.check_data = true;
 
                 break;
+            case 'l':
+                /* Check the correctness of the data while not running benchmark */
+                fprintf(stdout, "read multiple datasets with H5Dread_multi:\t\tTrue\n");
+                hand.multi_dsets = true;
+
+                break;
+            case 'm':
+                /* the number of data pieces passed into the thread pool */
+                if (optarg) {
+                    fprintf(stdout, "number of data pieces for thread pool:\t\t\t%s\n", optarg);
+                    hand.step_size = atoi(optarg);
+                }
+                else
+                    printf("optarg is null\n");
+                break;
             case 'n':
                 /* The number of datasets */
                 if (optarg) {
@@ -149,9 +170,9 @@ parse_command_line(int argc, char *argv[])
                     printf("optarg is null\n");
                 break;
             case 't':
-                /* The number of threads */
+                /* The number of child threads */
                 if (optarg) {
-                    fprintf(stdout, "number of threads:\t\t\t\t\t%s\n", optarg);
+                    fprintf(stdout, "number of child threads:\t\t\t\t%s\n", optarg);
                     hand.num_threads = atoi(optarg);
                 }
                 else
@@ -173,27 +194,27 @@ parse_command_line(int argc, char *argv[])
 
     /* Make sure there is no conflict in the command line options */
     if (hand.num_dsets > 1 && hand.num_files != 1) {
-        printf("Testing multiple datasets can only be in a single file\n");
+        printf("Error: Testing multiple datasets can only be in a single file\n");
         exit(1);
     }
 
-    if (hand.num_dsets > 1 && (hand.num_dsets % hand.num_threads != 0)) {
-        printf("The number of multiple datasets must be in a multiplication of the number of threads\n");
+    if (hand.num_dsets > 1 && hand.num_threads > 0 && (hand.num_dsets % hand.num_threads != 0)) {
+        printf("Error: The number of multiple datasets must be in a multiplication of the number of threads\n");
         exit(1);
     }
 
-    if (hand.num_files > 1 && (hand.num_files % hand.num_threads != 0)) {
-        printf("The number of multiple files must be in a multiplication of the number of threads\n");
+    if (hand.num_files > 1 && hand.num_threads > 0 && (hand.num_files % hand.num_threads != 0)) {
+        printf("Error: The number of multiple files must be in a multiplication of the number of threads\n");
         exit(1);
     }
 
-    if (hand.num_files == 1 && hand.num_dsets == 1 && (hand.dset_dim1 % hand.num_threads != 0)) {
-        printf("The number of the row in the dataset must be in a multiplication of the number of threads\n");
+    /*if (hand.num_files == 1 && hand.num_dsets == 1 && hand.num_threads != 0 && (hand.dset_dim1 % hand.num_threads != 0)) {
+        printf("Error: The number of the row in the dataset must be in a multiplication of the number of threads\n");
         exit(1);
-    }
+    }*/
 
     if (hand.random_data == true && hand.check_data == true) {
-        printf("Can't verify the correctness of the data if its values are random\n");
+        printf("Error: Can't verify the correctness of the data if its values are random\n");
         exit(1);
     }
 }
@@ -236,30 +257,34 @@ report_statistics()
 }
 
 /*------------------------------------------------------------
- * Check the correctness of the data: the original values are
- * obsolete because of the random number involved in data 
- * inittialization.
+ * Check the correctness of the data
  *------------------------------------------------------------
  */
 int
-check_data(int *data, int file_or_dset_index)
+check_data(int *data, int file_or_dset_index, int data_section)
 {
     int *p = data;
     int original_value;
+    int num_rows;
     int nerrors = 0;
     int i, j;
 
-    for (j = 0; j < hand.dset_dim1; j++) {
-        for (i = 0; i < hand.dset_dim2; i++) {
+    if (data_in_section)
+        num_rows = hand.dset_dim1 / DATA_SECTION_NUM;
+    else
+        num_rows = hand.dset_dim1;
+
+    for (i = 0; i < num_rows; i++) {
+        for (j = 0; j < hand.dset_dim2; j++) {
             /* Compare to the values being initialized in create_files() for the cases of 
              *   1. a single dataset in a single file
              *   2. multiple datasets in a single file
              *   3. a single dataset in multiple files
              */
-            original_value = i + j + file_or_dset_index * hand.dset_dim1 * hand.dset_dim2;
+            original_value = i + j + data_section * 10 + file_or_dset_index * hand.dset_dim1 * hand.dset_dim2;
 
             if (*p != original_value) {
-                printf("Data error at index (%d, %d) in line %d: actual value is %d; expected value is %d\n", i, j, __LINE__, *p, original_value);
+                printf("Data (section %d) error at index (%d, %d) in line %d: actual value is %d; expected value is %d\n", data_section, i, j, __LINE__, *p, original_value);
                 nerrors++;
             }
 
@@ -297,4 +322,253 @@ void read_big_data(int fd, int *buf, size_t size, off_t offset)
         size -= (size_t)bytes_read;
         buf = (int *)((char *)buf + bytes_read);
     } /* end while */
+}
+
+/* Figure out the number of sections in the info log file */
+static int
+get_num_of_sections(char *input_str, char *section_break)
+{
+    int i, j;
+    int input_len = 0, section_break_len = 0;
+    int numb_matched = 0, numb_sections = 0;
+
+    input_len = strlen(input_str);
+    section_break_len = strlen(section_break);
+
+    for (i = 0; i < input_len;)
+    {
+        j = 0;
+        numb_matched = 0;
+
+        while (i < input_len && input_str[i] == section_break[j])
+        {
+            numb_matched++;
+            i++;
+            j++;
+        }
+
+        if (numb_matched == section_break_len) {
+            numb_sections++;
+            numb_matched = 0;
+        } else
+            i++;
+    }
+
+    return numb_sections;
+}
+
+/* Read a section from the info log file */
+static void
+read_file_info_sections(char *section_buf, int i)
+{
+    int counter = 0;
+    int finfo_entry_num = hand.num_threads;
+    size_t len;
+    char *token = NULL;
+    const char delimiter[] = " \n\0";
+    int j;
+
+    if (hand.num_threads == 0)
+        finfo_entry_num = 1;    
+    else
+        finfo_entry_num = hand.num_threads;
+
+    file_info_array[i] = (file_info_t *)malloc(sizeof(file_info_t) * finfo_entry_num);
+
+    /* Begin to parse the buffer containing the contents of the log file */
+    counter = 0;
+
+    /* File name */
+    token = strtok(section_buf, delimiter);
+    //printf("%s ", token);
+    strcpy(file_info_array[i][counter].file_name, token);
+
+    /* Dataset name (unused) */
+    token = strtok(NULL, delimiter);
+    //printf("%s ", token);
+    strcpy(file_info_array[i][counter].dset_name, token);
+
+    /* Location of dataset in the file */
+    token = strtok(NULL, delimiter);
+    //printf("%s ", token);
+    file_info_array[i][counter].dset_offset = atoll(token);
+
+    /* Offset of data in the HDF5 file to be read into the memory */
+    token = strtok(NULL, delimiter);
+    //printf("%s ", token);
+    file_info_array[i][counter].offset_f = atoll(token);
+
+    /* Number of elements to be read */
+    token = strtok(NULL, delimiter);
+    //printf("%s ", token);
+    file_info_array[i][counter].nelmts = atoll(token);
+
+    /* Offset of the data in the memory to be read */
+    token = strtok(NULL, delimiter);
+    //printf("%s ", token);
+    file_info_array[i][counter].offset_m = atoll(token);
+
+    while (1) {
+        /* File name */
+        token = strtok(NULL, delimiter);
+        if (!token)
+            break;
+        //printf("%s ", token);
+
+        counter++;
+
+        if (counter == finfo_entry_num) {
+            finfo_entry_num *= 2;
+            file_info_array[i] = (file_info_t *)realloc(file_info_array[i], finfo_entry_num * sizeof(file_info_t));
+        }
+
+        strcpy(file_info_array[i][counter].file_name, token);
+
+        /* Dataset name (unused) */
+        token = strtok(NULL, delimiter);
+        //printf("%s ", token);
+        strcpy(file_info_array[i][counter].dset_name, token);
+
+        /* Location of dataset in the file */
+        token = strtok(NULL, delimiter);
+        //printf("%s ", token);
+        file_info_array[i][counter].dset_offset = atoll(token);
+
+        /* Offset of data in the HDF5 file to be read into the memory */
+        token = strtok(NULL, delimiter);
+        //printf("%s ", token);
+        file_info_array[i][counter].offset_f = atoll(token);
+
+        /* Number of elements to be read */
+        token = strtok(NULL, delimiter);
+        //printf("%s ", token);
+        file_info_array[i][counter].nelmts = atoll(token);
+
+        /* Offset of the data in the memory to be read */
+        token = strtok(NULL, delimiter);
+        //printf("%s ", token);
+        file_info_array[i][counter].offset_m = atoll(token);
+    }
+
+    /* Total number of entries to be returned */
+    counter++;
+
+    file_info_count[i] = counter;
+
+    /* printf("Print out file_info_array[%d]:\n", i);
+    if (hand.num_files == 1 && hand.num_dsets == 1) {
+        for (j = 0; j < counter; j++)
+            printf("%s %s %lld %lld %lld %lld\n", file_info_array[i][j].file_name, file_info_array[i][j].dset_name, file_info_array[i][j].dset_offset, file_info_array[i][j].offset_f, file_info_array[i][j].nelmts, file_info_array[i][j].offset_m);
+    }
+    printf("\n"); */
+
+}
+
+/*------------------------------------------------------------
+ * Read and parse the info.log file for the preparation of  
+ * reading the data in C only.  This function handles multiple
+ * sections generated from multiple calls to H5Dread
+ *------------------------------------------------------------
+ */
+int read_info_log_file_array(void)
+{
+    FILE *fp = NULL;
+    int display;
+    int i, counter = 0;
+    size_t len;
+    char *buf = NULL;
+    char *buf_p = NULL;
+    char *section = NULL;
+    char *section_buf = NULL;
+    char **section_array = NULL;
+
+    /* Make sure the info.log file exists */
+    if (access("info.log", F_OK) != 0) {
+        printf("info.log doesn't exist.  You must run this test with Bypass VOL to generate it.\n"); 
+        exit(1);
+    }
+
+    /* Open the info.log file and count the number of characters */
+    fp = fopen("info.log", "r");
+
+    while (1) {
+        display = fgetc(fp);
+        counter++;
+        if (feof(fp))
+            break;    
+    }
+
+    fclose(fp);
+
+    /* Allocate enough buffer and read the file content into the buffer */
+    buf = malloc(counter + 1);
+
+    fp = fopen("info.log", "r");
+
+    fread(buf, sizeof(char), counter, fp);
+
+    buf[counter] = '\0'; 
+    buf_p = buf;
+
+    fclose(fp);
+
+//fprintf(stderr, "buf before get_num_of_sections: %s\n", buf);
+
+    /* Find out the number of sections */
+    file_info_nsections = get_num_of_sections(buf, SECTION_BREAK);
+
+    /* Allocate space for file info */
+    file_info_array = (file_info_t **)malloc(sizeof(file_info_t *) * file_info_nsections);
+
+    section_array = (char **)malloc(sizeof(char *) * file_info_nsections);
+
+    /* Find the first section.  Section points to the first SECTION_BREAK now. */
+    section = strstr(buf, SECTION_BREAK);
+    counter = 0;
+
+    while (section) {
+        /* Replace the delimiter with a null character to extract the substring */
+        *section = '\0';
+        //printf("section = %s\n", section);
+        //printf("buf = %s\n", buf);
+
+        /* Copy this section */
+        section_array[counter] = strdup(buf);
+	counter++;
+
+        /* Move the pointer to the next substring */
+        buf = section + strlen(SECTION_BREAK);
+        section = strstr(buf, SECTION_BREAK);
+    }
+
+    /* Read each section and save the information */
+    for (i = 0; i < file_info_nsections; i++) {
+//fprintf(stderr, "--1-- section_array[%d] = %s\n", i, section_array[i]);
+        read_file_info_sections(section_array[i], i);
+    }
+//fprintf(stderr, "--2--\n");
+
+    /* Free the memory buffers */
+    for (i = 0; i < counter; i++)
+        if (section_array[i])
+            free(section_array[i]);
+    free(section_array);
+
+    if (buf_p)
+        free(buf_p);
+
+    return 0;
+
+error:
+    return -1;
+}
+
+void free_file_info_array()
+{
+    int i;
+
+    for (i = 0; i < file_info_nsections; i++)
+        free(file_info_array[i]);
+
+    free(file_info_array);
 }

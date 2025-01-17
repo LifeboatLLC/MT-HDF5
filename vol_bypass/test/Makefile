@@ -12,21 +12,28 @@ DSETRSRC = h5_read.c
 DSETROBJ = $(DSETRSRC:.c=.o)
 DSETREXE = h5_read
 
-POSIXRSRC = posix_read.c
-POSIXROBJ = $(POSIXRSRC:.c=.o)
-POSIXREXE = posix_read
+POSIXRMSRC = posix_read_mthread.c
+POSIXRMOBJ = $(POSIXRMSRC:.c=.o)
+POSIXRMEXE = posix_read_mthread
 
-all: $(CREATEEXE) $(DSETREXE) $(POSIXREXE)
+POSIXRTSRC = posix_read_tpool.c
+POSIXRTOBJ = $(POSIXRTSRC:.c=.o)
+POSIXRTEXE = posix_read_tpool
+
+all: $(CREATEEXE) $(DSETREXE) $(POSIXRMEXE) $(POSIXRTEXE)
 
 $(CREATEEXE): $(CREATESRC)
 	$(H5CC) $^ -o $(CREATEEXE)
 
 $(DSETREXE): $(DSETRSRC)
-	$(H5CC) -g -pthread $^ -o $(DSETREXE)
+	$(H5CC) -O0 -g -pthread $^ -o $(DSETREXE)
 
-$(POSIXREXE): $(POSIXRSRC)
-	$(CC) -O3 -pthread $^ -o $(POSIXREXE)
+$(POSIXRMEXE): $(POSIXRMSRC)
+	$(CC) -O3 -pthread $^ -o $(POSIXRMEXE)
+
+$(POSIXRTEXE): $(POSIXRTSRC)
+	$(CC) -O3 -pthread $^ -o $(POSIXRTEXE)
 
 .PHONY: clean all
 clean:
-	rm -rf $(CREATEEXE) $(CREATEOBJ) $(DSETREXE) $(DSETROBJ) $(POSIXREXE) $(POSIXROBJ)
+	rm -rf $(CREATEEXE) $(CREATEOBJ) $(DSETREXE) $(DSETROBJ) $(POSIXRMEXE) $(POSIXRMOBJ) $(POSIXRTEXE) $(POSIXRTOBJ)
