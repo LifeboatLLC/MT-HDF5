@@ -1,0 +1,134 @@
+\documentclass[../HDF5_RFC.tex]{subfiles}
+
+\begin{document}
+
+\section{Parallel tests}
+\label{parallel}
+
+\subsection{Flexibility in number of MPI processes}
+
+Parallel HDF5 tests should be written to work correctly with any number of MPI processes. While the
+test may not necessarily use all of those processes, parallel HDF5 tests are ran with varying numbers
+of MPI processes, depending on the system, from 2 and up. If a test is written to only run with a
+specific number of processes, this reduces test coverage on different machines.
+
+Parallel tests should also give consideration towards whether
+\href{https://hpc-wiki.info/hpc/Scaling#Strong_or_Weak_Scaling}{strong or weak} scaling is appropriate
+for the amount of testing being performed. Several of HDF5's parallel tests exhibit weak scaling, where
+the problem size is increased as the number of processes involved increases. While fine for small
+numbers of processes or small problem size growth, some of these tests grow quickly with the number of
+MPI processes and can be unreasonable to run for larger numbers of processes. Parallel tests that
+exhibit strong scaling tend to work well for CI; those that exhibit weak scaling need a little extra
+thought towards problem size growth rate.
+
+\subsection{Error checking and handling in parallel tests}
+
+Parallel HDF5 tests often only make use of the \texttt{VRFY()} macro from the \texttt{testpar.h} header
+for error handling. Parallel tests can make use of the \texttt{TESTING()}, \texttt{H5\_FAILED()},
+\texttt{TEST\_ERROR()}, etc. macros if they include the \texttt{h5test.h} header, but these macros
+don't account for multiple processes and also use problematic \texttt{goto}-style error handling.
+Therefore, these macros are usually only used from a single process in parallel tests, if at all.
+
+HDF5 tests are often written to use \texttt{goto}-style error handling, where the test skips to a
+labelled section to perform cleanup when a part of the test fails. In a parallel HDF5 test, this
+can result in a hang if the part of the test that failed was a collective MPI operation, or if any
+collective MPI operation occurs in any following part of the test, and the failure occurred on only
+one MPI process or a subset of the MPI processes involved. When a failure occurs in a parallel HDF5
+test, that failure should be communicated to all the MPI processes involved using some form of MPI
+collective communication operation so all the processes can cleanup and exit the test. Since it isn't
+generally feasible to predict which MPI processes will fail ahead of time, writing resilient parallel
+HDF5 tests usually involves something like an \texttt{MPI\_Allreduce()} call after each collective
+operation to share a status value among all MPI processes before checking to see whether any of the
+processes failed. However, many of these types of calls in a parallel test may result in a lot of
+communication overhead, so it's generally encouraged to try to minimize the number of collective
+operations that occur.
+
+\subsection{Output from parallel tests}
+
+Without careful consideration, parallel HDF5 tests can accidentally be written in a manner that causes
+console output to be printed from every running MPI process. This generally results in interleaved output
+and can make it difficult to debug issues, especially when the number of MPI processes is large. To
+prevent this, parallel test programs should take one of the following approaches:
+
+\begin{itemize}
+
+    \item Only print output from a single MPI process choosing a "leader". Most often, tests simply pick
+          the MPI process that has a rank value of 0. The rank value of an MPI process can be retrieved
+          by calling the \texttt{MPI\_Comm\_rank()} function on an MPI Communicator object (typically
+          \texttt{MPI\_COMM\_WORLD}). Output from other MPI processes can be sent to the process with
+          rank value 0 using various MPI functions.
+    \item Coordinate MPI processes using collective communication operations such that only one MPI
+          process will be able to print output at a time.
+    \item Print output from MPI processes into separate log files, where each file is solely owned by a
+          single MPI process and is named based on some algorithmic strategy. While best left for
+          debugging purposes only, this approach can be very useful for developers to reason about problems
+          in parallel tests.
+
+\end{itemize}
+
+The \texttt{MAINPROCESS} macro (defined in \texttt{testpar.h}) is a convenient way of handling the first
+option, as in:
+
+\begin{minted}{C}
+if (MAINPROCESS)
+    printf("Output from MPI process 0\n");
+\end{minted}
+
+In order to use this macro, a variable called \texttt{mpi\_rank} which contains the MPI rank value of
+the current process will need to be defined in the scope where the macro is used.
+
+Note that any output from the 'testframe' testing framework, such as the printing out of test names or information, will only occur in the MPI process with the rank value of 0 and so does not needed to be
+guarded against by test programs integrated with this testing framework.
+
+\subsection{Random values}
+
+If using random values in a parallel test program where the values will be generated on multiple MPI
+processes during test execution, a few points should be kept in mind:
+
+\begin{itemize}
+
+    \item If an initial seed value is required and the test program is designed for all the MPI processes
+          to generate the same sequence of random values, the test program should usually generate the
+          seed value on a single MPI process and then broadcast that value to other MPI processes with,
+          e.g. \texttt{MPI\_Bcast()}. While this may not always be necessary, it's a good practice to
+          avoid cases where MPI processes can have different seed values. For example, when the seed
+          value is calculated based off of the \texttt{time()} function, MPI processes may get different
+          results for the seed value depending on process startup time.
+    \item If the test is designed for all the MPI processes to generate the same sequence of random
+          values, test authors should be careful to ensure that random value generation functions that
+          have hidden state, such as \texttt{rand()}, are called by all the MPI processes in the same
+          fashion. Due to this, it can often be better to simply generate a random value on a single
+          MPI process and then broadcast that value to other MPI processes with, e.g. \texttt{MPI\_Bcast()}.
+
+\end{itemize}
+
+\subsection{Avoiding unintended pre-initialization of HDF5}
+
+Parallel HDF5 attempts to create a destructor attribute on the MPI Communicator object
+\texttt{MPI\_COMM\_SELF} when the library initializes. This is to ensure that proper shutdown of the
+library occurs during calls to \texttt{MPI\_Finalize()} so that the library doesn't unintentionally make
+use of MPI objects after MPI has been finalized. For example, this can often occur when a parallel HDF5 application exits and has left the ID open for a File Access Property List that has had an MPI Communicator
+or Info object associated with it. If the application has not explicitly called
+\href{https://support.hdfgroup.org/documentation/hdf5/latest/group___h5.html#ga8a9fe81dcf66972ed75ea481e7750574}{\texttt{H5close()}} when exiting, but has already
+called \texttt{MPI\_Finalize()}, HDF5 will eventually call \texttt{MPI\_Comm\_free()} or
+\texttt{MPI\_Info\_free()} after MPI has been finalized, possibly resulting in an application crash.
+
+If MPI has not been initialized with a call to \texttt{MPI\_Init()} before HDF5 is initialized, the library
+will be unable to register its destructor attribute on \texttt{MPI\_COMM\_SELF} and will be unable to
+properly shut down the library in these cases. To ensure this does not happen, parallel HDF5 tests should
+avoid any actions that would cause HDF5 to initialize before MPI is initialized. This means avoiding:
+
+\begin{itemize}
+
+    \item calling \href{https://support.hdfgroup.org/documentation/hdf5/latest/group___h5.html#ga27fa33dc262dda95c5aa8df533837480}{\texttt{H5open()}} or any public HDF5 API function
+          that initializes the library before \texttt{MPI\_Init()}. Few public HDF5 API functions don't initialize the library so it's often safest to avoid use of any public HDF5 API functions before calls to \texttt{MPI\_Init()}.
+    \item making use of any public HDF5 macros that use the \href{https://support.hdfgroup.org/documentation/hdf5/latest/group___h5.html#ga27fa33dc262dda95c5aa8df533837480}{\texttt{H5open()}} public API function
+          through use of the \texttt{H5OPEN} macro. This includes assigning \texttt{hid\_t} variables to predefined datatypes such as \texttt{H5T\_NATIVE\_INT} or making use of macros such as
+          \texttt{H5F\_ACC\_TRUNC}.
+
+\end{itemize}
+
+To be explicit about ordering, it is also recommended for parallel tests to directly call
+\href{https://support.hdfgroup.org/documentation/hdf5/latest/group___h5.html#ga27fa33dc262dda95c5aa8df533837480}{\texttt{H5open()}} as soon as possible after \texttt{MPI\_Init()}.
+
+\end{document}

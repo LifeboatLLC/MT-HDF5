@@ -1,0 +1,44 @@
+\documentclass[../HDF5_RFC.tex]{subfiles}
+
+\begin{document}
+
+\section{Testing frameworks}
+\label{frameworks}
+
+The following sections include details about the various testing frameworks in HDF5 and when to use
+each one.
+
+\subsection{'Testframe' framework}
+
+HDF5 includes a testing framework contained within the \texttt{test/testframe.h} and \texttt{test/testframe.c}
+files that has basic functionality such as skipping tests, controlling the amount of output from tests,
+limiting the amount of time that tests run for and more (refer to Appendix \ref{apdx:test_frame} for
+an overview of the framework). While the functionality from this testing framework is used for a handful
+of older HDF5 tests, many new HDF5 tests end up being written as a simple \texttt{main()} function
+that runs tests directly. However, it is recommended that test authors integrate their tests with the
+'testframe' framework going forward, if possible. The ability to prevent tests from running too long is
+especially important for parallel and multi-threaded tests, where forgetting to enable a test timer can
+mean that a test runs for a very long time if it hangs. This is also especially important for HPC
+environments, where the job queues used typically have a relatively short maximum running time (often around
+30 minutes - 1 hour) and a hanging test will prevent getting results from other tests as they won't have
+a chance to run. For the time being, the \texttt{testframe.h} header file also includes \texttt{h5test.h}, so the entire serial testing framework infrastructure is available to tests that integrate with the 'testframe' framework.
+
+Recent work has shown that integrating with this testing framework can have some rough edges, especially due
+to the fact that each test is added \textbf{before} the command-line arguments are parsed. However,
+integration with this testing framework brings several benefits and is more maintainable than the current approach to writing new HDF5 tests completely from scratch. Refer to Appendix \ref{apdx:testframe_example}
+and \ref{apdx:testframe_parallel_example} for examples of skeleton test programs integrating with this
+testing framework.
+
+\subsection{'H5test' framework}
+
+HDF5 also includes a set of utility macros and functions contained within the \texttt{test/h5test.h} and \texttt{test/h5test.c} files for use by tests (refer to Appendix \ref{apdx:h5test} for an overview of
+the framework). HDF5 tests should include the \texttt{h5test.h} header if they need access to the relevant utility macros and functions. HDF5 tests which don't integrate with the 'testframe' testing framework
+typically use this framework, but 'testframe' tests may also make use of it.
+
+\subsection{'Testpar' framework}
+
+HDF5 also includes a set of utility macros and functions contained within the \texttt{testpar/testpar.h}
+and \texttt{testpar/testpar.c} files for use by parallel tests (refer to Appendix \ref{apdx:testpar} for
+an overview of the framework). In general, all parallel tests should include the \texttt{testpar.h} header. This header also includes the \texttt{h5test.h} and \texttt{testframe.h} headers, so the entirety of HDF5's testing framework infrastructure is currently available to parallel tests.
+
+\end{document}
