@@ -1,0 +1,143 @@
+\documentclass[../HDF5_RFC.tex]{subfiles}
+ 
+\begin{document}
+
+\section{General considerations}
+\label{considerations}
+
+The following are general considerations that test authors should keep in mind when writing HDF5 tests.
+
+\subsection{Coupling of test programs and sub-tests}
+
+It is best to avoid any coupling between test programs, as well as sub-tests in a test program, where possible. This is often a problem when one test depends on a previous test having created a file. When
+tests are coupled in this manner and an earlier test fails, it can be difficult to diagnose the problems
+in the tests that run later on in the sequence of tests. It also reduces testing coverage until issues
+in the earlier tests/sub-tests are fixed and adds complexity to the build system code (where dependencies
+between tests have to be explicitly added). A good practice is to make use of helper functions to factor
+out duplicated code between tests and sub-tests to avoid this coupling.
+
+\subsection{Suppress HDF5 error stacks only as needed}
+
+By default, HDF5 will print out a stack of error messages to \texttt{stderr} when an API function fails.
+Before a refactoring, the 'testframe' framework previously would disable HDF5's error stack mechanism
+and rely on tests to explicitly print out the HDF5 error stack as needed. This adds maintenance overhead
+for test authors and also makes debugging of tests more difficult. Test programs should generally leave
+HDF5's error stacks enabled (unless disabled explicitly via a command-line argument or some other
+mechanism) and add error stack suppression calls around operations that are expected to fail and cause
+error stack output. Such operations can be surrounded by the \texttt{H5E\_BEGIN\_TRY} and
+\texttt{H5E\_END\_TRY} macros, as in:
+
+\begin{minted}{C}
+H5E_BEGIN_TRY
+{
+    status = ...;
+}
+H5E_END_TRY
+if (status < 0)
+    error;
+\end{minted}
+
+Tests should capture some form of return value from the operation inside the macros and then check the
+return value outside of the macros to avoid skipping over the logic in the \texttt{H5E\_END\_TRY} macro.
+Otherwise, the HDF5 error stack may become disabled for the rest of the test program's execution,
+potentially hiding error stacks from other test failures later on.
+
+\subsection{Limit testing time by TestExpress value}
+
+HDF5's testing framework functionality includes an internal variable that a test program can query the
+value of and use to determine whether it should skip some portion of testing in order to complete faster. While only a few of HDF5's tests currently pay attention to this variable's value, it is especially
+important for parallel and multi-threaded tests to use this value in conjunction with an application
+timer in order to safeguard against deadlocks / livelocks and other such issues that can cause tests
+to run for longer than intended. While CMake can kill off misbehaving tests after a certain amount of
+time has passed, this timeout value (\texttt{DART\_TESTING\_TIMEOUT}) can be changed\footnote{Note that
+it may also \textbf{need} to be changed, as the default value is a 20 minute timeout for a test and, as
+noted further on, it may be desirable to allow 30 minutes for a test} (and sometimes is, for certain HPC machines), allowing misbehaving parallel/multi-threaded tests to consume more testing time unnecessarily. Further, Autotools (which doesn't implement this functionality) will need to continue being supported for
+the foreseeable future. The value of this variable can be retrieved by calling either
+\nameref{apdx:testframe_gettestexpress} (for 'testframe' tests) or \nameref{apdx:h5test_h5gettestexpress}
+(for 'h5test' tests).
+
+The meanings for the different values of the \texttt{TestExpress} variable are as follows:
+
+\begin{itemize}
+
+    \item 0 - Tests should take as long as necessary
+    \item 1 - Tests should take no more than 30 minutes
+    \item 2 - Tests should take no more than 10 minutes
+    \item 3 (or higher) - Tests should take no more than 1 minute (default in HDF5)
+
+\end{itemize}
+
+Note that the limit imposed by the value of the \texttt{TestExpress} variable is intended to be the limit
+on the total runtime of an individual test program, even if that test program consists of multiple
+sub-tests. This implies that test programs should:
+
+\begin{itemize}
+
+    \item Set an \texttt{alarm(2)}-like timer at the start of the test program to ensure that the test
+          program exits in a timely fashion according to the value of \texttt{TextExpress}. Note that
+          HDF5's testing framework has the \nameref{apdx:testframe_testalarmon} / \nameref{apdx:testframe_testalarmoff} functions, but these currently use a compile-time value
+          for the timer that can only be overridden by an environment variable
+          (\texttt{HDF5\_ALARM\_SECONDS}). They also depend on the availability of the \texttt{alarm(2)} function, which shouldn't generally be an issue at this point but may be problematic for MinGW builds as commented on in \texttt{testframe.c}.
+    \item Keep track of the number of sub-tests that will be performed and divide the total allowed
+          runtime among sub-tests to ensure that they all run to some degree of completion, even for more
+          restrictive values of \texttt{TestExpress}. Note that some margin may need to be included in
+          this calculation so that each sub-test can run to some degree of completion (while possibly
+          spilling over their timeout by a small amount) and the test program can cleanup without running
+          into the test alarm.
+    \item Engineer sub-tests to accept and gracefully handle specified timeout values, taking care to check
+          against the timeout value relatively frequently so as to not steal runtime from other sub-tests.
+          Setting some form of flag when a sub-test or the entire test program has exceeded an allowed
+          timeout value would also be a reasonable approach to give time for test cleanup. Alternatively, POSIX timers could be used to simplify test logic a bit.
+    \item Engineer parallel/multi-threaded tests to adjust workload to try to accommodate the
+          \texttt{TestExpress} runtime limit as the number of processes/threads involved increases
+
+\end{itemize}
+
+\subsection{Be VOL connector and VFD aware}
+
+Test authors should be aware that their tests may end up being run with a VOL connector or Virtual File
+Driver that is different from the default. This can result in test failures when testing behavior that
+is specific to the native HDF5 VOL connector and/or default sec2 VFD. Tests should make use of the
+\nameref{apdx:h5test_h5usingnativevol} utility function from \texttt{h5test.c}, as well as any capability
+flags queried from a VOL connector with \href{https://support.hdfgroup.org/documentation/hdf5/latest/group___f_a_p_l.html#ga2ad4dc5c6e5e4271334a7b1c6ee0777d}{\texttt{H5Pget\_vol\_cap\_flags()}}, in order to skip testing of functionality that non-native VOL connectors may not support. Tests should make use of the various \texttt{h5\_XXX\_driver\_XXX()} utility functions from \texttt{h5test.c} in order to skip testing of 
+functionality that non-sec2 file drivers may not support. Tests should make use of the \nameref{apdx:h5test_h5fixname} utility function from \texttt{h5test.c} in order to generate file names that
+make sense for different file drivers.
+
+\subsection{Make use of 'testframe' verbosity levels}
+
+For tests that integrate with the 'testframe' testing framework, test authors are encouraged to make use
+of the framework's verbosity level settings. This allows tests to include printing out of debugging
+information and other useful output without needing to recompile the test. When a problem occurs, the test
+can then be debugged by simply passing a specific value to the \texttt{-verbose} command-line option,
+making the debugging process simpler and preventing debug code from going stale.
+
+\subsection{Temporary files}
+
+Test programs should offer the ability to skip deleting of temporary files that were created by the test
+when it exits. It is very useful for debugging purposes to have those temporary files around when a test
+is failing. For 'testframe' tests, this can be achieved by checking the return value of the
+\nameref{apdx:testframe_gettestcleanup} function before calling \href{https://support.hdfgroup.org/documentation/hdf5/latest/group___h5_f.html#ga2e8b5e19b343123e8ab21442f9169a62}{\texttt{H5Fdelete()}}
+or similar. For 'h5test' tests, this can be achieved by making use of the \nameref{apdx:h5test_h5cleanup} function to cleanup test files. Both functions are affected by whether the \texttt{HDF5\_NOCLEANUP} environment variable is defined. If it is defined, \nameref{apdx:testframe_gettestcleanup} will return \texttt{false} and \nameref{apdx:h5test_h5cleanup} will avoid cleaning up test files, as long as the test program previously called one of the \texttt{h5\_fixname(\_xxx)} functions.
+
+\subsection{Test initialization functions}
+
+HDF5 tests that integrate with the 'testframe' testing framework should make sure to call the function
+\nameref{apdx:testframe_testinit} as soon as possible after HDF5 is initialized. Tests that don't integrate with the 'testframe' testing framework should make sure to call the function \nameref{apdx:h5test_h5testinit} as early as possible in the \texttt{main()} function. These functions set up testing infrastructure state
+such as the \texttt{TestExpress} functionality. For serial tests, these calls should generally come before
+any use of HDF5. For parallel tests, these calls should come before any use of HDF5, but also \textbf{after}
+a call to \texttt{MPI\_Init()}.
+
+\subsection{Flush output stream before aborting testing}
+
+If an HDF5 test uses a function, such as \texttt{abort()} or \texttt{MPI\_Abort()}, to abruptly terminate program execution on errors rather than gracefully handling them, it should be sure to flush the output
+stream (e.g., \texttt{stderr} or \texttt{stdout}) used to ensure the output isn't lost.
+
+\subsection{Scope of functions and global variables}
+
+All functions and global variables in a test should be marked as \texttt{static} unless there is reason
+for them to have wider scope. This prevents some oddities that can occur when different tests have
+similarly-named functions or variables and is a best practice in general. If a test author is considering
+a wider scope for a function or variable for use in another test, it is likely that the function or
+variable should simply be moved into one of the testing frameworks as appropriate.
+
+\end{document}

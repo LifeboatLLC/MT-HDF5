@@ -1,0 +1,193 @@
+\documentclass[../HDF5_RFC.tex]{subfiles}
+ 
+\begin{document}
+
+% Start each appendix on a new page
+\newpage
+
+\section{Appendix: 'Testpar' testing framework}
+\label{apdx:testpar}
+
+The following sections give an overview of HDF5's 'testpar' testing framework which is contained
+within the \texttt{testpar/testpar.h} and \texttt{testpar/testpar.c} files. Details are only given
+for the types, functions, etc. that appear in the relevant header files.
+
+\subsection{Macros}
+
+\begin{minted}{C}
+#define MAINPROCESS (!mpi_rank)
+\end{minted}
+
+Convenience macro that returns a \texttt{true} value for the MPI process with rank value 0, and a
+\texttt{false} value for MPI processes with rank values that aren't 0. Used to separate test logic
+that should only be executed on the MPI process with rank value 0 from test logic that should be
+executed on other MPI processes.
+
+\begin{minted}{C}
+#define MESG(mesg)
+\end{minted}
+
+Macro to print out a message string \texttt{mesg} as long as the test verbosity level setting is at least medium (7) and the string isn't empty.
+
+\textbf{Note:} The specified message string will be printed by any MPI process which uses this macro.
+Test programs should avoid using this macro on all MPI processes to prevent large amounts of output.
+
+\begin{minted}{C}
+#define MPI_BANNER(mesg)
+\end{minted}
+
+Macro to print out a message string \texttt{mesg} surrounded by a block of '-' characters. If the test
+verbosity level setting is at least medium (7), the message string will be printed out by all MPI processes
+that use the macro. Otherwise, the message string will only be printed out by the MPI process with rank
+value 0.
+
+\begin{minted}{C}
+#define VRFY_IMPL(val, mesg, rankvar)
+#define VRFY_G(val, mesg) VRFY_IMPL(val, mesg, mpi_rank_g)
+#define VRFY(val, mesg)   VRFY_IMPL(val, mesg, mpi_rank)
+#define INFO(val, mesg)
+\end{minted}
+
+Set of macros used for verifying that the condition or variable specified in \texttt{val} is \texttt{true}.
+
+If the condition or variable specified in \texttt{val} is \texttt{true}, the message string specified in
+\texttt{mesg} will be printed using the \texttt{MESG()} macro (as long as the test verbosity level setting
+is at least medium (7)). Otherwise, an error message will be printed out. When the condition or variable specified in \texttt{val} is \texttt{false}, the \texttt{VRFY} macros will call \texttt{MPI\_Abort()} to
+terminate the test program, as long as the test verbosity level setting is below medium (7).
+
+The third parameter to the \texttt{VRFY\_IMPL()} macro should be the name of the variable that contains
+the MPI process rank value. \texttt{VRFY()} and \texttt{VRFY\_G()} are simply convenience wrappers for
+when that variable is named \texttt{mpi\_rank} or \texttt{mpi\_rank\_g}, respectively.
+
+\begin{minted}{C}
+#define SYNC(comm)
+\end{minted}
+
+Macro to perform an \texttt{MPI\_Barrier()} operation on the specified MPI Communicator. Informational
+before and after messages will be printed using the \texttt{MPI\_BANNER()} macro.
+
+\begin{minted}{C}
+#define H5_PARALLEL_TEST
+\end{minted}
+
+This macro is defined primarily so that other headers included by either \texttt{testpar.h}
+or the test program itself can determine whether they're being included from a parallel test
+and can adjust functionality accordingly.
+
+\begin{minted}{C}
+#define FACC_DEFAULT 0x0 /* default */
+#define FACC_MPIO    0x1 /* MPIO */
+#define FACC_SPLIT   0x2 /* Split File */
+\end{minted}
+
+These macros are definitions for the \texttt{create\_faccess\_plist()} which are used to specify
+modifications to be made to the File Access Property List that is returned from the function.
+
+\begin{minted}{C}
+#define DXFER_COLLECTIVE_IO  0x1 /* Collective IO */
+#define DXFER_INDEPENDENT_IO 0x2 /* Independent IO collectively */
+\end{minted}
+
+These macros are used by various parallel tests to control test behavior depending on whether
+the test is operating in collective or independent I/O mode.
+
+\begin{minted}{C}
+#define BYROW 1 /* divide into slabs of rows */
+#define BYCOL 2 /* divide into blocks of columns */
+#define ZROW  3 /* same as BYCOL except process 0 gets 0 rows */
+#define ZCOL  4 /* same as BYCOL except process 0 gets 0 columns */
+\end{minted}
+
+These macros are used by various parallel tests to determine how to split a hyperslab selection
+among the available MPI processes when performing parallel dataset I/O.
+
+\begin{minted}{C}
+#define IN_ORDER     1
+#define OUT_OF_ORDER 2
+\end{minted}
+
+These macros are used by various parallel tests to determine the method for selecting points
+when using a point selection for parallel dataset I/O.
+
+\begin{minted}{C}
+#define MAX_ERR_REPORT 10 /* Maximum number of errors reported */
+\end{minted}
+
+This macro is intended to put a limit on the number of errors that a parallel test program
+should report in cases such as data verification loops, where several errors could be reported
+at once from multiple processes.
+
+\subsection{Enumerations}
+
+\begin{minted}{C}
+enum H5TEST_COLL_CHUNK_API {
+    API_NONE = 0,
+    API_LINK_HARD,
+    API_MULTI_HARD,
+    API_LINK_TRUE,
+    API_LINK_FALSE,
+    API_MULTI_COLL,
+    API_MULTI_IND
+};
+\end{minted}
+
+Enumeration value which some parallel tests use to determine how to perform parallel I/O
+
+\begin{minted}{C}
+typedef enum {
+    IND_CONTIG,  /* Independent IO on contiguous datasets */
+    COL_CONTIG,  /* Collective IO on contiguous datasets */
+    IND_CHUNKED, /* Independent IO on chunked datasets */
+    COL_CHUNKED  /* Collective IO on chunked datasets */
+} ShapeSameTestMethods;
+\end{minted}
+
+Enumeration value which some parallel tests use to determine how to perform parallel I/O
+and on what type of datasets.
+
+\subsection{Structures}
+
+None defined
+
+\subsection{Global variables}
+
+None defined
+
+\subsection{Functions}
+
+\subsubsection{\texttt{create\_faccess\_plist()}}
+
+\begin{minted}{C}
+hid_t
+create_faccess_plist(MPI_Comm comm, MPI_Info info, int l_facc_type);
+\end{minted}
+
+Utility function to create a File Access Property List. If the macro value \texttt{FACC\_DEFAULT} is
+passed for \texttt{l\_facc\_type}, the FAPL returned will be a default FAPL for serial file access. If
+the value \texttt{FACC\_MPIO} is passed for \texttt{l\_facc\_type}, the FAPL will be setup for accessing
+a file through the MPI I/O file driver according to the MPI Communicator and Info objects specified in \texttt{comm} and \texttt{info}. Collective metadata reads and writes will also be enabled on the FAPL.
+If the value \texttt{FACC\_MPIO | FACC\_SPLIT} is passed for \texttt{l\_facc\_type}, the FAPL will be
+setup for accessing a file through the multi file driver, with the file's metadata and raw data being
+split into separate files. The multi file driver will use the MPI I/O driver for managing the file data
+according to the MPI Communicator and Info objects specified in \texttt{comm} and \texttt{info}.
+Collective metadata reads and writes will \textbf{not} be enabled on the FAPL.
+
+\subsubsection{\texttt{point\_set()}}
+
+\begin{minted}{C}
+void
+point_set(hsize_t start[], hsize_t count[], hsize_t stride[],
+          hsize_t block[], size_t num_points, hsize_t coords[],
+          int order);
+\end{minted}
+
+Utility function to translate a hyperslab selection, specified by the \texttt{start}, \texttt{count}, \texttt{stride} and \texttt{block} parameters, into a point selection by populating the \texttt{coords}
+array. \texttt{order} may be specified as either of the macro values \texttt{IN\_ORDER} or
+\texttt{OUT\_OF\_ORDER}. \texttt{IN\_ORDER} causes the \texttt{coords} array to be populated in ascending
+order while iterating through the hyperslab selection's elements; \texttt{OUT\_OF\_ORDER} causes the
+\texttt{coords} array to be populated in descending order, resulting in the last selected element appearing
+first in the \texttt{coords} array. If \texttt{order} is specified as \texttt{OUT\_OF\_ORDER}, the
+\texttt{num\_points} parameter specifies the number of elements to translate from the hyperslab selection
+and should be less than or equal to the number of points that the \texttt{coords} array has allocated space for.
+
+\end{document}

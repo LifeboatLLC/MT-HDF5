@@ -1,0 +1,782 @@
+\documentclass[../HDF5_RFC.tex]{subfiles}
+ 
+\begin{document}
+
+% Start each appendix on a new page
+\newpage
+
+\section{Appendix: 'H5test' testing framework}
+\label{apdx:h5test}
+
+The following sections give an overview of HDF5's 'h5test' testing framework which is contained
+within the \texttt{test/h5test.h} and \texttt{test/h5test.c} files. Details are only given for the
+types, functions, etc. that appear in the relevant header files.
+
+\subsection{Macros}
+
+\begin{minted}{C}
+#define TESTING(WHAT)
+\end{minted}
+
+Macro to print out the word "Testing" followed by the string specified in \texttt{WHAT}. As a side
+effect, the global variable \texttt{n\_tests\_run\_g} is incremented. This macro does not print a
+newline and should therefore always be followed by a matching usage of one of the following macros.
+
+\begin{minted}{C}
+#define PASSED()
+#define H5_FAILED()
+#define SKIPPED()
+#define H5_WARNING()
+#define TEST_ERROR
+#define PUTS_ERROR(s)
+#define STACK_ERROR
+#define FAIL_STACK_ERROR
+#define FAIL_PUTS_ERROR(s)
+\end{minted}
+
+Macros to give information output about a test's pass/fail status and reasons for failure, if
+applicable.
+
+\texttt{PASSED()} prints out " PASSED". As a side effect, the global variable
+\texttt{n\_tests\_passed\_g} is incremented.
+
+\texttt{H5\_FAILED()} prints out "*FAILED*". As a side effect, the global variable
+\texttt{n\_tests\_failed\_g} is incremented.
+
+\texttt{SKIPPED()} prints out " -SKIP-". As a side effect, the global variable
+\texttt{n\_tests\_skipped\_g} is incremented.
+
+\texttt{H5\_WARNING()} prints out "*WARNING*".
+
+\texttt{TEST\_ERROR} prints out "*FAILED*", as well as the file name, line number and function name
+where usage of the macro occurred and then uses \texttt{goto} to skip to the "error" label statement.
+As a side effect, the global variable \texttt{n\_tests\_failed\_g} is incremented.
+
+\texttt{PUTS\_ERROR(s)} prints out the string specified in \texttt{s}, as well as the file name, line
+number and function name where usage of the macro occurred and then uses \texttt{goto} to skip to the
+"error" label statement.
+
+\texttt{STACK\_ERROR} prints out the contents of the default HDF5 error stack and then uses \texttt{goto}
+to skip to the "error" label statement.
+
+\texttt{FAIL\_STACK\_ERROR} is similar to \texttt{STACK\_ERROR}, but first prints out "*FAILED*", as well
+as the file name, line number and function name where usage of the macro occurred. As a side effect, the global variable \texttt{n\_tests\_failed\_g} is incremented.
+
+\texttt{FAIL\_PUTS\_ERROR(s)} is similar to \texttt{PUTS\_ERROR(s)}, but first prints out "*FAILED*", as
+well as the file name, line number and function name where usage of the macro occurred. As a side effect,
+the global variable \texttt{n\_tests\_failed\_g} is incremented.
+
+\begin{minted}{C}
+#define AT()
+\end{minted}
+
+Macro to print the file name, line number and function name where usage of the macro occurs.
+
+\begin{minted}{C}
+#define TESTING_MULTIPART(WHAT)
+#define TESTING_2(WHAT)
+#define BEGIN_MULTIPART
+#define END_MULTIPART
+#define PART_BEGIN(part_name)
+#define PART_END(part_name)
+#define PART_ERROR(part_name)
+#define PART_TEST_ERROR(part_name)
+#define PART_EMPTY(part_name)
+\end{minted}
+
+Counterpart to some of the above macros for tests which contain multiple sub-tests.
+
+\texttt{TESTING\_MULTIPART(WHAT)} prints out the word "Testing" followed by the string specified in \texttt{WHAT} and a newline.
+
+The \texttt{TESTING\_2()} macro is used to print out a slightly-indented "Testing" for each sub-test
+that is run. As a side effect, the global variable \texttt{n\_tests\_run\_g} is incremented. This macro
+does not print a newline and should therefore always be followed by a usage of the \texttt{PASSED()} or
+\texttt{SKIPPED()} macros on success, or the \texttt{PART\_ERROR()} or \texttt{PART\_TEST\_ERROR()}
+macros on failure.
+
+\texttt{BEGIN\_MULTIPART} and \texttt{END\_MULTIPART} should surround all the sub-tests for a multi-part
+test. These macros keep track of whether any of the sub-tests failed and will use \texttt{goto} to skip
+to the "error" label statement when a failure does occur.
+
+\texttt{PART\_BEGIN(part\_name)} and \texttt{PART\_END(part\_name)} should surround each individual
+sub-test in a multi-part test. These macros setup a label statement based on the name specified in
+\texttt{part\_name}. When a failure occurs in a sub-test, the \texttt{PART\_ERROR(part\_name)} or
+\texttt{PART\_TEST\_ERROR(part\_name)} macro will use \texttt{goto} to skip to the label statement
+that was setup, effectively moving on to the next sub-test instead of skipping the rest of the test.
+
+\texttt{PART\_ERROR(part\_name)} uses \texttt{goto} to skip to the label statement with the name
+specified in the \texttt{part\_name} parameter. As a side effect, the global variable \texttt{n\_tests\_failed\_g}
+is incremented.
+
+\texttt{PART\_TEST\_ERROR(part\_name)} prints out "*FAILED*", as well as the file name, line number and function name where usage of the macro occurred and then uses \texttt{goto} to skip to the label statement with the name specified in \texttt{part\_name}. As a side effect, the global variable
+\texttt{n\_tests\_failed\_g} is incremented.
+
+\texttt{PART\_EMPTY(part\_name)} uses \texttt{goto} to skip to the label statement with the name specified
+in the \texttt{part\_name} parameter. This macro is mostly used for skipping an unimplemented sub-test in a multi-part test.
+
+\begin{minted}{C}
+#define H5_FILEACCESS_VFD    0x01
+#define H5_FILEACCESS_LIBVER 0x02
+\end{minted}
+
+Macros for values that can be passed to the \texttt{h5\_fileaccess\_flags()} function.
+
+\begin{minted}{C}
+#define H5_EXCLUDE_MULTIPART_DRIVERS     0x01
+#define H5_EXCLUDE_NON_MULTIPART_DRIVERS 0x02
+\end{minted}
+
+Macros for values that can be passed to the \texttt{h5\_driver\_uses\_multiple\_files()} function.
+
+\begin{minted}{C}
+#define H5TEST_FILL_2D_HEAP_ARRAY(BUF, TYPE)
+\end{minted}
+
+Utility macro to fill a 2-dimensional array \texttt{BUF} with increasing values starting from 0.
+\texttt{BUF} should point to a \texttt{struct \{ TYPE arr[...][...]; \}}.
+
+\begin{minted}{C}
+#define h5_free_const(mem) free((void *)(uintptr_t)mem)
+\end{minted}
+
+Utility macro that can be used to cast away \texttt{const} from a pointer when freeing it in
+order to avoid compiler warnings.
+
+\subsection{Enumerations}
+
+None defined
+
+\subsection{Structures}
+
+None defined
+
+\subsection{Global variables}
+
+\begin{minted}{C}
+size_t n_tests_run_g;
+size_t n_tests_passed_g;
+size_t n_tests_failed_g;
+size_t n_tests_skipped_g;
+\end{minted}
+
+Global variables for tracking the number of tests run and how many of those tests passed, had 
+failures or were skipped. Used for statistics and information printed at the end of test programs.
+
+\begin{minted}{C}
+uint64_t vol_cap_flags_g;
+\end{minted}
+
+Global variable to contain the capability flags for the current VOL connector in use, if applicable.
+Typically set at the start of a test program with a call to \texttt{H5Pget\_vol\_cap\_flags()} and
+primarily used to skip tests which use functionality that a VOL connector doesn't advertise support
+for.
+
+\begin{minted}{C}
+MPI_Info h5_io_info_g;
+\end{minted}
+
+Global \texttt{MPI\_Info} variable used by some parallel tests for passing MPI hints to parallel
+test operations.
+
+\subsection{Functions}
+
+\subsubsection{\texttt{h5\_test\_init()}}
+\label{apdx:h5test_h5testinit}
+
+\begin{minted}{C}
+void
+h5_test_init(void);
+\end{minted}
+
+Performs test framework initialization. Should be called by 'h5test' tests toward the beginning of the \texttt{main()} function after HDF5 has been initialized. Should \textbf{not} be called by 'testframe'
+tests.
+
+\subsubsection{\texttt{h5\_restore\_err()}}
+
+\begin{minted}{C}
+void
+h5_restore_err(void);
+\end{minted}
+
+Restores HDF5's default error handling function after its temporary replacement by
+\texttt{h5\_test\_init()}, which sets the error handling function to the \texttt{h5\_errors()}
+callback function instead.
+
+\subsubsection{\texttt{h5\_get\_testexpress()}}
+\label{apdx:h5test_h5gettestexpress}
+
+\begin{minted}{C}
+int
+h5_get_testexpress(void);
+\end{minted}
+
+Returns the current \texttt{TestExpress} level setting, which determines whether a test program should
+expedite testing by skipping some tests. If the \texttt{TestExpress} level has not yet been set, it will
+be initialized to the default value (currently level 1, unless overridden at configuration time). The
+different \texttt{TestExpress} level settings have the following meanings:
+
+\begin{itemize}
+
+    \item 0 - Tests should take as long as necessary
+    \item 1 - Tests should take no more than 30 minutes
+    \item 2 - Tests should take no more than 10 minutes
+    \item 3 (or higher) - Tests should take no more than 1 minute
+
+\end{itemize}
+
+If the \texttt{TestExpress} level setting is not yet initialized, this function will first set a local variable to the value of the \texttt{H5\_TEST\_EXPRESS\_LEVEL\_DEFAULT} macro, if it has been defined.
+If the environment variable \texttt{HDF5TestExpress} is defined, its value will override the local
+variable's value. Acceptable values for the environment variable are the strings "0", "1" and "2"; any
+other string will cause the variable to be set to the value "3". Once the value for the local variable
+has been determined, \texttt{h5\_get\_testexpress()} returns that value.
+
+\subsubsection{\texttt{h5\_set\_testexpress()}}
+
+\begin{minted}{C}
+void
+h5_set_testexpress(int new_val);
+\end{minted}
+
+Sets the current \texttt{TestExpress} level setting to the value specified by \texttt{new\_val}. If
+\texttt{new\_val} is negative, the \texttt{TestExpress} level is set to the default value (currently
+level 1, unless overridden at configuration time). If \texttt{new\_val} is greater than the highest
+\texttt{TestExpress} level (3), it is set to the highest \texttt{TestExpress} level.
+
+\subsubsection{\texttt{h5\_fileaccess()}}
+
+\begin{minted}{C}
+hid_t
+h5_fileaccess(void);
+\end{minted}
+
+Wrapper function around \texttt{h5\_get\_vfd\_fapl()} and \texttt{h5\_get\_libver\_fapl()} which returns
+a File Access Property List that has potentially been configured with a non-default file driver and
+library version bounds setting. Should generally be the primary way for tests to obtain a File Access
+Property List to use when testing with different VFDs would not be problematic.
+
+\subsubsection{\texttt{h5\_fileaccess\_flags()}}
+
+\begin{minted}{C}
+hid_t
+h5_fileaccess_flags(unsigned flags);
+\end{minted}
+
+Counterpart to \texttt{h5\_fileaccess()} which allows the caller to specify which parts of the File
+Access Property List should be modified after it is created. \texttt{flags} may be specified as one of
+the macro values \texttt{H5\_FILEACCESS\_VFD} or \texttt{H5\_FILEACCESS\_LIBVER}, where the former
+specifies that the file driver of the FAPL should be modified, while the latter specifies that the
+library version bounds setting of the FAPL should be modified. \texttt{flags} can also be specified
+as a bit-wise OR of the two values, in which case behavior is equivalent to \texttt{h5\_fileaccess()}.
+
+\subsubsection{\texttt{h5\_get\_vfd\_fapl()}}
+
+\begin{minted}{C}
+herr_t
+h5_get_vfd_fapl(hid_t fapl_id);
+\end{minted}
+
+Modifies the File Access Property List specified in \texttt{fapl\_id} by setting a new Virtual File Driver
+on it with default configuration values. The Virtual File Driver to be used is chosen according to the
+value set for either the \texttt{HDF5\_DRIVER} or \texttt{HDF5\_TEST\_DRIVER} environment variable, with
+preference given to \texttt{HDF5\_DRIVER}. These environment variables may be set to one of the following
+strings:
+
+\begin{itemize}
+
+    \item "sec2" - Default sec2 driver; no configuration supplied
+    \item "stdio" - C STDIO driver; no configuration supplied
+    \item "core" - In-memory driver; 1MiB increment size and backing store enabled
+    \item "core\_paged" - In-memory driver; 1MiB increment size and backing store enabled; write tracking
+          enabled and 4KiB page size
+    \item "split" - Multi driver with the file's metadata being placed into a file with a ".meta" suffix
+          and the file's raw data being placed into a file with a ".raw" suffix
+    \item "multi" - Multi driver with the file data being placed into several different files with the 
+          suffixes "m.h5" (metadata), "s.h5" (superblock, userblock and driver info data), "b.h5" (b-tree data), "r.h5" (dataset raw data), "g.h5" (global heap data), "l.h5" (local heap data) and "o.h5"
+          (object header data)
+    \item "family" - Family driver with a family file size of 100MiB and with a default File Access Property
+          List used for accessing the family file members. A different family file size can be specified
+          in the environment variable as an integer value of bytes separated from the string "family" with whitespace, e.g. "family 52428800" would specify a family file size of 50MiB.
+    \item "log" - Log driver using \texttt{stderr} for output, with the \texttt{H5FD\_LOG\_LOC\_IO} and
+          \texttt{H5FD\_LOG\_ALLOC} flags set and 0 for the buffer size. A different set of flags may be
+          specified for the driver as an integer value (corresponding to a bit-wise OR of flags) separated from the string "log" with whitespace, e.g. "log 14" would equate to the flag
+          \texttt{H5FD\_LOG\_LOC\_IO}.
+    \item "direct" - Direct driver with a 4KiB block size, a 32KiB copy buffer size and a 1KiB memory
+          alignment setting. If the direct driver is not enabled when HDF5 is built,
+          \texttt{h5\_get\_vfd\_fapl()} will return an error.
+    \item "splitter" - Splitter driver using the default (sec2) VFD for both the read/write and write-only
+          channels, an empty log file path and set to not ignore errors on the write-only channel
+    \item "onion" - support not currently implemented; will cause \texttt{h5\_get\_vfd\_fapl()} to return an
+          error.
+    \item "subfiling" - Subfiling VFD with a default configuration of 1 I/O concentrator per node, a 32MiB
+          stripe size and using the IOC VFD with 4 worker threads. \texttt{MPI\_COMM\_WORLD} and
+          \texttt{MPI\_INFO\_NULL} are used for the MPI parameters.
+    \item "mpio" - MPI I/O VFD with \texttt{MPI\_COMM\_WORLD} and \texttt{MPI\_INFO\_NULL} used for the MPI
+          parameters.
+    \item "mirror" - support not currently implemented; will cause \texttt{h5\_get\_vfd\_fapl()} to return an
+          error.
+    \item "hdfs" - support not currently implemented; will cause \texttt{h5\_get\_vfd\_fapl()} to return an
+          error.
+    \item "ros3" - support not currently implemented; will cause \texttt{h5\_get\_vfd\_fapl()} to return an
+          error.
+
+\end{itemize}
+
+Other values for the environment variables will cause \texttt{h5\_get\_vfd\_fapl()} to return an error.
+
+Returns a non-negative value on success and a negative value on failure.
+
+\subsubsection{\texttt{h5\_get\_libver\_fapl()}}
+
+\begin{minted}{C}
+herr_t
+h5_get_libver_fapl(hid_t fapl_id);
+\end{minted}
+
+Modifies the File Access Property List specified in \texttt{fapl\_id} by setting library version bound
+values on it according to the value set for the \texttt{HDF5\_LIBVER\_BOUNDS} environment variable.
+Currently, the only valid value for this environment variable is the string "latest", which will cause
+this function to set the low and high version bounds both to \texttt{H5F\_LIBVER\_LATEST}. Other values
+for the environment variable will cause this function to fail and return a negative value.
+
+\subsubsection{\texttt{h5\_cleanup()}}
+\label{apdx:h5test_h5cleanup}
+
+\begin{minted}{C}
+int
+h5_cleanup(const char *base_name[], hid_t fapl);
+\end{minted}
+
+Used to cleanup temporary files created by a test program. \texttt{base\_name} is an array of filenames
+without suffixes to clean up. The last entry in the array must be \texttt{NULL}. For each filename
+specified, \texttt{h5\_cleanup()} will generate a VFD-dependent filename with \texttt{h5\_fixname()}
+according to the given File Access Property List \texttt{fapl}, then call \texttt{H5Fdelete()} on the
+resulting filename. \texttt{fapl} will be closed after all files are deleted. If the environment variable
+\texttt{HDF5\_NOCLEANUP} has been defined, this function will have no effect and \texttt{fapl} will be
+left open. Returns 1 if cleanup was performed and 0 otherwise.
+
+\subsubsection{\texttt{h5\_delete\_all\_test\_files()}}
+
+\begin{minted}{C}
+void
+h5_delete_all_test_files(const char *base_name[], hid_t fapl);
+\end{minted}
+
+Used to cleanup temporary files created by a test program. \texttt{base\_name} is an array of filenames
+without suffixes to clean up. The last entry in the array must be \texttt{NULL}. For each filename
+specified, this function will generate a VFD-dependent filename with \texttt{h5\_fixname()} according to
+the given File Access Property List \texttt{fapl}, then call \texttt{H5Fdelete()} on the resulting filename.
+\texttt{fapl} will \textbf{not} be closed after all files are deleted. \texttt{h5\_delete\_all\_test\_files()}
+always performs file cleanup, regardless of if the \texttt{HDF5\_NOCLEANUP} environment variable has been defined.
+
+\subsubsection{\texttt{h5\_delete\_test\_file()}}
+
+\begin{minted}{C}
+void
+h5_delete_test_file(const char *base_name, hid_t fapl);
+\end{minted}
+
+Used to cleanup a temporary file created by a test program. \texttt{base\_name} is a filename without a
+suffix to clean up. This function will generate a VFD-dependent filename with \texttt{h5\_fixname()}
+according to the given File Access Property List \texttt{fapl}, then call \texttt{H5Fdelete()} on the resulting
+filename. \texttt{fapl} will \textbf{not} be closed after the file is deleted.
+\texttt{h5\_delete\_test\_file()} always performs file cleanup, regardless of if the
+\texttt{HDF5\_NOCLEANUP} environment variable has been defined.
+
+\subsubsection{\texttt{h5\_fixname()}}
+\label{apdx:h5test_h5fixname}
+
+\begin{minted}{C}
+char
+*h5_fixname(const char *base_name, hid_t fapl, char *fullname,
+            size_t size);
+\end{minted}
+
+Given a base filename without a suffix, \texttt{base\_name}, and a File Access Property List, \texttt{fapl},
+generates a filename according to the configuration set on \texttt{fapl}. The resulting filename is copied
+to \texttt{fullname}, which is \texttt{size} bytes in size, including space for the \texttt{NUL} terminator.
+
+\texttt{h5\_fixname()} is the primary way that tests should create filenames, as it accounts for the
+possibility of a test being run with a non-default Virtual File Driver that may require a specialized
+filename (e.g., the family driver). It also allows tests to easily output test files to a different
+directory by setting the \texttt{HDF5\_PREFIX} (for serial tests) or \texttt{HDF5\_PARAPREFIX} (for parallel
+tests) environment variable.
+
+Returns the \texttt{fullname} parameter on success, or \texttt{NULL} on failure.
+
+\subsubsection{\texttt{h5\_fixname\_superblock()}}
+
+\begin{minted}{C}
+char
+*h5_fixname_superblock(const char *base_name, hid_t fapl, char *fullname,
+                       size_t size);
+\end{minted}
+
+\texttt{h5\_fixname\_superblock()} is similar to \texttt{h5\_fixname()}, but generates the filename that
+would need to be opened to find the logical HDF5 file's superblock. Useful for when a file is to be opened
+with \texttt{open(2)} but the \texttt{h5\_fixname()} string contains stuff like format strings.
+
+\subsubsection{\texttt{h5\_fixname\_no\_suffix()}}
+
+\begin{minted}{C}
+char
+*h5_fixname_no_suffix(const char *base_name, hid_t fapl, char *fullname,
+                      size_t size);
+\end{minted}
+
+\texttt{h5\_fixname\_no\_suffix()} is similar to \texttt{h5\_fixname()}, but generates a filename that
+has no suffix, where the filename from \texttt{h5\_fixname()} would typically have ".h5".
+
+\subsubsection{\texttt{h5\_fixname\_printf()}}
+
+\begin{minted}{C}
+char
+*h5_fixname_printf(const char *base_name, hid_t fapl, char *fullname,
+                   size_t size);
+\end{minted}
+
+\texttt{h5\_fixname\_printf()} is similar to \texttt{h5\_fixname()}, but generates a filename that can
+be passed through a \texttt{printf}-style function to obtain the final, processed filename. Essentially
+replaces all \% characters that would be used by a file driver with \%\%.
+
+\subsubsection{\texttt{h5\_no\_hwconv()}}
+
+\begin{minted}{C}
+void
+h5_no_hwconv(void);
+\end{minted}
+
+Temporarily turns off hardware datatype conversions in HDF5 during testing by calling
+\texttt{H5Tunregister()} to unregister all the hard conversion pathways. Useful to verify that
+datatype conversions for different datatypes still work correctly when emulated by the library.
+
+\subsubsection{\texttt{h5\_rmprefix()}}
+
+\begin{minted}{C}
+const char
+*h5_rmprefix(const char *filename);
+\end{minted}
+
+"Removes" a prefix from a filename by searching for the first occurence of ":" and returning
+a pointer into the filename just past that occurrence. No actual changes are made to the file
+name.
+
+\subsubsection{\texttt{h5\_show\_hostname()}}
+
+\begin{minted}{C}
+void
+h5_show_hostname(void);
+\end{minted}
+
+Prints out \texttt{hostname}-like information. Also prints out each MPI process' rank value if
+HDF5 is built with parallel functionality enabled and MPI is initialized. Otherwise, if HDF5
+is built with thread-safe functionality enabled and MPI is not initialized or HDF5 is not built
+with parallel functionality enabled, also prints out thread ID values.
+
+\subsubsection{\texttt{h5\_get\_file\_size()}}
+
+\begin{minted}{C}
+h5_stat_size_t
+h5_get_file_size(const char *filename, hid_t fapl);
+\end{minted}
+
+Returns the size in bytes of the file with the given filename \texttt{filename}. A File Access Property
+List specified for \texttt{fapl} will modify how the file size is calculated. If \texttt{H5P\_DEFAULT}
+is passed for \texttt{fapl}, \texttt{stat} or the platform equivalent is used to determine the file size.
+Otherwise, the calculation depends on the file driver set on \texttt{fapl}. For example, a FAPL setup
+with the MPI I/O driver will cause \texttt{h5\_get\_file\_size()} to use \texttt{MPI\_File\_get\_size()},
+while a FAPL setup with the family driver will cause \texttt{h5\_get\_file\_size()} to sum the sizes of
+the files in the family file.
+
+\subsubsection{\texttt{h5\_make\_local\_copy()}}
+
+\begin{minted}{C}
+int
+h5_make_local_copy(const char *origfilename, const char *local_copy_name);
+\end{minted}
+
+Given a file with the filename \texttt{origfilename}, makes a byte-for-byte copy of the file, which is
+then named \texttt{local\_copy\_name}, using POSIX I/O. Returns 0 on success and a negative value on
+failure. This function is useful for making copies of test files that are under version control. Tests
+should make a copy of the original file and then operate on the copy.
+
+\subsubsection{\texttt{h5\_duplicate\_file\_by\_bytes()}}
+
+\begin{minted}{C}
+int
+h5_duplicate_file_by_bytes(const char *orig, const char *dest);
+\end{minted}
+
+Similar to \texttt{h5\_make\_local\_copy()}, but uses C stdio functions. Returns 0 on success and a
+negative value on failure.
+
+\subsubsection{\texttt{h5\_compare\_file\_bytes()}}
+
+\begin{minted}{C}
+int
+h5_compare_file_bytes(char *fname1, char *fname2);
+\end{minted}
+
+Performs a byte-for-byte comparison of two files with the names \texttt{fname1} and \texttt{fname2}.
+Returns 0 if the files are identical and -1 otherwise.
+
+\subsubsection{\texttt{h5\_verify\_cached\_stabs()}}
+
+\begin{minted}{C}
+herr_t
+h5_verify_cached_stabs(const char *base_name[], hid_t fapl);
+\end{minted}
+
+Verifies that all groups in a set of files have their symbol table information cached, if present
+and if their parent group also uses a symbol table. \texttt{base\_name} is an array of filenames
+without suffixes, where the last entry must be \texttt{NULL}. \texttt{fapl} is the File Access
+Property List used to open each of the files in \texttt{base\_name}. Returns a non-negative value
+on success and a negative value on failure.
+
+\subsubsection{\texttt{h5\_get\_dummy\_vfd\_class()}}
+
+\begin{minted}{C}
+H5FD_class_t
+*h5_get_dummy_vfd_class(void);
+\end{minted}
+
+Allocates and returns a pointer to a "dummy" Virtual File Driver class which is generally
+non-functional. Must be freed by the caller with \texttt{free()} once it is no longer needed.
+
+\subsubsection{\texttt{h5\_get\_dummy\_vol\_class()}}
+
+\begin{minted}{C}
+H5VL_class_t
+*h5_get_dummy_vol_class(void);
+\end{minted}
+
+Allocates and returns a pointer to a "dummy" Virtual Object Layer connector class which is
+generally non-functional. Must be freed by the caller with \texttt{free()} once it is no longer
+needed.
+
+\subsubsection{\texttt{h5\_get\_version\_string()}}
+
+\begin{minted}{C}
+const char
+*h5_get_version_string(H5F_libver_t libver);
+\end{minted}
+
+Given a particular library version bound value, \texttt{libver}, translates the value into
+a canonical string value that is returned.
+
+\subsubsection{\texttt{h5\_check\_if\_file\_locking\_enabled()}}
+
+\begin{minted}{C}
+herr_t
+h5_check_if_file_locking_enabled(bool *are_enabled);
+\end{minted}
+
+Checks if file locking is enabled on the system by creating a temporary file and calling
+\texttt{flock()} or the platform equivalent on it. A non-negative value is return on success
+and a negative value is returned otherwise. If this function succeeds and \texttt{are\_enabled}
+is set to \texttt{true}, file locking is enabled on the system. Otherwise, it should be assumed
+the file locking is not enabled or is problematic.
+
+\subsubsection{\texttt{h5\_check\_file\_locking\_env\_var()}}
+
+\begin{minted}{C}
+void
+h5_check_file_locking_env_var(htri_t *use_locks,
+                              htri_t *ignore_disabled_locks);
+\end{minted}
+
+Parses the value of the \texttt{HDF5\_USE\_FILE\_LOCKING} environment variable, if set, and
+returns whether or not file locking should be used and whether or not failures should be
+ignored when attempting to use file locking on a system where it is disabled.
+
+\subsubsection{\texttt{h5\_using\_native\_vol()}}
+\label{apdx:h5test_h5usingnativevol}
+
+\begin{minted}{C}
+herr_t
+h5_using_native_vol(hid_t fapl_id, hid_t obj_id, bool *is_native_vol);
+\end{minted}
+
+Checks if the VOL connector being used for testing is the library's native VOL connector. One of
+either \texttt{fapl\_id} or \texttt{obj\_id} must be provided as a reference point to be checked;
+if both are provided, checking of \texttt{obj\_id} takes precedence. \texttt{H5I\_INVALID\_HID}
+should be specified for the parameter that is not provided.
+
+\texttt{obj\_id} must be the ID of an HDF5 object that is accessed with the VOL connector to check.
+If \texttt{obj\_id} is provided, the entire VOL connector stack is checked to see if it resolves
+to the native VOL connector. If only \texttt{fapl\_id} is provided, only the top-most VOL connector
+set on \texttt{fapl\_id} is checked against the native VOL connector.
+
+A non-negative value is return on success and a negative value is returned otherwise.
+
+\subsubsection{\texttt{h5\_get\_test\_driver\_name()}}
+
+\begin{minted}{C}
+const char
+*h5_get_test_driver_name(void);
+\end{minted}
+
+Returns a pointer to the name of the VFD being used for testing. If the environment variable
+\texttt{HDF5\_DRIVER} or \texttt{HDF5\_TEST\_DRIVER} has been set, the value set for that variable
+is returned, with preference given to the \texttt{HDF5\_DRIVER} environment variable if both are set.
+Otherwise, the name of the library's default VFD is returned.
+
+\subsubsection{\texttt{h5\_using\_default\_driver()}}
+
+\begin{minted}{C}
+bool
+h5_using_default_driver(const char *drv_name);
+\end{minted}
+
+Returns \texttt{true} if the name of the VFD being used for testing matches the name of the
+library's default VFD and \texttt{false} otherwise. If \texttt{drv\_name} is \texttt{NULL},
+\texttt{h5\_get\_test\_driver\_name()} is called to obtain the name of the VFD in use before
+making the comparison.
+
+\subsubsection{\texttt{h5\_using\_parallel\_driver()}}
+
+\begin{minted}{C}
+herr_t
+h5_using_parallel_driver(hid_t fapl_id, bool *driver_is_parallel);
+\end{minted}
+
+Checks if the VFD set on \texttt{fapl\_id} is a parallel-enabled VFD that supports MPI. A VFD must
+have set the \texttt{H5FD\_FEAT\_HAS\_MPI} feature flag to be considered as a parallel-enabled VFD.
+\texttt{fapl\_id} may be \texttt{H5P\_DEFAULT}. A non-negative value is return on success and a negative
+value is returned otherwise.
+
+\subsubsection{\texttt{h5\_driver\_is\_default\_vfd\_compatible()}}
+
+\begin{minted}{C}
+herr_t
+h5_driver_is_default_vfd_compatible(hid_t fapl_id,
+                                    bool *default_vfd_compatible);
+\end{minted}
+
+Checks if the VFD set on \texttt{fapl\_id} creates files that are compatible with the library's
+default VFD. For example, the core and MPI I/O drivers create files that are compatible with the
+library's default VFD, while the multi and family drivers do not since they split the HDF5 file
+into several different files. This check is helpful for skipping tests that use pre-generated testing
+files. VFDs that create files which aren't compatible with the default VFD will generally not be able
+to open these pre-generated files and those particular tests will fail.
+
+\texttt{fapl\_id} may be \texttt{H5P\_DEFAULT}. A non-negative value is return on success and a negative
+value is returned otherwise.
+
+\subsubsection{\texttt{h5\_driver\_uses\_multiple\_files()}}
+
+\begin{minted}{C}
+bool
+h5_driver_uses_multiple_files(const char *drv_name, unsigned flags);
+\end{minted}
+
+Returns \texttt{true} if the given VFD name, \texttt{drv\_name}, matches the name of a VFD which
+stores data using multiple files, according to the specified \texttt{flags} and \texttt{false} otherwise.
+If \texttt{drv\_name} is \texttt{NULL}, the \texttt{h5\_get\_test\_driver\_name()} function is called to
+obtain the name of the VFD in use before making the comparison. The values for \texttt{flags} are as
+follows:
+
+\begin{itemize}
+
+    \item \texttt{H5\_EXCLUDE\_MULTIPART\_DRIVERS} - This flag excludes any drivers which store data
+          using multiple files which, together, make up a single logical file. These are drivers like
+          the split, multi and family drivers.
+    \item \texttt{H5\_EXCLUDE\_NON\_MULTIPART\_DRIVERS} - This flag excludes any drivers which store
+          data using multiple files which are separate logical files. The splitter driver is an example
+          of this type of driver.
+
+\end{itemize}
+
+\subsubsection{\texttt{h5\_local\_rand()}}
+
+\begin{minted}{C}
+int
+h5_local_rand(void);
+\end{minted}
+
+Function to return a random number without modifying state for the \texttt{rand()}/\texttt{random()}
+functions.
+
+\subsubsection{\texttt{h5\_local\_srand()}}
+
+\begin{minted}{C}
+void
+h5_local_srand(unsigned int seed);
+\end{minted}
+
+Function to seed the \texttt{h5\_local\_rand()} function without modifying state for the \texttt{rand()}/\texttt{random()} functions.
+
+\subsubsection{\texttt{h5\_szip\_can\_encode()}}
+
+\begin{minted}{C}
+int
+h5_szip_can_encode(void);
+\end{minted}
+
+Returns a value that indicates whether or not the library's SZIP filter has encoding/decoding enabled.
+Returns 1 if encoding and decoding are enabled. Returns 0 if only decoding is enabled. Otherwise, returns
+-1.
+
+\subsubsection{\texttt{h5\_set\_info\_object()}}
+
+\begin{minted}{C}
+int
+h5_set_info_object(void);
+\end{minted}
+
+Utility function for parallel HDF5 tests which parses the \texttt{HDF5\_MPI\_INFO} environment variable
+for ";"-delimited key=value pairs and sets them on the \texttt{h5\_io\_info\_g} MPI Info global variable for later use by testing. Returns 0 on success and a negative value otherwise.
+
+\subsubsection{\texttt{h5\_dump\_info\_object()}}
+
+\begin{minted}{C}
+void
+h5_dump_info_object(MPI_Info info);
+\end{minted}
+
+Given an MPI Info object, \texttt{info}, iterates through all the keys set on the Info object and
+prints them out as key=value pairs.
+
+\subsubsection{\texttt{getenv\_all()}}
+
+\begin{minted}{C}
+char
+*getenv_all(MPI_Comm comm, int root, const char *name);
+\end{minted}
+
+Retrieves the value of the environment variable \texttt{name}, if set, on the MPI process with rank
+value \texttt{root} on the MPI Communicator \texttt{comm}, then broadcasts the result to other MPI
+processes in \texttt{comm}. Collective across the MPI Communicator specified in \texttt{comm}.
+If MPI is not initialized, simply calls \texttt{getenv(name)} and returns a pointer to the result.
+\texttt{NULL} is returned if the environment variable \texttt{name} is not set.
+
+\textbf{Note:} the pointer returned by this function is only valid until the next call to
+\texttt{getenv\_all()} and the data stored there must be copied somewhere else before any further calls
+to \texttt{getenv\_all()} take place.
+
+\subsubsection{\texttt{h5\_send\_message()}}
+
+\begin{minted}{C}
+void
+h5_send_message(const char *file, const char *arg1, const char *arg2);
+\end{minted}
+
+Utility function to facilitate inter-process communication by "sending" a message with a temporary
+file. \texttt{file} is the name of the temporary file to be created. \texttt{arg1} and \texttt{arg2}
+are strings to be written to the first and second lines of the file, respectively, and may both be
+\texttt{NULL}.
+
+\subsubsection{\texttt{h5\_wait\_message()}}
+
+\begin{minted}{C}
+herr_t
+h5_wait_message(const char *file);
+\end{minted}
+
+Utility function to facilitate inter-process communication by waiting until a temporary file written by
+the \texttt{h5\_send\_message()} function is available for reading. \texttt{file} is the name of the file
+being waited on and should match the filename provided to \texttt{h5\_send\_message()}. This
+function repeatedly attempts to open a file with the given filename until it is either successful
+or times out. The temporary file is removed once it has been successfully opened. A non-negative value
+is return on success and a negative value is returned otherwise.
+
+\end{document}

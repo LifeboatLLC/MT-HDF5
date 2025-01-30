@@ -1,0 +1,229 @@
+\documentclass[../HDF5_RFC.tex]{subfiles}
+ 
+\begin{document}
+
+% Start each appendix on a new page
+\newpage
+
+\section{Appendix: Examples}
+\label{apdx:examples}
+
+Error checking is omitted in the following examples for simplicity.
+
+\subsection{\textbf{Example skeleton for a 'testframe' HDF5 test}}
+\label{apdx:testframe_example}
+
+\begin{minted}{C}
+#include "testframe.h"
+
+int
+main(int argc, char **argv)
+{
+    H5open();
+
+    /* Initialize testing framework */
+    TestInit(argv[0], NULL, NULL, NULL, NULL, 0);
+
+    /* Add each test */
+    AddTest("test1", test1(), test1_setup(), test1_cleanup(),
+            &test1_data, sizeof(test1_data), "Runs test 1");
+    AddTest("test2", test2(), test2_setup(), test2_cleanup(),
+            &test2_data, sizeof(test2_data), "Runs test 2");
+
+    /* Parse command line arguments */
+    TestParseCmdLine(argc, argv);
+
+    /* Display testing information */
+    TestInfo(stdout);
+
+    /* Start test timer */
+    TestAlarmOn();
+
+    /* Run tests */
+    PerformTests();
+
+    /* Display test summary, if requested */
+    if (GetTestSummary())
+        TestSummary(stdout);
+
+    /* Turn test timer off */
+    TestAlarmOff();
+
+    num_errs = GetTestNumErrs();
+
+    /* Release test infrastructure */
+    TestShutdown();
+
+    if (num_errs > 0)
+        exit(EXIT_FAILURE);
+    else
+        exit(EXIT_SUCCESS);
+}
+\end{minted}
+
+\subsection{\textbf{Example skeleton for a parallel 'testframe' HDF5 test}}
+\label{apdx:testframe_parallel_example}
+
+\begin{minted}{C}
+#include "testframe.h"
+
+int
+main(int argc, char **argv)
+{
+    int mpi_size; /* MPI communicator size */
+    int mpi_rank; /* MPI process rank value */
+
+    MPI_Init(&argc, &argv);
+
+    MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &mpi_size);
+
+    H5open();
+
+    /* Initialize testing framework; pass MPI rank value
+       for process ID */
+    TestInit(argv[0], NULL, NULL, NULL, NULL, mpi_rank);
+
+    /* Add each test */
+    AddTest("test1", test1(), test1_setup(), test1_cleanup(),
+            &test1_data, sizeof(test1_data), "Runs test 1");
+    AddTest("test2", test2(), test2_setup(), test2_cleanup(),
+            &test2_data, sizeof(test2_data), "Runs test 2");
+
+    /* Parse command line arguments */
+    TestParseCmdLine(argc, argv);
+
+    /* Display testing information */
+    TestInfo(stdout);
+
+    /* Start test timer */
+    TestAlarmOn();
+
+    /* Run tests */
+    PerformTests();
+
+    /* Display test summary, if requested */
+    if (GetTestSummary())
+        TestSummary(stdout);
+
+    /* Turn test timer off */
+    TestAlarmOff();
+
+    /* Gather errors from all processes */
+    num_errs = GetTestNumErrs();
+    MPI_Allreduce(MPI_IN_PLACE, &num_errs, 1, MPI_INT,
+                  MPI_MAX, MPI_COMM_WORLD);
+
+    /* Release test infrastructure */
+    TestShutdown();
+
+    MPI_Finalize();
+
+    if (num_errs > 0)
+        exit(EXIT_FAILURE);
+    else
+        exit(EXIT_SUCCESS);
+}
+\end{minted}
+
+\subsection{\textbf{Example skeleton for a multi-threaded HDF5 test}}
+\label{apdx:multithread_example}
+
+\begin{minted}{C}
+#include "testframe.h"
+
+static void
+test1(const void *params)
+{
+    unsigned max_num_threads = GetTestMaxNumThreads();
+    unsigned timeout = *(unsigned *)params;
+
+    /* Calculate amount of work to do */
+    ...
+
+    /* Do work */
+    ...
+
+    return;
+}
+
+int
+main(int argc, char **argv)
+{
+    unsigned runtime;
+    unsigned num_subtests;
+    unsigned subtest_timeout;
+    int      TestExpress;
+    int      num_errs;
+
+    /* Initialize testing framework */
+    TestInit(argv[0], NULL, NULL, NULL, NULL, 0);
+
+    TestExpress = GetTestExpress();
+    if (TestExpress == 0) {
+        runtime = 0; /* Run with no timeout (runtime = 0) or pick a
+                        reasonable timeout */
+    }
+    else if (TestExpress == 1) {
+        runtime = 1800; /* 30 minute timeout */
+    }
+    else if (TestExpress == 2) {
+        runtime = 600; /* 10 minute timeout */
+    }
+    else {
+        runtime = 60; /* 1 minute timeout */
+    }
+
+    /* Calculate timeout for each sub-test */
+    subtest_timeout = (runtime - MARGIN) / num_subtests;
+
+    /* Add each test, passing the timeout as a parameter */
+    AddTest("test1", test1(), NULL, test1_cleanup(),
+            &subtest_timeout, sizeof(unsigned), "Runs test 1");
+    AddTest("test2", test2(), NULL, test2_cleanup(),
+            &subtest_timeout, sizeof(unsigned), "Runs test 2");
+
+    /* Parse command line arguments, including the maximum number of
+       threads to use */
+    TestParseCmdLine(argc, argv);
+
+    /* Display testing information */
+    TestInfo(stdout);
+
+    /* Start test timer; assumes refactoring of TestAlarmOn to accept
+       a specified timeout. TestAlarmOn could also be refactored to
+       handle this itself, given its own information about the TestExpress
+       value */
+    TestAlarmOn(runtime);
+
+    /* Run sub-tests, with the test framework being responsible for spawning
+       threads to run each test function. If performance becomes an issue,
+       threads can be spawned once and the entire test can be encapsulated
+       in a single function. Also, the testing framework may need
+       infrastructure to check against the maximum allowed runtime after
+       each sub-test in case a particular sub-test spills over its time
+       budget. */
+    PerformTests();
+
+    /* Display test summary, if requested */
+    if (GetTestSummary())
+        TestSummary(stdout);
+
+    /* Not strictly necessary to turn the alarm off, but the test alarm
+       should generally be left on until right before exiting since even
+       the cleanup step may be prone to hanging */
+    TestAlarmOff();
+
+    num_errs = GetTestNumErrs();
+
+    /* Release test infrastructure */
+    TestShutdown();
+
+    if (num_errs > 0)
+        exit(EXIT_FAILURE);
+    else
+        exit(EXIT_SUCCESS);
+}
+\end{minted}
+
+\end{document}

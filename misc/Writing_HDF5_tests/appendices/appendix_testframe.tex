@@ -1,0 +1,530 @@
+\documentclass[../HDF5_RFC.tex]{subfiles}
+ 
+\begin{document}
+
+% Start each appendix on a new page
+\newpage
+
+\section{Appendix: 'Testframe' testing framework}
+\label{apdx:test_frame}
+
+The following sections give an overview of HDF5's 'testframe' testing framework which is contained
+within the \texttt{test/testframe.h} and \texttt{test/testframe.c} files. Details are only given
+for the types, functions, etc. that appear in the relevant header files.
+
+\subsection{Macros}
+
+\begin{minted}{C}
+#define MAXTESTNAME 64
+\end{minted}
+
+The maximum number of bytes in a test name string, including the NUL terminator.
+
+\begin{minted}{C}
+#define MAXTESTDESC 128
+\end{minted}
+
+The maximum number of bytes in a test description string, including the NUL terminator.
+
+\begin{minted}{C}
+/* Number of seconds to wait before killing a test (requires alarm(2)) */
+#define H5_ALARM_SEC 1200 /* default is 20 minutes */
+\end{minted}
+
+The default compile-time value for the \texttt{TestAlarmOn()} function.
+
+\begin{minted}{C}
+/*
+ * Predefined test verbosity levels.
+ *
+ * Convention:
+ *
+ * The higher the verbosity value, the more information printed.
+ * So, output for higher verbosity also include output of all lower
+ * verbosity.
+ *
+ *  Value     Description
+ *  0         None:   No informational message.
+ *  1                 "All tests passed"
+ *  2                 Header of overall test
+ *  3         Default: header and results of individual test
+ *  4
+ *  5         Low:    Major category of tests.
+ *  6
+ *  7         Medium: Minor category of tests such as functions called.
+ *  8
+ *  9         High:   Highest level.  All information.
+ */
+#define VERBO_NONE 0 /* None    */
+#define VERBO_DEF  3 /* Default */
+#define VERBO_LO   5 /* Low     */
+#define VERBO_MED  7 /* Medium  */
+#define VERBO_HI   9 /* High    */
+\end{minted}
+
+Macros for the different test verbosity levels, for use with the \texttt{SetTestVerbosity()} function.
+
+\begin{minted}{C}
+/*
+ * Verbose queries
+ * Only None needs an exact match.  The rest are at least as much.
+ */
+#define VERBOSE_NONE (HDGetTestVerbosity() == VERBO_NONE)
+#define VERBOSE_DEF  (HDGetTestVerbosity() >= VERBO_DEF)
+#define VERBOSE_LO   (HDGetTestVerbosity() >= VERBO_LO)
+#define VERBOSE_MED  (HDGetTestVerbosity() >= VERBO_MED)
+#define VERBOSE_HI   (HDGetTestVerbosity() >= VERBO_HI)
+\end{minted}
+
+Macros for use with the \texttt{GetTestVerbosity()} function that return whether or not the current
+test verbosity level is at least set to the given level.
+
+\begin{minted}{C}
+#define SKIPTEST  1 /* Skip this test */
+#define ONLYTEST  2 /* Do only this test */
+#define BEGINTEST 3 /* Skip all tests before this test */
+\end{minted}
+
+Macros for values passed to the \texttt{SetTest()} function that determine the final behavior for a
+test that has been added to the list of tests.
+
+\begin{minted}{C}
+#define MESSAGE(V, A)
+do {
+    if (TestFrameworkProcessID_g == 0 && TestVerbosity_g > (V))
+        printf A;
+} while(0)
+\end{minted}
+
+Macro to print a message string \texttt{A} from the process with the process ID of 0, as long as the current test verbosity level setting is greater than \texttt{V}.
+
+\subsection{Enumerations}
+
+None defined
+
+\subsection{Structures}
+
+None defined
+
+\subsection{Global variables}
+
+\begin{minted}{C}
+int TestFrameworkProcessID_g = 0;
+\end{minted}
+
+Contains an ID value for the current process which can be set during calls to \texttt{TestInit()}.
+Primarily used to control output from a parallel test so that it only comes from one MPI process,
+but also used for control flow.
+
+\begin{minted}{C}
+int TestVerbosity_g = VERBO_DEF;
+\end{minted}
+
+Contains the current setting for the level of output that tests should print. Defined values range
+from 0 - 9, with higher values implying more verbose output.
+
+\subsection{Functions}
+
+\subsubsection{\texttt{TestInit()}}
+\label{apdx:testframe_testinit}
+
+\begin{minted}{C}
+herr_t
+TestInit(const char *ProgName, void (*TestPrivateUsage)(FILE *stream),
+         int (*TestPrivateParser)(int argc, char *argv[]),
+         herr_t (*TestSetupFunc)(void), herr_t (*TestCleanupFunc)(void),
+         int TestProcessID);
+\end{minted}
+
+Initializes test program-specific information and infrastructure. \texttt{TestInit()} should be
+called before any other function from this testing framework is called, but after other optional
+library setup functions, such as \texttt{H5open()} or \texttt{H5dont\_atexit()}.
+
+\texttt{ProgName} is simply a name for the test program (which may be different than the actual
+executable's name).
+
+\texttt{TestPrivateUsage} is a pointer to a function that can print out additional test program usage
+help text that is specific to the test program. That function will be called by the \texttt{TestUsage()}
+function after it has printed out the more general test program command-line option information. May
+be \texttt{NULL}.
+
+\texttt{TestPrivateParser} is a pointer to a function that will parse any command-line options that are
+specific to a test program. That function will be called by the \texttt{TestParseCmdLine()} function when
+a non-standard command-line option is found. May be \texttt{NULL}.
+
+\texttt{TestSetupFunc} is a pointer to a function that can be used to setup any state needed before tests
+begin executing. If provided, this callback function will be called as part of \texttt{TestInit()} once
+the testing framework has been fully initialized. May be \texttt{NULL}.
+
+\texttt{TestCleanupFunc} is a pointer to a function that can be used to clean up any state after tests
+have finished executing. If provided, this callback function will be called by \texttt{TestShutdown()}
+before the testing framework starts being shut down. May be \texttt{NULL}.
+
+\subsubsection{\texttt{TestShutdown()}}
+
+\begin{minted}{C}
+herr_t
+TestShutdown(void);
+\end{minted}
+
+Performs tear-down of the testing infrastructure by cleaning up internal state needed for running
+tests and freeing any associated memory. \texttt{TestShutdown()} should be called after any other function
+from this testing framework is called, and just before any optional library shutdown functions, such as
+\texttt{H5close()}.
+
+\subsubsection{\texttt{TestUsage()}}
+
+\begin{minted}{C}
+void
+TestUsage(FILE *stream);
+\end{minted}
+
+Prints out the usage help text for the test program to the given \texttt{FILE} pointer. Prints out a
+list of the general command-line options for the program, an optional list of additional test
+program-specific command-line options (if a \texttt{TestPrivateUsage} callback function was specified)
+and a list of all the tests and test descriptions for the test program. \texttt{stream} may be \texttt{NULL},
+in which case \texttt{stdout} is used.
+
+\textbf{Note:} when a parallel test calls \texttt{TestUsage()}, the output, including additional output
+from the optional callback specified in \texttt{TestInit()}, is only printed from the MPI process with rank
+value 0. Any collective operations should currently be avoided in the optional callback if one is provided.
+
+\subsubsection{\texttt{TestInfo()}}
+
+\begin{minted}{C}
+void
+TestInfo(FILE *stream);
+\end{minted}
+
+Prints out miscellaneous test information, which currently only includes the version of the HDF5
+library that the test program was linked to, to the given \texttt{FILE} pointer. \texttt{stream} may be \texttt{NULL}, in which case \texttt{stdout} is used.
+
+\textbf{Note:} when a parallel test calls \texttt{TestInfo()}, the output is only printed from the MPI
+process with rank value 0.
+
+\subsubsection{\texttt{AddTest()}}
+
+\begin{minted}{C}
+herr_t
+AddTest(const char *TestName, void (*TestFunc)(const void *),
+        void (*TestSetupFunc)(void *), void (*TestCleanupFunc)(void *),
+        const void *TestData, size_t TestDataSize, const char *TestDescr);
+\end{minted}
+
+This function adds a test to the list of tests that will be run when the \texttt{PerformTests()}
+function is called.
+
+\texttt{TestName} is a short name string for the test and must be \texttt{MAXTESTNAME} bytes or less,
+including the NUL terminator. If the specified string begins with the character '-', the test will
+be set to be skipped by default.
+
+\texttt{TestFunc} is a pointer to the function that will be called for the test. The function must
+return no value and accept a single \texttt{const void *} as an argument, which will point to any
+parameters to be passed to the test that are specified in \texttt{TestData}.
+
+\texttt{TestSetupFunc} is an optional pointer to a function that will be called before the test's
+main test function is called. The function must return no value and accept a single \texttt{void *}
+as an argument, which will point to any parameters to be passed to the test that are specified in
+\texttt{TestData}.
+
+\texttt{TestCleanupFunc} is an optional pointer to a function that will be called after the test's
+main test function has finished executing. The function must return no value and accept a single
+\texttt{void *} as an argument, which will point to any parameters to be passed to the test that are
+specified in \texttt{TestData}.
+
+\texttt{TestData} is an optional pointer to test parameters that will be passed to the test's main
+test function when executed, as well as the test's optional setup and cleanup callbacks. If given,
+the testing framework will make a copy of the parameters according to the size specified in
+\texttt{TestDataSize}. If \texttt{TestData} is not \texttt{NULL}, \texttt{TestDataSize} must be a
+positive value. Otherwise, if \texttt{TestData} is \texttt{NULL}, \texttt{TestDataSize} must be 0.
+
+\texttt{TestDataSize} is the size of the test parameter data to be passed to the test's main test
+function and setup and callback functions during execution. If \texttt{TestData} is not \texttt{NULL},
+\texttt{TestDataSize} must be a positive value. Otherwise, if \texttt{TestData} is \texttt{NULL},
+\texttt{TestDataSize} must be 0.
+
+\texttt{TestDescr} is a short description string for the test and must be \texttt{MAXTESTDESC} bytes
+or less, including the NUL terminator. The string passed in \texttt{TestDescr} may be an empty string,
+but it is advised that test authors give a description to a test.
+
+\subsubsection{\texttt{TestParseCmdLine()}}
+
+\begin{minted}{C}
+herr_t
+TestParseCmdLine(int argc, char *argv[]);
+\end{minted}
+
+Parses the command-line options for the test program. Parse standard command-line options until it
+encounters a non-standard option, at which point it delegates to the \texttt{TestPrivateParser} callback
+function if one was specified by the \texttt{TestInit()} function. The following command-line options
+are the current standard options:
+
+\begin{itemize}
+
+    \item \texttt{-verbose} / \texttt{-v} - Used to specify the level of verbosity of output from the
+          test program. An extra argument must be provided to set the level, with the following being
+          acceptable values: 'l' - low verbosity (value 5), 'm' - medium verbosity (value 7),
+          'h' - high verbosity (value 9), any number in 'int' range - set the verbosity to that value
+    \item \texttt{-exclude} / \texttt{-x} - Used to specify a test that should be excluded when running.
+          The short name of the test (as provided to \texttt{AddTest()}) must be provided as an extra
+          argument to the command-line option.
+    \item \texttt{-begin} / \texttt{-b} - Used to specify that a particular test should be the first
+          test run from the set of tests. All tests before that test (in the order added by
+          \texttt{AddTest()}) will be skipped and all tests after that test will be run as normal.
+          The short name of the test (as provided to \texttt{AddTest()}) must be provided as an extra
+          argument to the command-line option.
+    \item \texttt{-only} / \texttt{-o} - Used to specify that only a particular test should be run.
+          All other tests will be skipped. The short name of the test (as provided to \texttt{AddTest()})
+          must be provided as an extra argument to the command-line option.
+    \item \texttt{-summary} / \texttt{-s} - Used to specify that a summary of all tests run should be
+          printed out before the test program exits. No extra arguments should be provided.
+    \item \texttt{-disable-error-stack} - Used to specify that printing out of HDF5 error stacks should
+          be disabled. No extra arguments should be provided.
+    \item \texttt{-help} / \texttt{-h} - Used to print out the usage help text of the test program.
+    \item \texttt{-cleanoff} / \texttt{-c} - Used to specify that the \texttt{TestCleanupFunc()} callback
+          function for each test should not clean up temporary HDF5 files when the test program exits.
+          No extra arguments should be provided.
+    \item \texttt{-maxthreads} / \texttt{-t} - Used to specify a maximum number of threads that a test
+          program should be allowed to spawn in addition to the main thread. If a negative value is
+          specified, test programs will be allowed to spawn any number of threads. The value 0 indicates
+          that no additional threads should be spawned.
+
+\end{itemize}
+
+\textbf{Note:} \texttt{TestParseCmdLine()} requires that all standard command-line arguments must appear
+before any non-standard arguments that would be parsed by an optional argument parsing callback function specified in \texttt{TestInit()}.
+
+\textbf{Note:} \texttt{TestParseCmdLine()} should not be called until all tests have been added by
+\texttt{AddTest()} since some of the command-line arguments that are parsed involve the ability to skip
+certain tests.
+
+\subsubsection{\texttt{PerformTests()}}
+
+\begin{minted}{C}
+herr_t
+PerformTests(void);
+\end{minted}
+
+Runs all tests added to the list of tests with \texttt{AddTest()} that aren't set to be skipped. For
+each test, the test's setup callback function (if supplied) will be called first, followed by the test's
+primary function and then the test's cleanup callback function (if supplied). Before each test begins,
+a timer is enabled by a call to \texttt{TestAlarmOn()} to prevent the test from running longer than
+desired. A call to \texttt{TestAlarmOff()} disables this timer after each test has finished.
+
+\subsubsection{\texttt{TestSummary()}}
+
+\begin{minted}{C}
+void
+TestSummary(FILE *stream);
+\end{minted}
+
+Used to print out a short summary after tests have run, which includes the name and description of
+each test and the number of errors that occurred while running that test. If a test was skipped, the
+number of errors for that test will show as "N/A". \texttt{stream} may be \texttt{NULL}, in which case
+\texttt{stdout} is used.
+
+\textbf{Note:} when a parallel test calls \texttt{TestSummary()}, the output is only printed from the
+MPI process with rank value 0.
+
+\subsubsection{\texttt{GetTestVerbosity()}}
+
+\begin{minted}{C}
+int
+GetTestVerbosity(void);
+\end{minted}
+
+Returns the current test verbosity level setting.
+
+\subsubsection{\texttt{SetTestVerbosity()}}
+
+\begin{minted}{C}
+int
+SetTestVerbosity(int newval);
+\end{minted}
+
+Sets the current test verbosity level to the value specified by \texttt{newval}. If \texttt{newval} is negative, the test verbosity level is set to the lowest value (\texttt{VERBO\_NONE}). If \texttt{newval}
+is greater than the highest verbosity value, it is set to the highest verbosity value (\texttt{VERBO\_HI}). The function returns the previous test verbosity level setting.
+
+\subsubsection{\texttt{ParseTestVerbosity()}}
+
+\begin{minted}{C}
+herr_t
+ParseTestVerbosity(char *argv);
+\end{minted}
+
+Parses a string for a test verbosity level value, then sets the test verbosity level to that value.
+The string may be the character 'l' (for low verbosity), 'm' (for medium verbosity), 'h' (for high verbosity)
+or a number between 0-9, corresponding to the different predefined levels of test verbosity. If a negative
+number is specified, the test verbosity level is set to the default (\texttt{VERBO\_DEF}). If a number
+greater than \texttt{VERBO\_HI} is specified, the test verbosity level is set to \texttt{VERBO\_HI}. If \texttt{ParseTestVerbosity()} can't parse the string, a negative value will be returned to indicate
+failure.
+
+\subsubsection{\texttt{GetTestExpress()}}
+\label{apdx:testframe_gettestexpress}
+
+\begin{minted}{C}
+int
+GetTestExpress(void);
+\end{minted}
+
+Returns the current \texttt{TestExpress} level setting from the 'h5test' framework. If the
+\texttt{TestExpress} level has not yet been set, it will be initialized to the default value
+(currently level 1, unless overridden at configuration time).
+
+\subsubsection{\texttt{SetTestExpress()}}
+
+\begin{minted}{C}
+void
+SetTestExpress(int newval);
+\end{minted}
+
+Sets the current \texttt{TestExpress} level setting to the value specified by \texttt{newval}. If \texttt{newval} is negative, the \texttt{TestExpress} level is set to the default value (currently
+level 1, unless overridden at configuration time). If \texttt{newval} is greater than the highest
+\texttt{TestExpress} level (3), it is set to the highest \texttt{TestExpress} level.
+
+\subsubsection{\texttt{GetTestSummary()}}
+
+\begin{minted}{C}
+bool
+GetTestSummary(void);
+\end{minted}
+
+Returns whether or not a test program should call \texttt{TestSummary()} to print out a summary of
+test results after tests have run.
+
+\subsubsection{\texttt{GetTestCleanup()}}
+\label{apdx:testframe_gettestcleanup}
+
+\begin{minted}{C}
+int
+GetTestCleanup(void);
+\end{minted}
+
+Returns whether or not a test should clean up any temporary files it has created when it is finished
+running. If \texttt{true} is returned, the test should clean up temporary files. Otherwise, it should
+leave them in place. Each test that has a cleanup callback should call \texttt{GetTestCleanup()} in
+that callback to determine whether or not to clean up temporary files.
+
+\subsubsection{\texttt{SetTestNoCleanup()}}
+
+\begin{minted}{C}
+void
+SetTestNoCleanup(void);
+\end{minted}
+
+Sets the temporary test file cleanup status to "don't cleanup temporary files", causing future calls to \texttt{GetTestCleanup()} to return \texttt{false} and inform tests that they should not clean up temporary test files they have created.
+
+\subsubsection{\texttt{GetTestNumErrs()}}
+
+\begin{minted}{C}
+int
+GetTestNumErrs(void);
+\end{minted}
+
+Returns the total number of errors recorded during the execution of the test program. This number is
+primarily used to determine whether the test program should exit with a success or failure value.
+
+\subsubsection{\texttt{IncTestNumErrs()}}
+
+\begin{minted}{C}
+void
+IncTestNumErrs(void);
+\end{minted}
+
+Simply increments the number of errors recorded for the test program.
+
+\subsubsection{\texttt{TestErrPrintf()}}
+
+\begin{minted}{C}
+int
+TestErrPrintf(const char *format, ...);
+\end{minted}
+
+Wrapper around \texttt{vfprintf} that includes a call to \texttt{IncTestNumErrs()}. The function
+returns the return value of \texttt{vfprintf}.
+
+\subsubsection{\texttt{SetTest()}}
+
+\begin{minted}{C}
+herr_t
+SetTest(const char *testname, int action);
+\end{minted}
+
+Given a test's short name and an action, modifies the behavior of how a test will run. The acceptable
+values for \texttt{action} are:
+
+\begin{itemize}
+
+    \item \texttt{SKIPTEST} (1) - Skip this test.
+    \item \texttt{ONLYTEST} (2) - Set this test to be the only test that runs. All other tests will
+          be set to be skipped.
+    \item \texttt{BEGINTEST} (3) - Set this test so that it will be the first test in the ordering
+          that will run. All tests before it in the ordering will be set to be skipped and all tests
+          after it will be untouched.
+
+\end{itemize}
+
+Other values for \texttt{action} will cause \texttt{SetTest()} to return a negative value for failure.
+
+Multiple tests can be set to the value \texttt{ONLYTEST} in order to run a subset of tests. This is
+intended as a convenient alternative to needing to skip many other tests by setting them to the value
+\texttt{SKIPTEST}.
+
+\subsubsection{\texttt{GetTestMaxNumThreads()}}
+\label{apdx:testframe_gettestmaxnumthreads}
+
+\begin{minted}{C}
+int
+GetTestMaxNumThreads(void);
+\end{minted}
+
+Returns the value for the maximum number of threads that a test program is allowed to spawn in addition
+to the main thread. This number is usually configured by a command-line argument passed to
+the test program and is intended for allowing tests to adjust their workload according to the resources
+of the testing environment.
+
+The default value is -1, meaning that multi-threaded tests aren't limited in the number of threads they
+can spawn, but should still only use a reasonable amount of threads. The value 0 indicates that no additional threads should be spawned, which is primarily for testing purposes. The value returned by \texttt{GetTestMaxNumThreads()} is meaningless for non-multi-threaded tests.
+
+\subsubsection{\texttt{SetTestMaxNumThreads()}}
+
+\begin{minted}{C}
+herr_t
+SetTestMaxNumThreads(int max_num_threads);
+\end{minted}
+
+Sets the value for the maximum number of threads a test program is allowed to spawn in addition to the
+main thread for the test program. This number is usually configured by a command-line argument passed to
+the test program and is intended for allowing tests to adjust their workload according to the resources
+of the testing environment.
+
+If \texttt{max\_num\_threads} is a negative value, test programs will be allowed to spawn any number of
+threads, though it is advised that test programs try to limit this to a reasonable number. The value 0
+indicates that no additional threads should be spawned, which is primarily for testing purposes.
+
+\subsubsection{\texttt{TestAlarmOn()}}
+\label{apdx:testframe_testalarmon}
+
+\begin{minted}{C}
+herr_t
+TestAlarmOn(void);
+\end{minted}
+
+Enables a timer for the test program using \texttt{alarm(2)}. If \texttt{alarm(2)} support is not available
+(the macro \texttt{H5\_HAVE\_ALARM} is not defined), the function does nothing. The default value passed to \texttt{alarm(2)} is defined by the macro \texttt{H5\_ALARM\_SEC} (currently 1200 seconds). If the
+\texttt{HDF5\_ALARM\_SECONDS} environment variable is defined, its value will be parsed by
+\texttt{strtoul()} and will override the default value.
+
+\subsubsection{\texttt{TestAlarmOff()}}
+\label{apdx:testframe_testalarmoff}
+
+\begin{minted}{C}
+void
+TestAlarmOff(void);
+\end{minted}
+
+Disables any previously set timer for a test program by calling \texttt{alarm(2)} with a value of 0. If
+\texttt{alarm(2)} support is not available (the macro \texttt{H5\_HAVE\_ALARM} is not defined), the
+function does nothing.
+
+\end{document}

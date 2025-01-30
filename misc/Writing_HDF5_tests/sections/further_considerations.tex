@@ -1,0 +1,93 @@
+\documentclass[../HDF5_RFC.tex]{subfiles}
+ 
+\begin{document}
+
+\section{Further considerations}
+\label{further_considerations}
+
+\subsection{Parallel tests}
+
+\subsubsection{MPI implementations}
+
+After a parallel HDF5 test program is reasonably complete, it is always a good idea to run that test
+program against multiple MPI implementations to catch problems that may occur from differences in
+implemented functionality, values of limits, etc. between the MPI implementations. For parallel HDF5,
+this usually means a test program should, at a minimum, be tested against recent versions of
+\href{https://www.mpich.org/}{MPICH} and \href{https://www.open-mpi.org/}{OpenMPI}.
+
+\subsection{Multi-threaded tests}
+
+\subsubsection{\texttt{TestExpress} values}
+
+The \texttt{TextExpress} variable is currently set to a default value of 3 in order to facilitate quicker
+CI testing of HDF5. While this chosen value may be acceptable for testing multi-threaded HDF5 functionality
+for changes in GitHub PRs, this value will be too restrictive for general testing of multi-threaded HDF5.
+If it is desired that multi-threaded HDF5 functionality be tested against changes in GitHub PRs,
+multi-threaded tests could be split into a separate GitHub CI action to minimize their effects by running
+them in parallel alongside other testing. However, this would likely still impose a 30 minute time limit
+as the general consensus seems to be that tests which take longer than this tend to slow down the development
+process when PRs are actively being created. More exhaustive testing will likely need to occur outside of
+GitHub, as actions are limited to 6 hours of runtime unless being executed on a machine not owned by GitHub.
+An effective cadence for exhaustive testing would need to be determined so that developers can be informed
+reasonably quickly when new issues are introduced to multi-threaded HDF5.
+
+\subsubsection{Facilitating debugging of multi-thread issues}
+
+When debugging an issue that occurs while testing multi-threaded HDF5, it is advantageous to stop the
+process as immediately as possible in order to prevent program state from progressing. To this end, it
+has been proposed that \texttt{assert()} statements should be used to achieve this effect while running
+from within a debugger. To be the most effective, this would likely require that \texttt{assert()}
+statements be included in both the HDF5 testing framework and the HDF5 library itself. While the former
+should be fairly easy to accomplish with effort from a test program's author and also by updating some
+of the testing macros in \texttt{h5test.h}, the latter is of more concern for general use of HDF5. While \texttt{assert()} statements will only have an effect in debug builds of HDF5, past experience has shown
+that users employ these types of builds for general use. It is proposed that the "developer" build mode\footnote{\href{https://github.com/HDFGroup/hdf5/pull/1659}{HDF5 PR \#1659}}, which was added to
+HDF5's CMake build code, should also be added to the library's Autotools build code (provided that it
+remains around for the foreseeable future) and these \texttt{assert()} statements should only be active
+with a "developer" build of the library. This allows for much more freedom to introduce heavy-handed
+debugging techniques, while not affecting users of HDF5 in general.
+
+Also note that, after some research on the topic\footnote{\href{https://nullprogram.com/blog/2022/06/26/}{Assertions should be more debugger-oriented}}, it appears that whether or not an \texttt{assert()} statement stops at a useful place during debugging, or even stops at all, varies among platforms. However, compiler features can help out a bit here, with the following given as an example that might be useful:
+
+\begin{minted}{C}
+#ifdef DEBUG
+#  if __GNUC__
+#    define assert(c) if (!(c)) __builtin_trap()
+#  elif _MSC_VER
+#    define assert(c) if (!(c)) __debugbreak()
+#  else
+#    define assert(c) if (!(c)) *(volatile int *)0 = 0
+#  endif
+#else
+#  define assert(c)
+#endif
+\end{minted}
+
+These compiler directives are better suited for debugging purposes as they generate trap-like instructions and
+generally force a much more abrupt process termination as desired. Testing across the compilers/platforms that
+HDF5 currently supports would be needed to determine if this is a workable approach.
+
+\subsubsection{Testing}
+
+\begin{enumerate}
+
+    \item In addition to running multi-threaded HDF5 tests regularly, it may also be useful to setup CI
+          integration for testing HDF5 with one or both of the following tools:
+
+          \begin{itemize}
+
+              \item ThreadSanitizer - Tool from LLVM/Clang to detect data races. Could be useful with
+                    some tweaking, but it's currently in beta and known to have issues / produce false
+                    positives with the current approach to adapting HDF5 for multi-threaded usage.
+
+              \item Helgrind - Valgrind tool for detecting several different types of errors in usage
+                    of POSIX pthreads. Has not yet been tested with multi-threaded HDF5. Generally only
+                    useful for POSIX pthreads, but can potentially be extended to other threading packages
+                    with its code annotation capabilities.
+
+          \end{itemize}
+
+    \item An interesting related project\footnote{\href{http://www.cs.umd.edu/projects/PL/multithreadedtc/overview.html}{MultithreadedTC}} explores forcing specific thread interleaving, which may be useful in very specific testing circumstances
+
+\end{enumerate}
+
+\end{document}

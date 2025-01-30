@@ -1,0 +1,90 @@
+\documentclass[letterpaper,rfc,hyper]{HDF5_RFC}
+
+% Extra packages
+
+% Use titlesec package to redefine paragraph style and 
+% include numbering for paragraphs by setting secnumdepth
+% to 4
+% From StackExchange answer here: https://tex.stackexchange.com/questions/60209/how-to-add-an-extra-level-of-sections-with-headings-below-subsubsection
+% !! DO NOT USE unless needed
+%\RequirePackage{titlesec}
+%\setcounter{secnumdepth}{4}
+%\titleformat{\paragraph}
+%{\normalfont\normalsize\bfseries}{\theparagraph}{1em}{}
+%\titlespacing*{\paragraph}
+%{0pt}{3.25ex plus 1ex minus .2ex}{1.5ex plus .2ex}
+
+% Document metadata: Title, author(s), etc
+\title{Writing HDF5 tests}
+\author{Jordan Henderson}
+\date{Oct. 21, 2024}
+% YYYY-MM-DD.version
+\rfcversion{2024-10-21.v1}
+\organization{Lifeboat}
+\orglogo{Lifeboat-Logo}
+
+%% Note: If you rename this file (HDF5_RFC.tex), you'll need to
+%% change the line at the beginning of each file in the 'sections'
+%% and 'appendices' subdirectories to use the new name.
+
+% Glossary terms, for use in main document
+% \input{support/glossary}
+
+% Index of terms, included in table of contents
+\makeindex[intoc]
+
+% Bibliography references, for use in main document
+%\addbibresource{support/rfc.bib}
+
+%% Start the main document
+\begin{document}
+
+% Title
+\maketitle
+
+% Abstract
+\subfile{sections/abstract}
+
+% Table of Contents
+\newpage
+\tableofcontents
+
+% Main text of RFC
+\newpage
+\subfile{sections/intro}
+\subfile{sections/frameworks}
+\subfile{sections/considerations}
+\subfile{sections/serial}
+\subfile{sections/parallel}
+\subfile{sections/multithread}
+\subfile{sections/further_considerations}
+
+% Revision History
+\input{support/revisions}
+
+% Display revision history
+\makerevisions
+
+% Glossaries of acronyms and terms
+%\newpage
+%\printglossary[type=\acronymtype]
+%\printglossary
+
+% Index of terms used
+%\newpage
+%\printindex
+
+% Bibliography (list them in the TOC)
+%\newpage
+%\phantomsection
+%\addcontentsline{toc}{section}{References}
+%\printbibliography
+
+% Appendices (switch to letters for appendix sections)
+\appendix
+\subfile{appendices/appendix_testframe}
+\subfile{appendices/appendix_h5test}
+\subfile{appendices/appendix_testpar}
+\subfile{appendices/appendix_examples}
+
+\end{document}
