@@ -25,3 +25,25 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
 elseif (CMAKE_SYSTEM_NAME STREQUAL "Darwin")
   # other macOS-specific flags for Clang
 endif ()
+
+# Copy test scripts from source tree to build tree
+set (TEST_SCRIPTS
+  run_chunk_simple.sh
+  run_contiguous_simple.sh
+  run_multi_dsets.sh
+  run_multi_files.sh
+)
+
+foreach (script ${TEST_SCRIPTS})
+  add_custom_command(
+    OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/${script}
+    COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_SOURCE_DIR}/${script} ${CMAKE_CURRENT_BINARY_DIR}/${script}
+    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/${script}
+    COMMENT "Copying script to build tree"
+  )
+
+  add_custom_target(${script}
+    ALL
+    DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/${script}
+  )
+endforeach()
