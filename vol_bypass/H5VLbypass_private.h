@@ -45,6 +45,7 @@ pthread_cond_t  cond_read_finished;
 pthread_cond_t  continue_local;
 
 int  nthreads_tpool       = NUM_LOCAL_THREADS;
+int  nthreads_inactive    = 0;
 int  nsteps_tpool         = THREAD_STEP;
 int  info_pointer         = 0;
 int  thread_task_count    = 0;
