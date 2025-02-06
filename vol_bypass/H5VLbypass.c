@@ -2419,8 +2419,11 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
     /* Do not return until the thread pool finishes the read */
     /* TBD: Enforcing this will become more complicated once multiple
      * application threads making concurrent H5Dread() calls is supported. */
+    pthread_mutex_lock(&mutex_local);
     while (thread_task_count > 0)
         pthread_cond_wait(&cond_read_finished, &mutex_local);
+
+    pthread_mutex_unlock(&mutex_local);
 
     assert(thread_task_count == 0);
 
