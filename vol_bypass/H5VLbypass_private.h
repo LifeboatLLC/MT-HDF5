@@ -41,6 +41,7 @@
 
 pthread_mutex_t mutex_local;
 pthread_cond_t  cond_local;
+pthread_cond_t  cond_read_finished;
 pthread_cond_t  continue_local;
 
 int  nthreads_tpool       = NUM_LOCAL_THREADS;
