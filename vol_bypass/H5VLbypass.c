@@ -1465,6 +1465,9 @@ H5VL_bypass_dataset_create(void *obj, const H5VL_loc_params_t *loc_params, const
                            hid_t type_id, hid_t space_id, hid_t dcpl_id, hid_t dapl_id, hid_t dxpl_id,
                            void **req)
 {
+    fprintf(stderr, "Dataset creation with the Bypass VOL is not yet supported\n");
+    return NULL;
+    /*
     H5VL_bypass_t *dset;
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
     void          *under;
@@ -1478,20 +1481,21 @@ H5VL_bypass_dataset_create(void *obj, const H5VL_loc_params_t *loc_params, const
     if (under) {
         dset = H5VL_bypass_new_obj(under, o->under_vol_id);
 
-        /* Check for async request */
+        // Check for async request
         if (req && *req)
             *req = H5VL_bypass_new_obj(*req, o->under_vol_id);
-    } /* end if */
+    }
     else {
         dset = NULL;
         goto done;
     }
 
-    /* Save the dataset information for quick access later */
+    // Save the dataset information for quick access later
     dset_open_helper(obj, name, dset, dxpl_id, req);
 
 done:
     return (void *)dset;
+    */
 } /* end H5VL_bypass_dataset_create() */
 
 /*-------------------------------------------------------------------------
@@ -1779,7 +1783,7 @@ read_big_data(int fd, int *buf, size_t size, off_t offset)
                         break;
                     default:
                         fprintf(stderr, "pread failed with error: %s\n", strerror(errno));
-                        return FAIL;
+                        return -1;
                 }
             }
 
@@ -2438,15 +2442,19 @@ static herr_t
 H5VL_bypass_dataset_write(size_t count, void *dset[], hid_t mem_type_id[], hid_t mem_space_id[],
                           hid_t file_space_id[], hid_t plist_id, const void *buf[], void **req)
 {
-    void  *o_arr[count]; /* Array of under objects */
-    hid_t  under_vol_id; /* VOL ID for all objects */
+    fprintf(stderr, "Dataset write with the Bypass VOL is not yet supported ");
+    return -1;
+    
+    /*
+    void  *o_arr[count]; // Array of under objects
+    hid_t  under_vol_id; // VOL ID for all objects
     herr_t ret_value;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL DATASET Write\n");
 #endif
 
-    /* Populate the array of under objects */
+    // Populate the array of under objects
     under_vol_id = ((H5VL_bypass_t *)(dset[0]))->under_vol_id;
     for (size_t u = 0; u < count; u++) {
         o_arr[u] = ((H5VL_bypass_t *)(dset[u]))->under_object;
@@ -2456,11 +2464,12 @@ H5VL_bypass_dataset_write(size_t count, void *dset[], hid_t mem_type_id[], hid_t
     ret_value = H5VLdataset_write(count, o_arr, under_vol_id, mem_type_id, mem_space_id, file_space_id,
                                   plist_id, buf, req);
 
-    /* Check for async request */
+    // Check for async request
     if (req && *req)
         *req = H5VL_bypass_new_obj(*req, under_vol_id);
 
     return ret_value;
+    */
 } /* end H5VL_bypass_dataset_write() */
 
 /*-------------------------------------------------------------------------
