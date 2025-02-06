@@ -531,6 +531,7 @@ H5VL_bypass_init(hid_t vipl_id)
     pthread_mutex_init(&mutex_local, NULL);
     pthread_cond_init(&cond_local, NULL);
     pthread_cond_init(&continue_local, NULL);
+    pthread_cond_init(&cond_read_finished, NULL);
 
     /* Start threads for the thread pool to process the data */
     for (i = 0; i < nthreads_tpool; i++) {
@@ -1851,13 +1852,10 @@ start_thread_for_pool(void *args)
         // addrs_local[0], sizes_local[0], vec_bufs_local[0],
         // md_for_thread.vec_arr_nused);
 
-        /* Turn on the flag thread_loop_finish if H5Dread finished putting all tasks
-         * in the queue (thread_task_finished is on) and the thread pool processed
-         * all the task in the queue */
-        if (thread_task_finished && thread_task_count == 0) {
+        /* Turn on the flag thread_loop_finish if H5Dread finished putting all tasks in the queue
+         * (thread_task_finished is on) and the thread pool processed all the task in the queue */
+        if (thread_task_finished && thread_task_count == 0)
             thread_loop_finish = true;
-            pthread_cond_signal(&cond_read_finished);
-        }
 
         pthread_mutex_unlock(&mutex_local);
 
@@ -1889,8 +1887,14 @@ start_thread_for_pool(void *args)
             pthread_mutex_unlock(&mutex_local);
         }
 
-        /* If all task in the queue are finished and all the data read are finished,
-         * notify that the corresponding file can be closed.
+        /* If all tasks have been taken on by other threads and this thread's work is complete,
+         * flag it as inactive */
+        if (thread_loop_finish) {
+            nthreads_inactive++;
+            pthread_cond_signal(&cond_read_finished);
+        }
+        /* If all task in the queue are finished and all the data read are finished, notify that
+         * the corresponding file can be closed.
          */
         /* pthread_mutex_lock(&mutex_local);
         if (thread_loop_finish && (file_stuff[file_indices_local[0]].num_reads ==
@@ -2420,7 +2424,9 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
     /* TBD: Enforcing this will become more complicated once multiple
      * application threads making concurrent H5Dread() calls is supported. */
     pthread_mutex_lock(&mutex_local);
-    while (thread_task_count > 0)
+
+    /* Only finish H5Dread() once all threads are inactive and no tasks are undone */
+    while (nthreads_inactive < nthreads_tpool || thread_task_count > 0)
         pthread_cond_wait(&cond_read_finished, &mutex_local);
 
     pthread_mutex_unlock(&mutex_local);
@@ -2888,8 +2894,6 @@ c_file_open_helper(const char *name)
     file_stuff[file_stuff_count].read_started = false;
     pthread_cond_init(&(file_stuff[file_stuff_count].close_ready),
                       NULL); /* Initialize the condition variable for file closing */
-
-    pthread_cond_init(&cond_read_finished, NULL);
     /*printf("%s: name = %s, file_stuff_count = %d, file_stuff[%d].name = %s, file_stuff[%d].fp = %d\n",
      * __func__, name, file_stuff_count, file_stuff_count, file_stuff[file_stuff_count].name,
      * file_stuff_count, file_stuff[file_stuff_count].fp);*/
