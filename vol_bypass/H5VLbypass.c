@@ -549,8 +549,10 @@ H5VL_bypass_term(void)
         /* The END_OF_READ flag is used for multiple H5Dread calls.  It indicates the end of one call with
          * the special symbols of '###\n' in the log file. */
         if (!info_stuff[i].end_of_read)
-            fprintf(log_fp, "%s %s %llu %llu %llu %llu\n", info_stuff[i].file_name, info_stuff[i].dset_name,
-                info_stuff[i].dset_loc, info_stuff[i].data_offset_file, info_stuff[i].nelmts, info_stuff[i].data_offset_mem);
+            fprintf(log_fp, "%s %s %" PRIuHADDR "%" PRIuHADDR "%" PRIuHADDR "%" PRIuHADDR"\n",
+                    info_stuff[i].file_name, info_stuff[i].dset_name,
+                    info_stuff[i].dset_loc, info_stuff[i].data_offset_file, info_stuff[i].nelmts,
+                    info_stuff[i].data_offset_mem);
         else
             fprintf(log_fp, "###\n");
 
@@ -1816,7 +1818,8 @@ process_vectors(void *rbuf, sel_info_t *selection_info)
 
     hss_nelmts = H5Sget_select_npoints(selection_info->mem_space_id);
     if (nelmts != hss_nelmts)
-	printf("the number of selection in file (%ld) isn't equal to the number in memory (%lld)\n", nelmts, hss_nelmts); 
+        printf("the number of selection in file (%ld) isn't equal to the number in memory (%" PRIdHSIZE")\n", nelmts,
+               hss_nelmts);
 
     file_iter_id = H5Ssel_iter_create(selection_info->file_space_id, selection_info->dtype_size, H5S_SEL_ITER_SHARE_WITH_DATASPACE);
     mem_iter_id  = H5Ssel_iter_create(selection_info->mem_space_id, selection_info->dtype_size, H5S_SEL_ITER_SHARE_WITH_DATASPACE);
