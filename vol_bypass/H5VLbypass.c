@@ -1392,6 +1392,8 @@ dset_open_helper(void *obj, const char *name, H5VL_bypass_t *dset, hid_t dxpl_id
     if (H5VL_bypass_dataset_optional(dset, &opt_args, dxpl_id, req) < 0)
         puts("unable to get dataset's location in file");
 
+    if (addr == HADDR_UNDEF)
+        puts("unable to get dataset's location in file");
     dset_stuff[dset_count].location = addr;
 
     /* The HDF5 library adds a '/' in front of the dataset name (full pathname).
@@ -1747,14 +1749,14 @@ done:
     return ret_value;
 }
 
-/* Break down into smaller sections if the data size is 2GB or bigger.  Need to
- * change the type of BUF to VOID to be more general */
-static void
+/* Break down into smaller sections if the data size is 2GB or bigger.  Need to change the type
+ * of BUF to VOID to be more general */
+static herr_t
 read_big_data(int fd, int *buf, size_t size, off_t offset)
 {
     while (size > 0) {
-        size_t bytes_in   = 0;  /* # of bytes to read       */
-        size_t bytes_read = -1; /* # of bytes actually read */
+        int bytes_in   = 0;  /* # of bytes to read       */
+        int bytes_read = -1; /* # of bytes actually read */
 
         /* Trying to read more bytes than the return type can handle is
          * undefined behavior in POSIX.
@@ -1762,16 +1764,33 @@ read_big_data(int fd, int *buf, size_t size, off_t offset)
         if (size > POSIX_MAX_IO_BYTES)
             bytes_in = POSIX_MAX_IO_BYTES;
         else
-            bytes_in = size;
+            bytes_in = (int) size;
 
         do {
             bytes_read = pread(fd, buf, bytes_in, offset);
             if (bytes_read > 0)
                 offset += bytes_read;
+            
+            /* Error messages for unexpected values of errno */
+            if (-1 == bytes_read) {
+                switch (errno) {
+                    case EAGAIN:
+                    case EINTR:
+                        break;
+                    default:
+                        fprintf(stderr, "pread failed with error: %s\n", strerror(errno));
+                        return FAIL;
+                }
+            }
+
         } while (-1 == bytes_read && EINTR == errno);
 
-        size -= (size_t)bytes_read;
-        buf = (int *)((char *)buf + bytes_read);
+
+
+        if (bytes_read > 0) {
+            size -= (size_t)bytes_read;
+            buf = (int *)((char *)buf + bytes_read);
+        }
     } /* end while */
 }
 
@@ -1831,19 +1850,23 @@ start_thread_for_pool(void *args)
         /* Turn on the flag thread_loop_finish if H5Dread finished putting all tasks
          * in the queue (thread_task_finished is on) and the thread pool processed
          * all the task in the queue */
-        if (thread_task_finished && thread_task_count == 0)
+        if (thread_task_finished && thread_task_count == 0) {
             thread_loop_finish = true;
+            pthread_cond_signal(&cond_read_finished);
+        }
 
         pthread_mutex_unlock(&mutex_local);
 
         // fprintf(stderr, "before reading data\n");
         for (i = 0; i < local_count; i++) {
-            // fprintf(stderr, "thread_id = %d, i = %d: file_indices_local = %d,
-            // vec_bufs_local = %p, sizes_local = %ld, addrs_local = %llu\n",
-            // thread_id, i, file_indices_local[i], vec_bufs_local[i], sizes_local[i],
-            // addrs_local[i]);
-            read_big_data(file_stuff[file_indices_local[i]].fd, vec_bufs_local[i], sizes_local[i],
-                          addrs_local[i]);
+            // fprintf(stderr, "thread_id = %d, i = %d: file_indices_local = %d, vec_bufs_local = %p,
+            // sizes_local = %ld, addrs_local = %llu\n", thread_id, i, file_indices_local[i],
+            // vec_bufs_local[i], sizes_local[i], addrs_local[i]);
+
+            if (read_big_data(file_stuff[file_indices_local[i]].fd, vec_bufs_local[i], sizes_local[i],
+                          addrs_local[i]) < 0) {
+                            fprintf(stderr, "read_big_data failed\n");
+                          }
 
             pthread_mutex_lock(&mutex_local);
             file_stuff[file_indices_local[i]].num_reads--;
@@ -1852,8 +1875,10 @@ start_thread_for_pool(void *args)
              * the current file, signal the main process that this file can be closed.
              */
             if (thread_loop_finish && (file_stuff[file_indices_local[i]].num_reads == 0)) {
-                // fprintf(stderr, "thread %d: file name = %s, signal close_ready\n",
-                // thread_id, file_stuff[file_indices_local[i]].name);
+                // fprintf(stderr, "thread %d: file name = %s, signal close_ready\n", thread_id,
+                // file_stuff[file_indices_local[i]].name);
+                /* There are currently no reads active on this file - it may be closed */
+                file_stuff[file_indices_local[i]].read_started = false;
                 pthread_cond_signal(&(file_stuff[file_indices_local[i]].close_ready));
             }
 
