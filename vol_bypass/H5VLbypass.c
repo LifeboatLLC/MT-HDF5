@@ -587,6 +587,7 @@ H5VL_bypass_term(void)
 
     pthread_mutex_destroy(&mutex_local);
     pthread_cond_destroy(&cond_local);
+    pthread_cond_destroy(&cond_read_finished);
     pthread_cond_destroy(&continue_local);
 
     /* Open the log file and output the following info:
@@ -2385,6 +2386,15 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
     if (req && *req)
         *req = H5VL_bypass_new_obj(*req, under_vol_id);
 
+
+    /* Do not return until the thread pool finishes the read */
+    /* TBD: Enforcing this will become more complicated once multiple
+     * application threads making concurrent H5Dread() calls is supported. */
+    while (thread_task_count > 0)
+        pthread_cond_wait(&cond_read_finished, &mutex_local);
+
+    assert(thread_task_count == 0);
+
 done:
     return ret_value;
 } /* end H5VL_bypass_dataset_read() */
@@ -2842,11 +2852,10 @@ c_file_open_helper(const char *name)
     pthread_cond_init(&(file_stuff[file_stuff_count].close_ready),
                       NULL); /* Initialize the condition variable for file closing */
 
-    /*printf("%s: name = %s, file_stuff_count = %d, file_stuff[%d].name = %s,
-     * file_stuff[%d].fp = %d\n",
-     * __func__, name, file_stuff_count, file_stuff_count,
-     * file_stuff[file_stuff_count].name, file_stuff_count,
-     * file_stuff[file_stuff_count].fp);*/
+    pthread_cond_init(&cond_read_finished, NULL);
+    /*printf("%s: name = %s, file_stuff_count = %d, file_stuff[%d].name = %s, file_stuff[%d].fp = %d\n",
+     * __func__, name, file_stuff_count, file_stuff_count, file_stuff[file_stuff_count].name,
+     * file_stuff_count, file_stuff[file_stuff_count].fp);*/
 
     /* Increment the number of files being opened with C */
     file_stuff_count++;
