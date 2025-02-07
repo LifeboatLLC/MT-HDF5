@@ -3192,14 +3192,20 @@ H5VL_bypass_datatype_close(void *dt, hid_t dxpl_id, void **req)
     return ret_value;
 } /* end H5VL_bypass_datatype_close() */
 
-static void
+static herr_t
 c_file_open_helper(const char *name)
 {
-    /* Enlarge the size of the file stuff for C and Re-allocate the memory if
-     * necessary */
+    herr_t ret_value = 0;
+
+    /* Enlarge the size of the file stuff for C and Re-allocate the memory if necessary */
     if (file_stuff_count == file_stuff_size) {
         file_stuff_size *= 2;
-        file_stuff = (file_t *)realloc(file_stuff, file_stuff_size * sizeof(file_t));
+        if ((file_stuff = (file_t *)realloc(file_stuff, file_stuff_size * sizeof(file_t))) == NULL)
+        {
+            fprintf(stderr, "failed to allocate more memory for file info table\n");
+            ret_value = -1;
+            goto done;
+        }
     }
 
     /* Open the file in C for IO without HDF5 */
@@ -3215,7 +3221,11 @@ c_file_open_helper(const char *name)
     if (!file_stuff[file_stuff_count].vfd_file_handle)
         puts("failed to get VFD file handle"); */
 
-    file_stuff[file_stuff_count].fd = open(name, O_RDONLY);
+    if ((file_stuff[file_stuff_count].fd = open(name, O_RDONLY)) < 0) {
+        fprintf(stderr, "failed to open file descriptor: %s\n", strerror(errno));
+        ret_value = -1;
+        goto done;
+    }
 
     /* Increment the reference count for this file */
     file_stuff[file_stuff_count].ref_count++;
@@ -3232,6 +3242,9 @@ c_file_open_helper(const char *name)
 
     /* Increment the number of files being opened with C */
     file_stuff_count++;
+
+done:
+    return ret_value;
 }
 
 /*-------------------------------------------------------------------------
@@ -3258,40 +3271,81 @@ H5VL_bypass_file_create(const char *name, unsigned flags, hid_t fcpl_id, hid_t f
 #endif
 
     /* Get copy of our VOL info from FAPL */
-    H5Pget_vol_info(fapl_id, (void **)&info);
+    if (H5Pget_vol_info(fapl_id, (void **)&info) < 0) {
+        fprintf(stderr, "error while getting VOL info from FAPL\n");
+        goto error;
+    }
 
     /* Make sure we have info about the underlying VOL to be used */
     if (!info)
         return NULL;
 
     /* Copy the FAPL */
-    under_fapl_id = H5Pcopy(fapl_id);
+    if ((under_fapl_id = H5Pcopy(fapl_id)) < 0) {
+        fprintf(stderr, "error while copying FAPL\n");
+        goto error;
+    }
 
     /* Set the VOL ID and info for the underlying FAPL */
-    H5Pset_vol(under_fapl_id, info->under_vol_id, info->under_vol_info);
+    if (H5Pset_vol(under_fapl_id, info->under_vol_id, info->under_vol_info) < 0) {
+        fprintf(stderr, "error while setting VOL info in FAPL\n");
+        goto error;
+    }
 
     /* Open the file with the underlying VOL connector */
-    under = H5VLfile_create(name, flags, fcpl_id, under_fapl_id, dxpl_id, req);
-    if (under) {
-        file = H5VL_bypass_new_obj(under, info->under_vol_id);
+    if ((under = H5VLfile_create(name, flags, fcpl_id, under_fapl_id, dxpl_id, req)) < 0) {
+        fprintf(stderr, "error while opening file with underlying VOL\n");
+        goto error;
+    }
 
-        /* Check for async request */
-        if (req && *req)
-            *req = H5VL_bypass_new_obj(*req, info->under_vol_id);
-    } /* end if */
-    else
-        file = NULL;
+    if ((file = H5VL_bypass_new_obj(under, info->under_vol_id)) < 0) {
+        fprintf(stderr, "error while creating bypass file object\n");
+        goto error;
+    }
+
+    /* Check for async request */
+    if (req && *req)
+        if ((*req = H5VL_bypass_new_obj(*req, info->under_vol_id)) < 0) {
+            fprintf(stderr, "error while creating bypass async request\n");
+            goto error;
+        }
 
     /* Close underlying FAPL */
-    H5Pclose(under_fapl_id);
+    if (H5Pclose(under_fapl_id) < 0) {
+        fprintf(stderr, "error while closing underlying FAPL\n");
+        goto error;
+    }
+
+    under_fapl_id = H5I_INVALID_HID;
 
     /* Release copy of our VOL info */
-    H5VL_bypass_info_free(info);
-
+    if (H5VL_bypass_info_free(info) < 0) {
+        fprintf(stderr, "error while releasing VOL info\n");
+        goto error;
+    }
+    
+    info = NULL;
+    
     /* Open the C file and set the fields for the file_t structure */
-    c_file_open_helper(name);
+    if (c_file_open_helper(name) < 0) {
+        fprintf(stderr, "error while opening c file\n");
+        goto error;
+    }
 
     return (void *)file;
+
+error:
+    H5E_BEGIN_TRY {
+        if (under)
+            H5VLfile_close(under, under_fapl_id, dxpl_id, req);
+        if (file)
+            H5VL_bypass_free_obj(file);
+        if (under_fapl_id > 0)
+            H5Pclose(under_fapl_id);
+    } H5E_END_TRY;
+
+    return NULL;
+
 } /* end H5VL_bypass_file_create() */
 
 #ifdef TMP
@@ -3657,7 +3711,10 @@ H5VL_bypass_file_close(void *file, hid_t dxpl_id, void **req)
         }
     }
 
-    ret_value = H5VLfile_close(o->under_object, o->under_vol_id, dxpl_id, req);
+    if ((ret_value = H5VLfile_close(o->under_object, o->under_vol_id, dxpl_id, req)) < 0) {
+        fprintf(stderr, "Failed to close file in underlying VOL connectors\n");
+        goto done;
+    }
 
     /* Check for async request */
     if (req && *req)
@@ -3667,6 +3724,7 @@ H5VL_bypass_file_close(void *file, hid_t dxpl_id, void **req)
     if (ret_value >= 0)
         H5VL_bypass_free_obj(o);
 
+done:
     return ret_value;
 } /* end H5VL_bypass_file_close() */
 
