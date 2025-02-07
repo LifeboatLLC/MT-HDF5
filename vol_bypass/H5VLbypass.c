@@ -225,6 +225,9 @@ static herr_t H5VL_bypass_token_from_str(void *obj, H5I_type_t obj_type, const c
 /* Generic optional callback */
 static herr_t H5VL_bypass_optional(void *obj, H5VL_optional_args_t *args, hid_t dxpl_id, void **req);
 
+/* Check if any threads are still performing or waiting for tasks */
+herr_t is_any_thread_active(bool *out);
+
 /*******************/
 /* Local variables */
 /*******************/
@@ -472,8 +475,9 @@ H5VL_bypass_init(hid_t vipl_id)
 {
     char *nthreads_str = NULL;
     char *nsteps_str   = NULL;
-    // info_for_thread_t info_for_thread[nthreads_tpool]; /* Remove it and use the
-    // global variable meta_for_thread? */
+    pthread_mutexattr_t attr;
+    // info_for_thread_t info_for_thread[nthreads_tpool]; /* Remove it and use the global variable
+    // meta_for_thread? */
     int i;
 
 #ifdef ENABLE_BYPASS_LOGGING
@@ -526,9 +530,18 @@ H5VL_bypass_init(hid_t vipl_id)
     md_for_thread.vec_arr_nused  = 0;
     md_for_thread.free_memory    = false;
 
+    /* Initialize thread active status to true */
+    md_for_thread.thread_is_active = calloc(nthreads_tpool, sizeof(bool));
+
+    for (i = 0; i < nthreads_tpool; i++)
+        md_for_thread.thread_is_active[i] = true;
+
     info_for_thread = malloc(nthreads_tpool * sizeof(info_for_thread_t));
 
-    pthread_mutex_init(&mutex_local, NULL);
+    pthread_mutexattr_init(&attr);
+    pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
+    pthread_mutex_init(&mutex_local, &attr);
+
     pthread_cond_init(&cond_local, NULL);
     pthread_cond_init(&continue_local, NULL);
     pthread_cond_init(&cond_read_finished, NULL);
@@ -541,6 +554,8 @@ H5VL_bypass_init(hid_t vipl_id)
         if (pthread_create(&th[i], NULL, &start_thread_for_pool, &info_for_thread[i]) != 0)
             fprintf(stderr, "failed to create thread %d\n", i);
     }
+
+    pthread_mutexattr_destroy(&attr);
 
     return 0;
 } /* end H5VL_bypass_init() */
@@ -563,6 +578,7 @@ H5VL_bypass_term(void)
 {
     FILE *log_fp;
     int   i;
+    void  *thread_ret = NULL;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL TERM\n");
@@ -582,8 +598,12 @@ H5VL_bypass_term(void)
     pthread_cond_broadcast(&cond_local);
 
     for (i = 0; i < nthreads_tpool; i++) {
-        if (pthread_join(th[i], NULL) != 0)
+        if (pthread_join(th[i], &thread_ret) != 0)
             fprintf(stderr, "failed to join thread %d\n", i);
+        
+        if (thread_ret != (void*) 0) {
+            fprintf(stderr, "thread %d failed\n", i);
+        }
     }
 
     pthread_mutex_destroy(&mutex_local);
@@ -640,6 +660,7 @@ H5VL_bypass_term(void)
             free(md_for_thread.sizes);
         if (md_for_thread.vec_bufs)
             free(md_for_thread.vec_bufs);
+        free(md_for_thread.thread_is_active);
     }
 
     return 0;
@@ -1328,9 +1349,10 @@ done:
     return ret_value;
 }
 
-static void
+static herr_t
 dset_open_helper(void *obj, const char *name, H5VL_bypass_t *dset, hid_t dxpl_id, void **req)
 {
+    herr_t                              ret_value = 0;
     H5VL_dataset_get_args_t             get_args;
     hid_t                               dcpl_id = H5I_INVALID_HID;
     haddr_t                             addr;
@@ -1345,27 +1367,41 @@ dset_open_helper(void *obj, const char *name, H5VL_bypass_t *dset, hid_t dxpl_id
      * memory */
     if (dset_count == dset_info_size) {
         dset_info_size *= 2;
-        dset_stuff = (dset_t *)realloc(dset_stuff, dset_info_size * sizeof(dset_t));
+        if ((dset_stuff = (dset_t *)realloc(dset_stuff, dset_info_size * sizeof(dset_t))) == NULL) {
+            fprintf(stderr, "can't allocate memory for dataset table\n");
+            ret_value = -1;
+            goto done;
+        }
     }
 
     /* Retrieve dataset's DCPL, copied from H5Dget_create_plist */
     get_args.op_type               = H5VL_DATASET_GET_DCPL;
     get_args.args.get_dcpl.dcpl_id = H5I_INVALID_HID;
 
-    if (H5VL_bypass_dataset_get(dset, &get_args, dxpl_id, req) < 0)
-        puts("unable to get dataset DCPL");
+    if (H5VL_bypass_dataset_get(dset, &get_args, dxpl_id, req) < 0) {
+        fprintf(stderr, "unable to get dataset DCPL\n");
+        ret_value = -1;
+        goto done;
+    }
 
     dset_stuff[dset_count].dcpl_id = dcpl_id = get_args.args.get_dcpl.dcpl_id;
 
     /* Figure out the dataset's layout */
-    dset_stuff[dset_count].layout = H5Pget_layout(dcpl_id);
+    if ((dset_stuff[dset_count].layout = H5Pget_layout(dcpl_id)) < 0) {
+        fprintf(stderr, "unable to get dataset's layout\n");
+        ret_value = -1;
+        goto done;
+    }
 
     /* Retrieve the dataset's datatype */
     get_args.op_type               = H5VL_DATASET_GET_TYPE;
     get_args.args.get_type.type_id = H5I_INVALID_HID;
 
-    if (H5VL_bypass_dataset_get(dset, &get_args, dxpl_id, req) < 0)
-        puts("unable to get dataset's datatype");
+    if (H5VL_bypass_dataset_get(dset, &get_args, dxpl_id, req) < 0) {
+        fprintf(stderr, "unable to get dataset's datatype\n");
+        ret_value = -1;
+        goto done;
+    }
 
     dset_stuff[dset_count].dtype_id = get_args.args.get_type.type_id;
 
@@ -1380,8 +1416,11 @@ dset_open_helper(void *obj, const char *name, H5VL_bypass_t *dset, hid_t dxpl_id
     get_args.args.get_space.space_id = H5I_INVALID_HID;
 
     /* Retrieve the dataset's dataspace ID */
-    if (H5VL_bypass_dataset_get(dset, &get_args, dxpl_id, req) < 0)
-        puts("unable to get dataset's dataspace");
+    if (H5VL_bypass_dataset_get(dset, &get_args, dxpl_id, req) < 0) {
+        fprintf(stderr, "unable to get dataset's dataspace\n");
+        ret_value = -1;
+        goto done;
+    }
 
     dset_stuff[dset_count].space_id = get_args.args.get_space.space_id;
 
@@ -1390,11 +1429,18 @@ dset_open_helper(void *obj, const char *name, H5VL_bypass_t *dset, hid_t dxpl_id
     opt_args.op_type                = H5VL_NATIVE_DATASET_GET_OFFSET;
     opt_args.args                   = &dset_opt_args;
 
-    if (H5VL_bypass_dataset_optional(dset, &opt_args, dxpl_id, req) < 0)
-        puts("unable to get dataset's location in file");
+    if (H5VL_bypass_dataset_optional(dset, &opt_args, dxpl_id, req) < 0) {
+        fprintf(stderr, "unable to get dataset's location in file\n");
+        ret_value = -1;
+        goto done;
+    }
 
-    if (addr == HADDR_UNDEF)
-        puts("unable to get dataset's location in file");
+    if (addr == HADDR_UNDEF) {
+        fprintf(stderr, "dataset's location in file is invalid\n");
+        ret_value = -1;
+        goto done;
+    }
+
     dset_stuff[dset_count].location = addr;
 
     /* The HDF5 library adds a '/' in front of the dataset name (full pathname).
@@ -1407,7 +1453,11 @@ dset_open_helper(void *obj, const char *name, H5VL_bypass_t *dset, hid_t dxpl_id
     }
 
     /* Get the file name of the dataset */
-    get_filename_helper(dset, file_name, H5I_DATASET, req);
+    if (get_filename_helper(dset, file_name, H5I_DATASET, req) < 0) {
+        fprintf(stderr, "unable to get dataset's file name\n");
+        ret_value = -1;
+        goto done;
+    }
 
     strcpy(dset_stuff[dset_count].file_name, file_name);
     // fprintf(stderr, "%s at %d: dset name = %s, file_name = %s\n", __func__,
@@ -1432,9 +1482,17 @@ dset_open_helper(void *obj, const char *name, H5VL_bypass_t *dset, hid_t dxpl_id
      * dataset, or the datatypes other than atomic types which include time,
      * opaque, compound, reference, variable-length, array types
      */
-    num_filters = H5Pget_nfilters(dset_stuff[dset_count].dcpl_id);
+    if ((num_filters = H5Pget_nfilters(dset_stuff[dset_count].dcpl_id)) < 0) {
+        fprintf(stderr, "unable to get the number of filters\n");
+        ret_value = -1;
+        goto done;
+    }
 
-    dtype_class = H5Tget_class(dset_stuff[dset_count].dtype_id);
+    if ((dtype_class = H5Tget_class(dset_stuff[dset_count].dtype_id)) < 0) {
+        fprintf(stderr, "unable to get the datatype class\n");
+        ret_value = -1;
+        goto done;
+    }
 
     // if (num_filters > 0 || H5D_VIRTUAL == dset_stuff[dset_count].layout ||
     // H5L_TYPE_EXTERNAL == link_type
@@ -1449,6 +1507,9 @@ dset_open_helper(void *obj, const char *name, H5VL_bypass_t *dset, hid_t dxpl_id
 
     /* Increment the number of dataset */
     dset_count++;
+
+done:
+    return ret_value;
 }
 
 /*-------------------------------------------------------------------------
@@ -1547,7 +1608,11 @@ H5VL_bypass_dataset_open(void *obj, const H5VL_loc_params_t *loc_params, const c
     }
 
     /* Save the dataset information for quick access later */
-    dset_open_helper(obj, name, dset, dxpl_id, req);
+    if (dset_open_helper(obj, name, dset, dxpl_id, req) < 0) {
+        fprintf(stderr, "error while opening dataset\n");
+        dset = NULL;
+        goto done;
+    }
 
     for (i = 0; i < dset_count; i++)
         if (!strcmp(dset_stuff[i].dset_name, name))
@@ -1759,6 +1824,8 @@ done:
 static herr_t
 read_big_data(int fd, int *buf, size_t size, off_t offset)
 {
+    herr_t ret_value = 0;
+
     while (size > 0) {
         int bytes_in   = 0;  /* # of bytes to read       */
         int bytes_read = -1; /* # of bytes actually read */
@@ -1784,7 +1851,8 @@ read_big_data(int fd, int *buf, size_t size, off_t offset)
                         break;
                     default:
                         fprintf(stderr, "pread failed with error: %s\n", strerror(errno));
-                        return -1;
+                        ret_value = -1;
+                        goto done;
                 }
             }
 
@@ -1797,13 +1865,18 @@ read_big_data(int fd, int *buf, size_t size, off_t offset)
             buf = (int *)((char *)buf + bytes_read);
         }
     } /* end while */
+
+done:
+    return ret_value;
 }
 
 static void *
 start_thread_for_pool(void *args)
 {
+    int thread_id = * (int*) args;
     // int thread_id = ((info_for_thread_t *)args)->thread_id;
     // int fd = ((info_for_thread_t *)args)->fd;
+    void    *ret_value = (void*) 0;
     int     *file_indices_local;
     haddr_t *addrs_local;
     size_t  *sizes_local;
@@ -1813,18 +1886,46 @@ start_thread_for_pool(void *args)
 
     // fprintf(stderr, "In start_thread_for_pool: %d\n", thread_id);
 
-    file_indices_local = (int *)malloc(nsteps_tpool * sizeof(int));
-    addrs_local        = (haddr_t *)malloc(nsteps_tpool * sizeof(haddr_t));
-    sizes_local        = (size_t *)malloc(nsteps_tpool * sizeof(size_t));
-    vec_bufs_local     = (void *)malloc(nsteps_tpool * sizeof(void *));
+    if ((file_indices_local = (int *)malloc(nsteps_tpool * sizeof(int))) == NULL) {
+        fprintf(stderr, "failed to allocate file indices\n");
+        ret_value = (void*) -1;
+        goto done;
+    }
+    
+    if ((addrs_local = (haddr_t *)malloc(nsteps_tpool * sizeof(haddr_t))) == NULL) {
+        fprintf(stderr, "failed to allocate addresses\n");
+        ret_value = (void*) -1;
+        goto done;
+    }
 
+    if ((sizes_local = (size_t *)malloc(nsteps_tpool * sizeof(size_t))) == NULL) {
+        fprintf(stderr, "failed to allocate sizes\n");
+        ret_value = (void*) -1;
+        goto done;
+    }
+
+    if ((vec_bufs_local = (void *)malloc(nsteps_tpool * sizeof(void *))) == NULL) {
+        fprintf(stderr, "failed to allocate vector buffers\n");
+        ret_value = (void*) -1;
+        goto done;
+    }
     /* Rename thread_loop_finish to a more appropriate name */
     while (!thread_loop_finish || !stop_tpool) {
-        pthread_mutex_lock(&mutex_local);
+        if (pthread_mutex_lock(&mutex_local) != 0) {
+            fprintf(stderr, "failed to lock mutex\n");
+            ret_value = (void*) -1;
+            goto done;
+        }
 
         // fprintf(stderr, "thread %d: before wait\n", thread_id);
-        while (thread_task_count == 0 && !thread_task_finished)
+        while (thread_task_count == 0 && !thread_task_finished) {
             pthread_cond_wait(&cond_local, &mutex_local);
+        }
+
+        /* If a new read call has begin, flag thread as active*/
+        if (!thread_loop_finish)
+            md_for_thread.thread_is_active[thread_id] = true;
+
         // fprintf(stderr, "after wait\n");
 
         /* THREAD_TASK_COUNT can be smaller (LEFTOVER being passed into
@@ -1857,7 +1958,11 @@ start_thread_for_pool(void *args)
         if (thread_task_finished && thread_task_count == 0)
             thread_loop_finish = true;
 
-        pthread_mutex_unlock(&mutex_local);
+        if (pthread_mutex_unlock(&mutex_local) != 0) {
+            fprintf(stderr, "failed to unlock mutex\n");
+            ret_value = (void*) -1;
+            goto done;
+        }
 
         // fprintf(stderr, "before reading data\n");
         for (i = 0; i < local_count; i++) {
@@ -1866,11 +1971,19 @@ start_thread_for_pool(void *args)
             // vec_bufs_local[i], sizes_local[i], addrs_local[i]);
 
             if (read_big_data(file_stuff[file_indices_local[i]].fd, vec_bufs_local[i], sizes_local[i],
-                          addrs_local[i]) < 0) {
-                            fprintf(stderr, "read_big_data failed\n");
-                          }
+                          addrs_local[i]) < 0)
+            {
+                fprintf(stderr, "read_big_data failed\n");
+                ret_value = (void*) -1;
+                goto done;
+            }
 
-            pthread_mutex_lock(&mutex_local);
+            if (pthread_mutex_lock(&mutex_local) != 0) {
+                fprintf(stderr, "failed to lock mutex\n");
+                ret_value = (void*) -1;
+                goto done;
+            }
+
             file_stuff[file_indices_local[i]].num_reads--;
 
             /* When there is no task left in the queue and all the reads finish for
@@ -1884,15 +1997,34 @@ start_thread_for_pool(void *args)
                 pthread_cond_signal(&(file_stuff[file_indices_local[i]].close_ready));
             }
 
-            pthread_mutex_unlock(&mutex_local);
+            if (pthread_mutex_unlock(&mutex_local) != 0) {
+                fprintf(stderr, "failed to unlock mutex\n");
+                ret_value = (void*) -1;
+                goto done;
+            }
         }
 
         /* If all tasks have been taken on by other threads and this thread's work is complete,
          * flag it as inactive */
+
+        /* TBD: Lock is not in principal necessary here because each thread has a unique index.
+         * Leave it for now to prevent problems if 
+         * writes to the array are larger than expected */
+        if (pthread_mutex_lock(&mutex_local) != 0) {
+            fprintf(stderr, "failed to lock mutex\n");
+            return (void*) -1;
+        }
+
         if (thread_loop_finish) {
-            nthreads_inactive++;
+            md_for_thread.thread_is_active[thread_id] = false;
             pthread_cond_signal(&cond_read_finished);
         }
+
+        if (pthread_mutex_unlock(&mutex_local) != 0) {
+            fprintf(stderr, "failed to unlock mutex\n");
+            return (void*) -1;
+        }
+
         /* If all task in the queue are finished and all the data read are finished, notify that
          * the corresponding file can be closed.
          */
@@ -1912,12 +2044,14 @@ start_thread_for_pool(void *args)
     free(sizes_local);
     free(vec_bufs_local);
 
-    return NULL;
+done:
+    return ret_value;
 } /* end start_thread_for_pool() */
 
-static void
+static herr_t
 process_vectors(void *rbuf, sel_info_t *selection_info)
 {
+    herr_t   ret_value = 0;
     hid_t    file_iter_id, mem_iter_id;
     size_t   file_seq_i, mem_seq_i, file_nseq, mem_nseq;
     hssize_t hss_nelmts;
@@ -1929,19 +2063,44 @@ process_vectors(void *rbuf, sel_info_t *selection_info)
     int      local_count_for_signal = 0;
 
     /* Contiguous is treated as a single chunk */
-    hss_nelmts = H5Sget_select_npoints(selection_info->file_space_id);
+    if ((hss_nelmts = H5Sget_select_npoints(selection_info->file_space_id)) < 0) {
+        fprintf(stderr, "H5Sget_select_npoints on filespace failed\n");
+        ret_value = -1;
+        goto done;
+    }
+
     nelmts     = hss_nelmts;
 
-    hss_nelmts = H5Sget_select_npoints(selection_info->mem_space_id);
-    if (nelmts != hss_nelmts)
-        printf("the number of selection in file (%ld) isn't equal to the number in "
-               "memory (%lld)\n",
-               nelmts, hss_nelmts);
+    if ((hss_nelmts = H5Sget_select_npoints(selection_info->mem_space_id)) < 0) {
+        fprintf(stderr, "H5Sget_select_npoints on memspace failed\n");
+        ret_value = -1;
+        goto done;
+    }
 
-    file_iter_id = H5Ssel_iter_create(selection_info->file_space_id, selection_info->dtype_size,
-                                      H5S_SEL_ITER_SHARE_WITH_DATASPACE);
-    mem_iter_id  = H5Ssel_iter_create(selection_info->mem_space_id, selection_info->dtype_size,
-                                      H5S_SEL_ITER_SHARE_WITH_DATASPACE);
+    if (nelmts != hss_nelmts) {
+        fprintf(stderr, "sthe number of selection in file (%ld) isn't equal to the number in memory (%" PRIdHSIZE")\n", nelmts,
+               hss_nelmts);
+        ret_value = -1;
+        goto done;
+    }
+
+    if ((file_iter_id =
+        H5Ssel_iter_create(selection_info->file_space_id, 
+        selection_info->dtype_size, H5S_SEL_ITER_SHARE_WITH_DATASPACE)) < 0)
+    {
+        fprintf(stderr, "H5Ssel_iter_create on filespace failed\n");
+        ret_value = -1;
+        goto done;
+    }
+
+    if ((mem_iter_id =
+        H5Ssel_iter_create(selection_info->mem_space_id, 
+        selection_info->dtype_size, H5S_SEL_ITER_SHARE_WITH_DATASPACE)) < 0)
+    {
+        fprintf(stderr, "H5Ssel_iter_create on memspace failed\n");
+        ret_value = -1;
+        goto done;
+    }
 
     /* Initialize values so sequence lists are retrieved on the first iteration */
     file_seq_i = mem_seq_i = SEL_SEQ_LIST_LEN;
@@ -1957,7 +2116,11 @@ process_vectors(void *rbuf, sel_info_t *selection_info)
         if (file_seq_i == SEL_SEQ_LIST_LEN) {
             if (H5Ssel_iter_get_seq_list(file_iter_id, SEL_SEQ_LIST_LEN, SIZE_MAX, &file_nseq, &seq_nelem,
                                          file_off, file_len) < 0)
-                printf("file sequence length retrieval failed");
+            {
+                fprintf(stderr, "file sequence length retrieval failed\n");
+                ret_value = -1;
+                goto done;
+            }
 
             nelmts -= seq_nelem;
             file_seq_i = 0;
@@ -1967,7 +2130,11 @@ process_vectors(void *rbuf, sel_info_t *selection_info)
         if (mem_seq_i == SEL_SEQ_LIST_LEN) {
             if (H5Ssel_iter_get_seq_list(mem_iter_id, SEL_SEQ_LIST_LEN, SIZE_MAX, &mem_nseq, &seq_nelem,
                                          mem_off, mem_len) < 0)
-                printf("memory sequence length retrieval failed");
+            {
+                fprintf(stderr, "memory sequence length retrieval failed\n");
+                ret_value = -1;
+                goto done;
+            }
 
             mem_seq_i = 0;
         }
@@ -1980,7 +2147,11 @@ process_vectors(void *rbuf, sel_info_t *selection_info)
         io_len = MIN(io_len, MB);
 
         /* Lock md_for_thread and update it */
-        pthread_mutex_lock(&mutex_local);
+        if (pthread_mutex_lock(&mutex_local) != 0) {
+            fprintf(stderr, "failed to lock local mutex\n");
+            ret_value = -1;
+            goto done;
+        }
 
         if (md_for_thread.vec_arr_nused == md_for_thread.vec_arr_nalloc) {
             /* Check if we're using the static arrays */
@@ -1988,13 +2159,32 @@ process_vectors(void *rbuf, sel_info_t *selection_info)
                 /* Allocate dynamic arrays.  Need to free them later */
                 if (NULL ==
                     (md_for_thread.file_indices = malloc(sizeof(md_for_thread.file_indices_local) * 2)))
-                    printf("memory allocation failed for file ids list");
+                {
+                    fprintf(stderr, "memory allocation failed for file ids list\n");
+                    ret_value = -1;
+                    goto done;
+                }
+
                 if (NULL == (md_for_thread.addrs = malloc(sizeof(md_for_thread.addrs_local) * 2)))
-                    printf("memory allocation failed for address list");
+                {
+                    fprintf(stderr, "memory allocation failed for address list\n");
+                    ret_value = -1;
+                    goto done;
+                }
+
                 if (NULL == (md_for_thread.sizes = malloc(sizeof(md_for_thread.sizes_local) * 2)))
-                    printf("memory allocation failed for size list");
+                {
+                    fprintf(stderr, "memory allocation failed for size list\n");
+                    ret_value = -1;
+                    goto done;
+                }
+
                 if (NULL == (md_for_thread.vec_bufs = malloc(sizeof(md_for_thread.vec_bufs_local) * 2)))
-                    printf("memory allocation failed for buffer list");
+                {
+                    fprintf(stderr, "memory allocation failed for buffer list\n");
+                    ret_value = -1;
+                    goto done;
+                }
 
                 /* Copy the existing data */
                 (void)memcpy(md_for_thread.file_indices, md_for_thread.file_indices_local,
@@ -2013,20 +2203,40 @@ process_vectors(void *rbuf, sel_info_t *selection_info)
                 if (NULL == (tmp_ptr = realloc(md_for_thread.file_indices,
                                                md_for_thread.vec_arr_nalloc *
                                                    sizeof(*(md_for_thread.file_indices)) * 2)))
-                    printf("memory reallocation failed for file ids list");
+                {
+                    fprintf(stderr, "memory reallocation failed for file ids list\n");
+                    ret_value = -1;
+                    goto done;
+                }
+
                 md_for_thread.file_indices = tmp_ptr;
                 if (NULL == (tmp_ptr = realloc(md_for_thread.addrs, md_for_thread.vec_arr_nalloc *
                                                                         sizeof(*(md_for_thread.addrs)) * 2)))
-                    printf("memory reallocation failed for address list");
+                {
+                    fprintf(stderr, "memory reallocation failed for address list\n");
+                    ret_value = -1;
+                    goto done;
+                }                                                                    
+
                 md_for_thread.addrs = tmp_ptr;
                 if (NULL == (tmp_ptr = realloc(md_for_thread.sizes, md_for_thread.vec_arr_nalloc *
                                                                         sizeof(*(md_for_thread.sizes)) * 2)))
-                    printf("memory reallocation failed for size list");
+                {
+                    fprintf(stderr, "memory reallocation failed for size list\n");
+                    ret_value = -1;
+                    goto done;
+                }
+
                 md_for_thread.sizes = tmp_ptr;
                 if (NULL ==
                     (tmp_ptr = realloc(md_for_thread.vec_bufs,
                                        md_for_thread.vec_arr_nalloc * sizeof(*(md_for_thread.vec_bufs)) * 2)))
-                    printf("memory reallocation failed for buffer list");
+                {
+                    fprintf(stderr, "memory reallocation failed for buffer list\n");
+                    ret_value = -1;
+                    goto done;
+                }
+
                 md_for_thread.vec_bufs = tmp_ptr;
             }
 
@@ -2057,7 +2267,11 @@ process_vectors(void *rbuf, sel_info_t *selection_info)
 
         local_count_for_signal++;
 
-        pthread_mutex_unlock(&mutex_local);
+        if (pthread_mutex_unlock(&mutex_local) != 0) {
+            fprintf(stderr, "failed to unlock local mutex\n");
+            ret_value = -1;
+            goto done;
+        }
 
         /* Let the queue accumulate nsteps_tpool entries then signal the thread pool
          * to read them */
@@ -2072,7 +2286,11 @@ process_vectors(void *rbuf, sel_info_t *selection_info)
              * necessary */
             if (info_count == info_size) {
                 info_size *= 2;
-                info_stuff = (info_t *)realloc(info_stuff, info_size * sizeof(info_t));
+                if ((info_stuff = (info_t *)realloc(info_stuff, info_size * sizeof(info_t))) == NULL) {
+                    fprintf(stderr, "failed to reallocate info table\n");
+                    ret_value = -1;
+                    goto done;
+                }
             }
 
             /* Save the info in the structure */
@@ -2115,8 +2333,20 @@ process_vectors(void *rbuf, sel_info_t *selection_info)
     if (local_count_for_signal > 0 && local_count_for_signal < nsteps_tpool)
         pthread_cond_broadcast(&cond_local);
 
-    H5Ssel_iter_close(file_iter_id);
-    H5Ssel_iter_close(mem_iter_id);
+    if (H5Ssel_iter_close(file_iter_id) < 0) {
+        fprintf(stderr, "failed to close file sel iterator\n");
+        ret_value = -1;
+        goto done;
+    }
+
+    if (H5Ssel_iter_close(mem_iter_id) < 0) {
+        fprintf(stderr, "failed to close mem sel iterator\n");
+        ret_value = -1;
+        goto done;
+    }
+
+done:
+    return ret_value;
 } /* end process_vectors() */
 
 static herr_t
@@ -2141,21 +2371,50 @@ process_chunks(void *rbuf, void *dset, hid_t dcpl_id, hid_t mem_space, hid_t fil
     memset(offsets, 0, sizeof(hsize_t) * DIM_RANK_MAX);
 
     /* Maybe use the dataset's dataspace return from H5Dget_space */
-    dset_dim_rank = H5Sget_simple_extent_ndims(file_space);
+    if ((dset_dim_rank = H5Sget_simple_extent_ndims(file_space)) < 0) {
+        fprintf(stderr, "unable to get the file space rank of chunked dataset\n");
+        ret_value = -1;
+        goto done;
+    }
 
-    H5Pget_chunk(dcpl_id, dset_dim_rank, chunk_dims);
+    if (H5Pget_chunk(dcpl_id, dset_dim_rank, chunk_dims) < 0) {
+        fprintf(stderr, "unable to get the chunk dimensions of chunked dataset\n");
+        ret_value = -1;
+        goto done;
+    }
 
-    H5Sget_simple_extent_dims(file_space, dims_retrieved, NULL);
+    if (H5Sget_simple_extent_dims(file_space, dims_retrieved, NULL) < 0) {
+        fprintf(stderr, "unable to get dimensions of chunked dataset\n");
+        ret_value = -1;
+        goto done;
+    }
 
-    get_num_chunks_helper(dset, file_space, &num_chunks, req);
+    if (get_num_chunks_helper(dset, file_space, &num_chunks, req) < 0) {
+        fprintf(stderr, "unable to get the number of chunks\n");
+        ret_value = -1;
+        goto done;
+    }
 
     /* Iterate through all chunks and get the data selection falling into each
      * chunk and the matching selection in memory */
     for (i = 0; i < num_chunks; i++) {
-        get_chunk_info_helper(dset, file_space, i, chunk_offset, &filter_mask, &chunk_addr, &chunk_size, req);
+        if (get_chunk_info_helper(dset, file_space, i, chunk_offset, &filter_mask, &chunk_addr, &chunk_size, req) < 0) {
+            fprintf(stderr, "unable to get chunk info for chunk #%d\n", i);
+            ret_value = -1;
+            goto done;
+        }
 
-        file_space_copy = H5Scopy(file_space);
-        select_type     = H5Sget_select_type(file_space_copy);
+        if ((file_space_copy = H5Scopy(file_space)) < 0) {
+            fprintf(stderr, "unable to copy filespace\n");
+            ret_value = -1;
+            goto done;
+        }
+
+        if ((select_type = H5Sget_select_type(file_space_copy)) < 0) {
+            fprintf(stderr, "unable to get the selection type of file space\n");
+            ret_value = -1;
+            goto done;
+        }
 
         /* To calculate the intersection area in the next step, there must be a
          * hyperslab selection to start with. If there is no hyperslab selection in
@@ -2175,7 +2434,11 @@ process_chunks(void *rbuf, void *dset, hid_t dcpl_id, hid_t mem_space, hid_t fil
             goto done;
         }
 
-        select_npoints = H5Sget_select_npoints(file_space_copy);
+        if ((select_npoints = H5Sget_select_npoints(file_space_copy)) < 0) {
+            fprintf(stderr, "unable to get the number of points in file selection\n");
+            ret_value = -1;
+            goto done;
+        }
 
         /* printf("\t\t2. chunk_offset={%llu, %llu}, chunk_dims={%llu, %llu},
            chunk_addr = %llu, chunk_size = %llu, select_npoints = %llu\n",
@@ -2185,9 +2448,13 @@ process_chunks(void *rbuf, void *dset, hid_t dcpl_id, hid_t mem_space, hid_t fil
         /* If the any selection falls into this chunk, save the selection
          * information */
         if (select_npoints > 0) {
-            /* Key function: get the data selection in memory which matches the file
-             * space selection falling into this chunk */
-            mem_selection_id = H5Sselect_project_intersection(file_space, mem_space, file_space_copy);
+            /* Key function: get the data selection in memory which matches the file space selection falling
+             * into this chunk */
+            if ((mem_selection_id = H5Sselect_project_intersection(file_space, mem_space, file_space_copy)) < 0) {
+                fprintf(stderr, "unable to get projected dataspace intersection\n");
+                ret_value = -1;
+                goto done;
+            }
 
             for (j = 0; j < dset_dim_rank; j++)
                 selection_offset[j] = chunk_offset[j];
@@ -2205,31 +2472,49 @@ process_chunks(void *rbuf, void *dset, hid_t dcpl_id, hid_t mem_space, hid_t fil
                 goto done;
             }
 
-            H5Sset_extent_simple(file_space_copy, dset_dim_rank, chunk_dims, chunk_dims);
+            if (H5Sset_extent_simple(file_space_copy, dset_dim_rank, chunk_dims, chunk_dims) < 0) {
+                fprintf(stderr, "unable to set dataspace extent\n");
+                ret_value = -1;
+                goto done;
+            }
 
-            select_npoints = H5Sget_select_npoints(file_space_copy);
-            // printf("\t\t5. chunk_offset={%llu, %llu}, chunk_addr = %llu, chunk_size
-            // = %llu, select_npoints = %llu\n", chunk_offset[0], chunk_offset[1],
-            // chunk_addr, chunk_size, select_npoints); printf("\t\t select_npoints in
-            // memory = %llu\n", H5Sget_select_npoints(mem_selection_id));
-            // printf("\t\t start[0] = %llu, start[1] = %llu, end[0] = %llu, end[1] =
-            // %llu\n", start[0], start[1], end[0], end[1]);
+            if ((select_npoints = H5Sget_select_npoints(file_space_copy)) < 0) {
+                fprintf(stderr, "unable to get the number of points in file selection\n");
+                ret_value = -1;
+                goto done;
+            }
+            // printf("\t\t5. chunk_offset={%llu, %llu}, chunk_addr = %llu, chunk_size = %llu, select_npoints
+            // = %llu\n", chunk_offset[0], chunk_offset[1], chunk_addr, chunk_size, select_npoints);
+            // printf("\t\t select_npoints in memory = %llu\n", H5Sget_select_npoints(mem_selection_id));
+            // printf("\t\t start[0] = %llu, start[1] = %llu, end[0] = %llu, end[1] = %llu\n", start[0],
+            // start[1], end[0], end[1]);
 
             /* Save the information for this chunk */
             selection_info->mem_space_id  = mem_selection_id;
             selection_info->file_space_id = file_space_copy;
             selection_info->chunk_addr    = chunk_addr;
 
-            /* Retrieve the pieces of data (vectors) from the chunk and put them into
-             * the memory */
-            process_vectors(rbuf, selection_info);
+            /* Retrieve the pieces of data (vectors) from the chunk and put them into the memory */
+            if (process_vectors(rbuf, selection_info) < 0) {
+                fprintf(stderr, "failed to insert vectors into queue\n");
+                ret_value = -1;
+                goto done;
+            }
 
             /* Close the space ID for the memory selection */
-            H5Sclose(mem_selection_id);
+            if (H5Sclose(mem_selection_id) < 0) {
+                fprintf(stderr, "unable to close memory selection\n");
+                ret_value = -1;
+                goto done;
+            }
         }
 
         /* Close the space ID for the file */
-        H5Sclose(file_space_copy);
+        if (H5Sclose(file_space_copy) < 0) {
+            fprintf(stderr, "unable to close file selection");
+            ret_value = -1;
+            goto done;
+        }
     }
 
 done:
@@ -2268,6 +2553,7 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
     char       dset_name[1024];
     sel_info_t selection_info;
     int        i, j;
+    bool       any_thread_active = false;
     // hid_t  native_dtype;
 
 #ifdef ENABLE_BYPASS_LOGGING
@@ -2277,7 +2563,11 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
     /* Loop through all datasets and process them individually */
     for (j = 0; j < count; j++) {
         /* Retrieve the dataset's name */
-        get_dset_name_helper((H5VL_bypass_t *)(dset[j]), dset_name, req);
+        if (get_dset_name_helper((H5VL_bypass_t *)(dset[j]), dset_name, req) < 0) {
+            fprintf(stderr, "In %s of %s at line %d: get_dset_name_helper failed\n", __func__, __FILE__, __LINE__);
+            ret_value = -1;
+            goto done;
+        }
 
         /* Find the dataset's info using its name */
         for (i = 0; i < dset_count; i++) {
@@ -2312,10 +2602,16 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
             // printf("%s: %d, in bypass VOL, count = %lu\n", __func__, __LINE__,
             // count);
 
-            ret_value = H5VLdataset_read(1, &(o_arr[j]), under_vol_id, &(mem_type_id[j]), &(mem_space_id[j]),
-                                         &(file_space_id[j]), plist_id, &(buf[j]), req);
-        }
-        else { /* Coming into Bypass VOL when no data conversion and filter */
+            if ((ret_value =
+                H5VLdataset_read(1, &(o_arr[j]),
+                    under_vol_id, &(mem_type_id[j]), &(mem_space_id[j]),
+                    &(file_space_id[j]), plist_id, &(buf[j]), req)) < 0) {
+
+                    fprintf(stderr, "In %s of %s at line %d: H5VLdataset_read failed\n", __func__,
+                            __FILE__, __LINE__);
+                    goto done;
+            }
+        } else { /* Coming into Bypass VOL when no data conversion and filter */
                // pthread_t th[nthreads_tpool];
             // info_for_thread_t info_for_thread[nthreads_tpool]; /* Remove it and use
             // the global variable meta_for_thread? */
@@ -2365,7 +2661,11 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
             strcpy(selection_info.file_name, file_name);
             strcpy(selection_info.dset_name, dset_name);
 
-            selection_info.dtype_size = H5Tget_size(dset_dtype_id);
+            if ((selection_info.dtype_size = H5Tget_size(dset_dtype_id)) < 0) {
+                printf("In %s of %s at line %d: H5Tget_size failed\n", __func__, __FILE__, __LINE__);
+                ret_value = -1;
+                goto done;
+            }
 
             if (H5D_CHUNKED == dset_layout) {
                 /* Iterate through all chunks and map the data selection in each chunk
@@ -2382,13 +2682,21 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
                 selection_info.chunk_addr    = dset_loc;
 
                 /* Handles the hyperslab selection and read the data */
-                process_vectors(buf[j], &selection_info);
+                if (process_vectors(buf[j], &selection_info) < 0) {
+                    fprintf(stderr, "failed to insert vectors into queue\n");
+                    ret_value = -1;
+                    goto done;
+                }
             }
 
             /* Signal the thread pool to finish this read. Notify the thread pool that
              * it finished putting tasks in the queue. */
             pthread_mutex_lock(&mutex_local);
             thread_task_finished = true;
+            /* Flag all threads as active */
+            for (i = 0; i < nthreads_tpool; i++)
+                md_for_thread.thread_is_active[i] = true;
+
             pthread_mutex_unlock(&mutex_local);
             pthread_cond_broadcast(&cond_local); /* Why do this signal/broadcast? */
 
@@ -2423,13 +2731,40 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
     /* Do not return until the thread pool finishes the read */
     /* TBD: Enforcing this will become more complicated once multiple
      * application threads making concurrent H5Dread() calls is supported. */
-    pthread_mutex_lock(&mutex_local);
+    if (pthread_mutex_lock(&mutex_local) < 0) {
+        printf("In %s of %s at line %d: pthread_mutex_lock failed\n", __func__, __FILE__, __LINE__);
+        ret_value = -1;
+        goto done;
+    }
 
     /* Only finish H5Dread() once all threads are inactive and no tasks are undone */
-    while (nthreads_inactive < nthreads_tpool || thread_task_count > 0)
-        pthread_cond_wait(&cond_read_finished, &mutex_local);
+    while (true) {
+        any_thread_active = false;
 
-    pthread_mutex_unlock(&mutex_local);
+        if (is_any_thread_active(&any_thread_active) < 0) {
+            fprintf(stderr, "Unable to query thread active status\n");
+            /* Prevent deadlock on error */
+            pthread_mutex_unlock(&mutex_local);
+            ret_value = -1;
+            goto done;
+        }
+
+        if (!any_thread_active)
+            break;
+
+        pthread_cond_wait(&cond_read_finished, &mutex_local);
+    }
+
+    if (ret_value < 0) {
+        fprintf(stderr, "Unable to query thread active status\n");
+        goto done;
+    }
+
+    if (pthread_mutex_unlock(&mutex_local) < 0) {
+        printf("In %s of %s at line %d: pthread_mutex_unlock failed\n", __func__, __FILE__, __LINE__);
+        ret_value = -1;
+        goto done;
+    }
 
     assert(thread_task_count == 0);
 
@@ -4421,3 +4756,30 @@ H5VL_bypass_optional(void *obj, H5VL_optional_args_t *args, hid_t dxpl_id, void 
 
     return ret_value;
 } /* end H5VL_bypass_optional() */
+
+/* This is a helper function to check if any thread is active. */
+herr_t
+is_any_thread_active(bool *out) {
+    herr_t ret_value = 0;
+
+    assert(out);
+
+    if (pthread_mutex_lock(&mutex_local) != 0) {
+        fprintf(stderr, "pthread_mutex_lock failed\n");
+        ret_value = -1;
+        goto done;
+    }
+
+    assert(md_for_thread.thread_is_active);
+
+    for (int i = 0; i < nthreads_tpool; i++)
+        *out = *out || md_for_thread.thread_is_active[i];
+
+done:
+    if (pthread_mutex_unlock(&mutex_local) != 0) {
+        fprintf(stderr, "pthread_mutex_unlock failed\n");
+        ret_value = -1;
+    }
+
+    return ret_value;
+}
