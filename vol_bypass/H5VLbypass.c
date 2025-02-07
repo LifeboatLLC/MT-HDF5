@@ -1515,9 +1515,6 @@ H5VL_bypass_dataset_create(void *obj, const H5VL_loc_params_t *loc_params, const
                            hid_t type_id, hid_t space_id, hid_t dcpl_id, hid_t dapl_id, hid_t dxpl_id,
                            void **req)
 {
-    fprintf(stderr, "Dataset creation with the Bypass VOL is not yet supported\n");
-    return NULL;
-    /*
     H5VL_bypass_t *dset;
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
     void          *under;
@@ -1545,7 +1542,6 @@ H5VL_bypass_dataset_create(void *obj, const H5VL_loc_params_t *loc_params, const
 
 done:
     return (void *)dset;
-    */
 } /* end H5VL_bypass_dataset_create() */
 
 /*-------------------------------------------------------------------------
@@ -1856,10 +1852,10 @@ start_thread_for_pool(void *args)
     // int thread_id = ((info_for_thread_t *)args)->thread_id;
     // int fd = ((info_for_thread_t *)args)->fd;
     void    *ret_value = (void*) 0;
-    int     *file_indices_local;
-    haddr_t *addrs_local;
-    size_t  *sizes_local;
-    void   **vec_bufs_local;
+    int     *file_indices_local = NULL;
+    haddr_t *addrs_local = NULL;
+    size_t  *sizes_local = NULL;
+    void   **vec_bufs_local = NULL;
     int      local_count = 0;
     int      i;
 
@@ -2015,12 +2011,13 @@ fprintf(stderr, "thread %d: before broadcast\n", thread_id);
         // fprintf(stderr, "after reading data\n");
     }
 
+done:
+
     free(file_indices_local);
     free(addrs_local);
     free(sizes_local);
     free(vec_bufs_local);
 
-done:
     return ret_value;
 } /* end start_thread_for_pool() */
 
