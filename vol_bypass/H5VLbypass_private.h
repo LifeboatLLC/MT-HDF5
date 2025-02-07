@@ -41,6 +41,7 @@
 
 pthread_mutex_t mutex_local;
 pthread_cond_t  cond_local;
+pthread_cond_t  cond_read_finished;
 pthread_cond_t  continue_local;
 
 int  nthreads_tpool       = NUM_LOCAL_THREADS;
@@ -134,6 +135,8 @@ typedef struct {
     size_t     vec_arr_nalloc;
     size_t     vec_arr_nused;
     bool       free_memory;
+
+    bool       *thread_is_active; /* Array of active status for each tpool thread */
 } info_for_tpool_t;
 
 static info_t *info_stuff;

@@ -34,6 +34,8 @@ target_include_directories(h5bypass_vol
 
 target_link_libraries(h5bypass_vol PRIVATE "${HDF5_LIBRARIES}")
 
+add_subdirectory(test)
+
 install(
   FILES
     ${HDF5_VOL_BYPASS_HEADERS}
