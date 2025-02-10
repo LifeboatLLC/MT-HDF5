@@ -35,6 +35,7 @@
 #define NUM_LOCAL_THREADS  4
 #define THREAD_STEP        1024
 #define NTHREADS_MAX       32
+#define BYPASS_NAME_SIZE_LONG   1024
 #define MIN(a, b)          (((a) < (b)) ? (a) : (b))
 #define GB (1024 * 1024 * 1024)
 #define MB (1024 * 1024)
@@ -70,8 +71,8 @@ static int file_stuff_size = FILE_STUFF_SIZE;
 
 /* Dataset info */
 typedef struct {
-    char dset_name[1024];
-    char file_name[1024];
+    char dset_name[BYPASS_NAME_SIZE_LONG];
+    char file_name[BYPASS_NAME_SIZE_LONG];
     H5D_layout_t layout;
     unsigned ref_count;     /* Reference count    */
     hid_t dcpl_id;
