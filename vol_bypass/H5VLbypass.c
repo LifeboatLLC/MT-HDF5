@@ -2558,7 +2558,7 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
     hid_t        dset_space_id;
     hid_t        file_space_id_copy, mem_space_id_copy;
     hid_t        dcpl_id    = H5I_INVALID_HID;
-    hbool_t      use_native = false;
+    hbool_t      dset_use_native = false;
     hbool_t dset_found = false; /* True if a dataset is opened with H5Dopen. False if it's opened in other
                                  * ways like H5Rdeference (let native lib handle it).  For external link, it's
                                  * also false because the path name is different. */
@@ -2567,6 +2567,7 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
     sel_info_t selection_info;
     int        i, j;
     bool       any_thread_active = false;
+    bool       read_use_native   = false;
     // hid_t  native_dtype;
 
 #ifdef ENABLE_BYPASS_LOGGING
@@ -2591,7 +2592,7 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
                 dset_loc      = dset_stuff[i].location;
                 dset_dtype_id = dset_stuff[i].dtype_id;
                 dset_space_id = dset_stuff[i].space_id;
-                use_native    = dset_stuff[i].use_native;
+                dset_use_native    = dset_stuff[i].use_native;
                 dset_found    = true;
             }
         }
@@ -2603,7 +2604,9 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
 
         /* Let the native function handle datatype conversion.  Also check the flag for filters, virtual
          * dataset and reference datatype */
-        if (use_native || !dset_found || !H5Tequal(dset_dtype_id, mem_type_id[j])) {
+        read_use_native = dset_use_native || !dset_found || !H5Tequal(dset_dtype_id, mem_type_id[j]);
+
+        if (read_use_native) {
 
             /* Populate the array of under objects */
             under_vol_id = ((H5VL_bypass_t *)(dset[0]))->under_vol_id;
@@ -2747,7 +2750,8 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
     }
 
     /* Only finish H5Dread() once all threads are inactive and no tasks are undone */
-    while (true) {
+    /* Only block here if Bypass VOL was used for the read */
+    while (!read_use_native) {
         any_thread_active = false;
 
         if (is_any_thread_active(&any_thread_active) < 0) {
