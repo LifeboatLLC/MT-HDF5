@@ -1449,11 +1449,15 @@ dset_open_helper(void *obj, const char *name, H5VL_bypass_t *dset, hid_t dxpl_id
         goto done;
     }
 
+    /*
+     * TBD - Right now, this would cause every dataset create to fail,
+     * and every attempt to open an empty dset to fail.
     if (addr == HADDR_UNDEF) {
         fprintf(stderr, "dataset's location in file is invalid\n");
         ret_value = -1;
         goto done;
     }
+    */
 
     dset_stuff[dset_count].location = addr;
 
@@ -2722,6 +2726,13 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
             else if (H5D_CONTIGUOUS == dset_layout) {
                 selection_info.file_space_id = file_space_id_copy;
                 selection_info.mem_space_id  = mem_space_id_copy;
+
+                if (dset_loc == HADDR_UNDEF) {
+                    fprintf(stderr, "dataset does not have a valid read location\n");
+                    ret_value = -1;
+                    goto done;
+                }
+
                 selection_info.chunk_addr    = dset_loc;
 
                 /* Handles the hyperslab selection and read the data */
