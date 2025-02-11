@@ -3798,6 +3798,20 @@ remove_file_info_helper(unsigned index)
             file_stuff[i].read_started = file_stuff[i + 1].read_started;
             file_stuff[i].close_ready  = file_stuff[i + 1].close_ready;
         }
+
+        /* Zero out the last entry to avoid leaving duplicate information */
+        memset(file_stuff[file_stuff_count - 1].name, 0, BYPASS_NAME_SIZE_LONG);
+        file_stuff[file_stuff_count - 1].fd = -1;
+        file_stuff[file_stuff_count - 1].ref_count = 0;
+        file_stuff[file_stuff_count - 1].num_reads = 0;
+        file_stuff[file_stuff_count - 1].read_started = 0;
+    } else {
+        /* Just zero out the entry itself */
+        memset(file_stuff[index].name, 0, BYPASS_NAME_SIZE_LONG);
+        file_stuff[index].fd = -1;
+        file_stuff[index].ref_count = 0;
+        file_stuff[index].num_reads = 0;
+        file_stuff[index].read_started = 0;
     }
 
     file_stuff_count--;
@@ -3818,7 +3832,7 @@ H5VL_bypass_file_close(void *file, hid_t dxpl_id, void **req)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)file;
     char           file_name[1024];
-    herr_t         ret_value;
+    herr_t         ret_value = 0;
     int            i;
 
 #ifdef ENABLE_BYPASS_LOGGING
@@ -3826,9 +3840,13 @@ H5VL_bypass_file_close(void *file, hid_t dxpl_id, void **req)
 #endif
 
     /* Find the name of this file */
-    get_filename_helper((H5VL_bypass_t *)file, file_name, H5I_FILE, req);
-    // fprintf(stderr, "%s at %d: file_name = %s\n", __func__, __LINE__,
-    // file_name);
+    if (get_filename_helper((H5VL_bypass_t *)file, file_name, H5I_FILE, req) < 0) {
+        fprintf(stderr, "unable to retrieve filename during file close\n");
+        ret_value = -1;
+        goto done;
+    }
+
+    // fprintf(stderr, "%s at %d: file_name = %s\n", __func__, __LINE__, file_name);
 
     /* Close the file opened with C.  Remove the file structure from the list when
      * the reference count drops to zero */
@@ -3859,7 +3877,13 @@ H5VL_bypass_file_close(void *file, hid_t dxpl_id, void **req)
 
             /* When the reference count drops to zero, close the file */
             if (!file_stuff[i].ref_count) {
-                close(file_stuff[i].fd);
+                if (close(file_stuff[i].fd) < 0) {
+                    fprintf(stderr, "failed to close file descriptor for file %s\n", file_name);
+                    ret_value = -1;
+                    /* TBD: Failing here may leak some memory */
+                    goto done;
+                }
+
                 file_stuff[i].fd = -1;
                 // H5FDclose(file_stuff[i].vfd_file_handle);
                 pthread_cond_destroy(&(file_stuff[i].close_ready));
@@ -3885,6 +3909,7 @@ H5VL_bypass_file_close(void *file, hid_t dxpl_id, void **req)
 
 done:
     return ret_value;
+
 } /* end H5VL_bypass_file_close() */
 
 /*-------------------------------------------------------------------------
