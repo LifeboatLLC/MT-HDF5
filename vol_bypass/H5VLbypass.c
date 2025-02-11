@@ -191,6 +191,11 @@ static herr_t H5VL_bypass_token_from_str(void *obj, H5I_type_t obj_type, const c
 /* Generic optional callback */
 static herr_t H5VL_bypass_optional(void *obj, H5VL_optional_args_t *args, hid_t dxpl_id, void **req);
 
+static herr_t get_dset_info(H5VL_bypass_t *dset, dset_t **info_out, hid_t dxpl_id, void** req);
+
+static herr_t should_use_native(const dset_t *dset_info, bool *should_use_native);
+
+static herr_t remove_dset_info_helper(dset_t *dset_info);
 /*******************/
 /* Local variables */
 /*******************/
@@ -433,7 +438,6 @@ H5VL_bypass_init(hid_t vipl_id)
 
     /* Memory allocation for some information structures */
     file_stuff = (file_t *)calloc(file_stuff_size, sizeof(file_t));
-    dset_stuff = (dset_t *)calloc(dset_info_size, sizeof(dset_t));
     info_stuff = (info_t *)calloc(info_size, sizeof(info_t));
 
     /* Retrieve the number of threads for the thread pool from the user's input */
@@ -559,14 +563,10 @@ H5VL_bypass_term(void)
 
     fclose(log_fp);
 
-    //printf("%s: %d, dset_count = %d, dset_stuff[0].space_id = %lld\n", __func__, __LINE__, dset_count, dset_stuff[0].space_id);
-
     if (file_stuff)
         free(file_stuff);
     if (info_stuff)
         free(info_stuff);
-    if (dset_stuff)
-        free(dset_stuff);
     if (info_for_thread)
         free(info_for_thread);
 
@@ -1286,111 +1286,6 @@ done:
     return ret_value;
 }
 
-static void
-dset_open_helper(void *obj, const char *name, H5VL_bypass_t *dset, hid_t dxpl_id, void **req)
-{
-    H5VL_dataset_get_args_t get_args;
-    hid_t dcpl_id = H5I_INVALID_HID;
-    haddr_t addr;
-    H5VL_optional_args_t                opt_args;
-    H5VL_native_dataset_optional_args_t dset_opt_args;
-    int num_filters = 0;
-    H5T_class_t dtype_class;
-    //H5L_type_t    link_type;
-    char file_name[1024];
-
-    /* Enlarge the size of the structure for dataset info and Re-allocate the memory */
-    if (dset_count == dset_info_size) {
-	dset_info_size  *= 2;
-	dset_stuff = (dset_t *)realloc(dset_stuff, dset_info_size * sizeof(dset_t));
-    }
-
-    /* Retrieve dataset's DCPL, copied from H5Dget_create_plist */
-    get_args.op_type               = H5VL_DATASET_GET_DCPL;
-    get_args.args.get_dcpl.dcpl_id = H5I_INVALID_HID;
-
-    if (H5VL_bypass_dataset_get(dset, &get_args, dxpl_id, req) < 0)
-	puts("unable to get dataset DCPL");
-
-    dset_stuff[dset_count].dcpl_id = dcpl_id = get_args.args.get_dcpl.dcpl_id;
-
-    /* Figure out the dataset's layout */
-    dset_stuff[dset_count].layout = H5Pget_layout(dcpl_id);
-
-    /* Retrieve the dataset's datatype */
-    get_args.op_type               = H5VL_DATASET_GET_TYPE;
-    get_args.args.get_type.type_id = H5I_INVALID_HID;
-
-    if (H5VL_bypass_dataset_get(dset, &get_args, dxpl_id, req) < 0)
-	puts("unable to get dataset's datatype");
-
-    dset_stuff[dset_count].dtype_id = get_args.args.get_type.type_id;
-
-//printf("\n%s: %d, count=%d, dset_info_size=%d, layout=%d, location=%llu, name=%s, dtype_id = %llu, H5T_STD_REF_DSETREG = %llu, H5T_NATIVE_INT = %llu, dcpl_id = %llu\n", __func__, __LINE__, dset_count, dset_info_size, dset_stuff[dset_count].layout, addr, name, dset_stuff[dset_count].dtype_id, H5T_STD_REF_DSETREG, H5T_NATIVE_INT, dcpl_id);
-
-    /* Figure out the dataset's dataspace */
-    get_args.op_type                 = H5VL_DATASET_GET_SPACE;
-    get_args.args.get_space.space_id = H5I_INVALID_HID;
-
-    /* Retrieve the dataset's dataspace ID */
-    if (H5VL_bypass_dataset_get(dset, &get_args, dxpl_id, req) < 0)
-	puts("unable to get dataset's dataspace");
-
-    dset_stuff[dset_count].space_id = get_args.args.get_space.space_id;
-
-    /* Figure out the dataset's location in the file */
-    dset_opt_args.get_offset.offset = &addr;
-    opt_args.op_type                = H5VL_NATIVE_DATASET_GET_OFFSET;
-    opt_args.args                   = &dset_opt_args;
-
-    if (H5VL_bypass_dataset_optional(dset, &opt_args, dxpl_id, req) < 0)
-	puts("unable to get dataset's location in file");
-
-    dset_stuff[dset_count].location = addr;
-
-    /* The HDF5 library adds a '/' in front of the dataset name (full pathname).
-     * Make sure the dataset name has it. */
-    if (name) {
-	if (name[0] != '/')
-	    sprintf(dset_stuff[dset_count].dset_name, "/%s", name);
-	else
-	    strcpy(dset_stuff[dset_count].dset_name, name);
-    }
-
-    /* Get the file name of the dataset */
-    get_filename_helper(dset, file_name, H5I_DATASET, req);
-
-    strcpy(dset_stuff[dset_count].file_name, file_name);
-//fprintf(stderr, "%s at %d: dset name = %s, file_name = %s\n", __func__, __LINE__, name, file_name);
-
-    /* Get the link info */
-    //link_type = get_linkinfo_helper(obj, name, req);
-
-//fprintf(stderr, "%s at %d: link_type = %d\n", __func__, __LINE__, link_type);
-
-//printf("\n%s: %d, count=%d, dset_info_size=%d, layout=%d, location=%llu, name=%s, dtype_id = %llu, H5T_STD_REF_DSETREG = %llu, dcpl_id = %llu\n", __func__, __LINE__, dset_count, dset_info_size, dset_stuff[dset_count].layout, addr, name, dset_stuff[dset_count].dtype_id, H5T_STD_REF_DSETREG, dcpl_id);
-//printf("\n%s: %d,  count=%d, dset_info_size=%d, layout=%d, location=%llu, dset_name=%s\n", __func__, __LINE__, dset_count, dset_info_size, dset_stuff[dset_count].layout, addr, dset_stuff[dset_count].dset_name);
-
-    /* Turn on the flag for using the native function to handle filters, virtual dataset, or the datatypes other than atomic types
-     * which include time, opaque, compound, reference, variable-length, array types */ 
-    num_filters = H5Pget_nfilters(dset_stuff[dset_count].dcpl_id);
-
-    dtype_class = H5Tget_class(dset_stuff[dset_count].dtype_id);
-
-    //if (num_filters > 0 || H5D_VIRTUAL == dset_stuff[dset_count].layout || H5L_TYPE_EXTERNAL == link_type ||
-    if (num_filters > 0 || H5D_VIRTUAL == dset_stuff[dset_count].layout ||
-        H5T_TIME == dtype_class || H5T_OPAQUE == dtype_class || H5T_COMPOUND == dtype_class ||
-        H5T_REFERENCE == dtype_class || H5T_VLEN == dtype_class || H5T_ARRAY == dtype_class)
-        dset_stuff[dset_count].use_native = true;
-
-    /* Increment the reference count for this dataset */
-    dset_stuff[dset_count].ref_count++;
-
-    /* Increment the number of dataset */
-    dset_count++;
-}
-
-
 /*-------------------------------------------------------------------------
  * Function:    H5VL_bypass_dataset_create
  *
@@ -1426,9 +1321,6 @@ H5VL_bypass_dataset_create(void *obj, const H5VL_loc_params_t *loc_params,
         dset = NULL;
         goto done;
     }
-
-    /* Save the dataset information for quick access later */
-    dset_open_helper(obj, name, dset, dxpl_id, req);
 
 done:
     return (void *)dset;
@@ -1470,22 +1362,6 @@ H5VL_bypass_dataset_open(void *obj, const H5VL_loc_params_t *loc_params,
         dset = NULL;
         goto done;
     }
-
-    /* If the dataset has already been opened, only increment the reference count of this dataset and finish */
-    for (i = 0; i < dset_count; i++) {
-        if (!strcmp(dset_stuff[i].dset_name, name)) {
-            dset_stuff[i].ref_count++;
-            
-            goto done;
-        }
-    }
-
-    /* Save the dataset information for quick access later */
-    dset_open_helper(obj, name, dset, dxpl_id, req);
-
-    for (i = 0; i < dset_count; i++)
-        if (!strcmp(dset_stuff[i].dset_name, name))
-            fprintf(stderr, "%s at %d: dset name = %s, file_name = %s\n", __func__, __LINE__, name, dset_stuff[i].file_name);
 
 done:
     return (void *)dset;
@@ -2091,23 +1967,16 @@ H5VL_bypass_dataset_read(size_t count, void *dset[],
     hid_t mem_type_id[], hid_t mem_space_id[],
     hid_t file_space_id[], hid_t plist_id, void *buf[], void **req)
 {
-    void *o_arr[count];                     /* Array of under objects */
-    hid_t under_vol_id;                     /* VOL ID for all objects */
-    herr_t ret_value = 1;
-    haddr_t dset_loc = 0;
-    H5D_layout_t dset_layout = -1;
-    hid_t dset_dtype_id;
-    hid_t dset_space_id;
-    hid_t file_space_id_copy, mem_space_id_copy;
-    hid_t dcpl_id = H5I_INVALID_HID;
-    hbool_t use_native = false;
-    hbool_t dset_found = false;             /* True if a dataset is opened with H5Dopen. False if it's opened in other ways
-                                             * like H5Rdeference (let native lib handle it).  For external link, it's also 
-                                             * false because the path name is different. */
-    char file_name[1024];
-    char dset_name[1024];
+    void        *o_arr[count]; /* Array of under objects */
+    hid_t        under_vol_id; /* VOL ID for all objects */
+    herr_t       ret_value   = 1;
+    hid_t        file_space_id_copy, mem_space_id_copy;
+    bool      dset_use_native = false;
+    dset_t    *dset_info = NULL;
+    char       file_name[1024];
     sel_info_t selection_info;
     int i, j;
+    bool read_use_native = false;
     //hid_t  native_dtype;
 
 #ifdef ENABLE_BYPASS_LOGGING
@@ -2116,116 +1985,131 @@ H5VL_bypass_dataset_read(size_t count, void *dset[],
 
     /* Loop through all datasets and process them individually */
     for (j = 0; j < count; j++) {
-	/* Retrieve the dataset's name */
-	get_dset_name_helper((H5VL_bypass_t *)(dset[j]), dset_name, req);
+        /* Retrieve necessary dataset info */
+        if (get_dset_info((H5VL_bypass_t*) dset[j], &dset_info, plist_id, req) < 0) {
+            fprintf(stderr, "failed to retrieve dataset information\n");
+            ret_value = -1;
+            goto done;
+        }
 
-	/* Find the dataset's info using its name */
-	for (i = 0; i < dset_count; i++) {
-	    if (!strcmp(dset_stuff[i].dset_name, dset_name)) {
-                strcpy(file_name, dset_stuff[i].file_name);
-		dcpl_id = dset_stuff[i].dcpl_id;
-		dset_layout = dset_stuff[i].layout;
-		dset_loc = dset_stuff[i].location;
-		dset_dtype_id = dset_stuff[i].dtype_id;
-		dset_space_id = dset_stuff[i].space_id;
-		use_native = dset_stuff[i].use_native;
-                dset_found = true;
-	    }
-	}
+        // printf("\n%s: %d, count=%lu, dset_name = %s, file_name = %s, dtype_id = %llu, H5T_STD_REF_DSETREG =
+        // %llu, H5T_NATIVE_INT = %llu, dcpl_id = %llu, H5I_INVALID_HID = %d\n", __func__, __LINE__, count,
+        // dset_name, file_name, dset_dtype_id, H5T_STD_REF_DSETREG, H5T_NATIVE_INT, dcpl_id,
+        // H5I_INVALID_HID);
 
-//printf("\n%s: %d, count=%lu, dset_name = %s, file_name = %s, dtype_id = %llu, H5T_STD_REF_DSETREG = %llu, H5T_NATIVE_INT = %llu, dcpl_id = %llu, H5I_INVALID_HID = %d\n", __func__, __LINE__, count, dset_name, file_name, dset_dtype_id, H5T_STD_REF_DSETREG, H5T_NATIVE_INT, dcpl_id, H5I_INVALID_HID);
+        /* Let the native function handle datatype conversion.  Also check the flag for filters, virtual
+         * dataset and reference datatype */
+        if (should_use_native(dset_info, &dset_use_native) < 0) {
+            fprintf(stderr, "failed to determine if native function should be used\n");
+            ret_value = -1;
+            goto done;
+        }
+        
+        read_use_native = dset_use_native || !H5Tequal(dset_info->dtype_id, mem_type_id[j]); // || !dset_found
 
-	/* Let the native function handle datatype conversion.  Also check the flag for filters, virtual dataset and reference datatype */
-	if (use_native || !dset_found || !H5Tequal(dset_dtype_id, mem_type_id[j])) {
+        if (read_use_native) {
+            /* Populate the array of under objects */
+            under_vol_id = ((H5VL_bypass_t *)(dset[0]))->under_vol_id;
 
-	    /* Populate the array of under objects */
-	    under_vol_id = ((H5VL_bypass_t *)(dset[0]))->under_vol_id;
+            o_arr[j] = ((H5VL_bypass_t *)(dset[j]))->under_object;
+            assert(under_vol_id == ((H5VL_bypass_t *)(dset[j]))->under_vol_id);
+    
+                //printf("%s: %d, in bypass VOL, count = %lu\n", __func__, __LINE__, count);
 
-	    o_arr[j] = ((H5VL_bypass_t *)(dset[j]))->under_object;
-	    assert(under_vol_id == ((H5VL_bypass_t *)(dset[j]))->under_vol_id);
-  
-            //printf("%s: %d, in bypass VOL, count = %lu\n", __func__, __LINE__, count);
-
-	    ret_value = H5VLdataset_read(1, &(o_arr[j]), under_vol_id, &(mem_type_id[j]), &(mem_space_id[j]), &(file_space_id[j]), plist_id, &(buf[j]), req);
-	} else { /* Coming into Bypass VOL when no data conversion and filter */
-	    //pthread_t th[nthreads_tpool];
-	    //info_for_thread_t info_for_thread[nthreads_tpool]; /* Remove it and use the global variable meta_for_thread? */
+            ret_value = H5VLdataset_read(1, &(o_arr[j]), under_vol_id, &(mem_type_id[j]), &(mem_space_id[j]), &(file_space_id[j]), plist_id, &(buf[j]), req);
+        } else { /* Coming into Bypass VOL when no data conversion and filter */
+            //pthread_t th[nthreads_tpool];
+            //info_for_thread_t info_for_thread[nthreads_tpool]; /* Remove it and use the global variable meta_for_thread? */
 
             //printf("%s: %d, in bypass VOL\n", __func__, __LINE__);
 
             /* Decide the dataspaces in memory and file */
-            if (check_dspaces_helper(dset_space_id, file_space_id[j], &file_space_id_copy, mem_space_id[j], &mem_space_id_copy) < 0) {
-                printf("In %s of %s at line %d: can't figure out the data space in file or memory\n", __func__, __FILE__, __LINE__);
+            if (check_dspaces_helper(dset_info->space_id, file_space_id[j], &file_space_id_copy, mem_space_id[j],
+                                     &mem_space_id_copy) < 0) {
+                printf("In %s of %s at line %d: can't figure out the data space in file or memory\n",
+                       __func__, __FILE__, __LINE__);
                 ret_value = -1;
                 goto done;
             }
 
-	    /* Reset for the next H5Dread */
-	    pthread_mutex_lock(&mutex_local);
-	    thread_task_finished = false;
-	    thread_loop_finish   = false;
-	    pthread_mutex_unlock(&mutex_local);
+            /* Reset for the next H5Dread */
+            pthread_mutex_lock(&mutex_local);
+            thread_task_finished = false;
+            thread_loop_finish   = false;
+            pthread_mutex_unlock(&mutex_local);
 
-	    /* Find out the file name */
-	    //get_filename_helper((H5VL_bypass_t *)(dset[j]), file_name, H5I_DATASET, req);
-//fprintf(stderr, "%s at %d: file_name = %s\n", __func__, __LINE__, file_name);
+            /* Find out the file name */
+            get_filename_helper((H5VL_bypass_t *)(dset[j]), file_name, H5I_DATASET, req);
+            // fprintf(stderr, "%s at %d: file_name = %s\n", __func__, __LINE__, file_name);
 
-	    /* Find the correct data file */
-	    for (i = 0; i < file_stuff_count; i++) {
-		if (!strcmp(file_stuff[i].name, file_name))
-		    selection_info.my_file_index = i;             /* Save this index in the list of FILE_T structures for quick lookup later */
-                else {
-                    printf("In %s of %s at line %d: can't find the file with the name %s\n", __func__, __FILE__, __LINE__, file_name);
-                    ret_value = -1;
-                    goto done;
+            /* Find the correct data file */
+            for (i = 0; i < file_stuff_count; i++) {
+                if (!strcmp(file_stuff[i].name, file_name)) {
+                    selection_info.my_file_index = i;             /* Save this index in the list of FILE_T structures for quick lookup later */
+                } else {
+                        printf("In %s of %s at line %d: can't find the file with the name %s\n", __func__, __FILE__, __LINE__, file_name);
+                        ret_value = -1;
+                        goto done;
                 }
             }
 
-	    /* Initialize data selection info */
-	    strcpy(selection_info.file_name, file_name);
-	    strcpy(selection_info.dset_name, dset_name);
+            /* Initialize data selection info */
+            strcpy(selection_info.file_name, file_name);
+            if (get_dset_name_helper((H5VL_bypass_t *)(dset[j]), selection_info.dset_name, req) < 0) {
+                fprintf(stderr, "failed to retrieve dataset name\n");
+                ret_value = -1;
+                goto done;
+            }
 
-	    selection_info.dtype_size = H5Tget_size(dset_dtype_id);
+            if ((selection_info.dtype_size = H5Tget_size(dset_info->dtype_id)) < 0) {
+                printf("In %s of %s at line %d: H5Tget_size failed\n", __func__, __FILE__, __LINE__);
+                ret_value = -1;
+                goto done;
+            }
 
-	    if (H5D_CHUNKED == dset_layout) {
-		/* Iterate through all chunks and map the data selection in each chunk to the memory.
-		 * Put the selections into a queue for the thread pool to read the data */ 
-		//process_chunks(buf[j], dset[j], dcpl_id, mem_space_id[j], file_space_id[j], &selection_info, req);
-		process_chunks(buf[j], dset[j], dcpl_id, mem_space_id_copy, file_space_id_copy, &selection_info, req);
-	    } else if (H5D_CONTIGUOUS == dset_layout) {
-		selection_info.file_space_id = file_space_id_copy;
-		selection_info.mem_space_id = mem_space_id_copy;
-		selection_info.chunk_addr = dset_loc;
+            if (H5D_CHUNKED == dset_info->layout) {
+                /* Iterate through all chunks and map the data selection in each chunk to the memory.
+                 * Put the selections into a queue for the thread pool to read the data */
+                // process_chunks(buf[j], dset[j], dcpl_id, mem_space_id[j], file_space_id[j],
+                // &selection_info, req);
+                process_chunks(buf[j], dset[j], dset_info->dcpl_id, mem_space_id_copy, file_space_id_copy,
+                               &selection_info, req);
+            }
+            else if (H5D_CONTIGUOUS == dset_info->layout) {
+                selection_info.file_space_id = file_space_id_copy;
+                selection_info.mem_space_id  = mem_space_id_copy;
 
-		/* Handles the hyperslab selection and read the data */
-		process_vectors(buf[j], &selection_info);
-	    }
+                if (dset_info->location == HADDR_UNDEF) {
+                    fprintf(stderr, "dataset does not have a valid read location\n");
+                    ret_value = -1;
+                    goto done;
+                }
 
-	    /* Signal the thread pool to finish this read. Notify the thread pool that it finished putting tasks in the queue. */
-	    pthread_mutex_lock(&mutex_local);
-	    thread_task_finished = true;
-	    pthread_mutex_unlock(&mutex_local);
-	    pthread_cond_broadcast(&cond_local);  /* Why do this signal/broadcast? */
+                selection_info.chunk_addr    = dset_info->location;
+
+                process_vectors(buf[j], &selection_info);
+            }
 
 	    /* Save the info for the C log file */
 	    {
-		/* Enlarge the size of the info for C and Re-allocate the memory if necessary */
-		if (info_count == info_size) {
-		    info_size  *= 2;
-		    info_stuff = (info_t *)realloc(info_stuff, info_size * sizeof(info_t));
-		}
+            /* Enlarge the size of the info for C and Re-allocate the memory if necessary */
+            if (info_count == info_size) {
+                info_size  *= 2;
+                info_stuff = (info_t *)realloc(info_stuff, info_size * sizeof(info_t));
+            }
 
-		/* Save the info in the structure */
-		info_stuff[info_count].end_of_read = true;
+            /* Save the info in the structure */
+            info_stuff[info_count].end_of_read = true;
 
-		//printf("%s: %d, info_count = %d, end_of_read = %d\n", __func__, __LINE__, info_count, info_stuff[info_count].end_of_read);
+            //printf("%s: %d, info_count = %d, end_of_read = %d\n", __func__, __LINE__, info_count, info_stuff[info_count].end_of_read);
 
-		/* Increment the counter */
-		info_count++;
+            /* Increment the counter */
+            info_count++;
 	    }
-	}
+	    }
 
-        dset_found = false;
+        remove_dset_info_helper(dset_info);
+        dset_info = NULL;
     }
 
     /* Check for async request */
@@ -2233,6 +2117,9 @@ H5VL_bypass_dataset_read(size_t count, void *dset[],
         *req = H5VL_bypass_new_obj(*req, under_vol_id);
 
 done:
+    if (ret_value < 0 && dset_info)
+        remove_dset_info_helper(dset_info);
+
     return ret_value;
 } /* end H5VL_bypass_dataset_read() */
 
@@ -2374,42 +2261,35 @@ H5VL_bypass_dataset_optional(void *obj, H5VL_optional_args_t *args,
     return ret_value;
 } /* end H5VL_bypass_dataset_optional() */
 
-static void
-remove_dset_info_helper(unsigned index)
+static herr_t
+remove_dset_info_helper(dset_t *dset_info)
 {
-    unsigned i;
+    herr_t ret_value = 0;
 
-    /* First, close the IDs related to the dataset */
-    H5Pclose(dset_stuff[index].dcpl_id);
-    dset_stuff[index].dcpl_id = H5I_INVALID_HID;
+    assert(dset_info);
 
-    H5Tclose(dset_stuff[index].dtype_id);
-    dset_stuff[index].dtype_id = H5I_INVALID_HID;
-
-    H5Sclose(dset_stuff[index].space_id);
-    dset_stuff[index].space_id = H5I_INVALID_HID;
-
-    dset_stuff[index].use_native = false;
-
-    /* Remove the entry by shifting leftward all elements after this entry.
-     * But don't do anything if this entry is the only one or is the last one in the array
-     * except decrement the number of entries.
-     */
-    if (dset_count > 1 && index != dset_count -1 ) {
-        for (i = index; i < dset_count - 1; i++) {
-            strcpy(dset_stuff[i].dset_name, dset_stuff[i + 1].dset_name);
-            strcpy(dset_stuff[i].file_name, dset_stuff[i + 1].file_name);
-            dset_stuff[i].layout =          dset_stuff[i + 1].layout;
-            dset_stuff[i].ref_count =       dset_stuff[i + 1].ref_count;
-            dset_stuff[i].dcpl_id =         dset_stuff[i + 1].dcpl_id;
-            dset_stuff[i].dtype_id =        dset_stuff[i + 1].dtype_id;
-            dset_stuff[i].space_id =        dset_stuff[i + 1].space_id;
-            dset_stuff[i].location =        dset_stuff[i + 1].location;
-            dset_stuff[i].use_native =      dset_stuff[i + 1].use_native;
+    /* First, close the IDs related to the dataset if it is non-default */
+    if (dset_info->dcpl_id > 0 && dset_info->dcpl_id != H5P_DATASET_CREATE) {
+        if (H5Pclose(dset_info->dcpl_id) < 0) {
+            fprintf(stderr, "failed to close DCPL\n");
+            ret_value = -1;
         }
     }
 
-    dset_count--;
+    if (dset_info->dtype_id > 0 && H5Tclose(dset_info->dtype_id) < 0) {
+        fprintf(stderr, "failed to close dtype\n");
+        ret_value = -1;
+    }
+
+    if (dset_info->space_id > 0 && H5Sclose(dset_info->space_id) < 0) {
+        fprintf(stderr, "failed to close dataspace\n");
+        ret_value = -1;
+    }
+
+    free(dset_info);
+
+done:
+    return ret_value;
 }
 
 
@@ -2427,28 +2307,19 @@ static herr_t
 H5VL_bypass_dataset_close(void *dset, hid_t dxpl_id, void **req)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)dset;
-    char dset_name[1024];
-    unsigned i;
-    herr_t ret_value;
+    unsigned       i;
+    herr_t         ret_value = 0;
 
+    
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL DATASET Close\n");
 #endif
 
-    /* Retrieve the dataset's name */
-    get_dset_name_helper(o, dset_name, req);
-
-    /* Decrement the reference count.  Remove the dataset structure from the list when the reference count drops to zero */
-    for (i = 0; i < dset_count; i++) {
-        if (!strcmp(dset_stuff[i].dset_name, dset_name)) {
-            dset_stuff[i].ref_count--;
-
-            if (!dset_stuff[i].ref_count)
-                remove_dset_info_helper(i);
-        }
+    if (H5VLdataset_close(o->under_object, o->under_vol_id, dxpl_id, req) < 0) {
+        fprintf(stderr, "Failed to close dataset in underlying connectors\n");
+        ret_value = -1;
+        goto done;
     }
-
-    ret_value = H5VLdataset_close(o->under_object, o->under_vol_id, dxpl_id, req);
 
     /* Check for async request */
     if(req && *req)
@@ -2458,6 +2329,7 @@ H5VL_bypass_dataset_close(void *dset, hid_t dxpl_id, void **req)
     if(ret_value >= 0)
         H5VL_bypass_free_obj(o);
 
+done:
     return ret_value;
 } /* end H5VL_bypass_dataset_close() */
 
@@ -4268,3 +4140,174 @@ H5VL_bypass_optional(void *obj, H5VL_optional_args_t *args, hid_t dxpl_id, void 
 
     return ret_value;
 } /* end H5VL_bypass_optional() */
+
+static herr_t
+get_dset_info(H5VL_bypass_t *dset, dset_t **info_out, hid_t dxpl_id, void** req) {
+    herr_t ret_value = 0;
+    H5VL_dataset_get_args_t get_args;
+    hid_t dcpl_id = H5I_INVALID_HID;
+    H5VL_native_dataset_optional_args_t dset_opt_args;
+    H5VL_optional_args_t opt_args;
+    int num_filters = 0;
+    H5T_class_t dtype_class;
+    dset_t *dset_info = NULL;
+
+    assert(dset);
+    assert(info_out);
+
+    if ((dset_info = malloc(sizeof(dset_t))) == NULL) {
+        fprintf(stderr, "can't allocate space for dataset info\n");
+        ret_value = -1;
+        goto done;
+    }
+
+    /* Initialize values */
+    dset_info->dcpl_id = H5I_INVALID_HID;
+    dset_info->dtype_id = H5I_INVALID_HID;
+    dset_info->space_id = H5I_INVALID_HID;
+    dset_info->num_filters = 0;
+    dset_info->dtype_class = H5T_NO_CLASS;
+    dset_info->layout = H5D_LAYOUT_ERROR;
+    dset_info->location = HADDR_UNDEF;
+    memset(dset_info->file_name, 0, 1024);
+
+    /* Retrieve dataset's DCPL */
+    get_args.op_type = H5VL_DATASET_GET_DCPL;
+    get_args.args.get_dcpl.dcpl_id = H5I_INVALID_HID;
+
+    if (H5VL_bypass_dataset_get(dset, &get_args, dxpl_id, req) < 0) {
+        fprintf(stderr, "couldn't get dataset dcpl\n");
+        ret_value = -1;
+        goto done;
+    }
+
+    if (get_args.args.get_dcpl.dcpl_id < 0) {
+        fprintf(stderr, "retrieved invalid dcpl id\n");
+        ret_value = -1;
+        goto done;
+    }
+
+    dset_info->dcpl_id = get_args.args.get_dcpl.dcpl_id;
+
+    /* Retrieve layout */
+    if ((dset_info->layout = H5Pget_layout(dset_info->dcpl_id)) < 0) {
+        fprintf(stderr, "unable to get dataset's layout\n");
+        ret_value = -1;
+        goto done;
+    }
+
+    /* Retrieve the dataset's datatype */
+    get_args.op_type = H5VL_DATASET_GET_TYPE;
+    get_args.args.get_type.type_id = H5I_INVALID_HID;
+
+    if (H5VL_bypass_dataset_get(dset, &get_args, dxpl_id, req) < 0) {
+        fprintf(stderr, "unable to get dataset's datatype\n");
+        ret_value = -1;
+        goto done;
+    }
+
+    if (get_args.args.get_type.type_id < 0) {
+        fprintf(stderr, "retrieved invalid type id\n");
+        ret_value = -1;
+        goto done;
+    }
+
+    dset_info->dtype_id = get_args.args.get_type.type_id;
+
+    /* Retrieve the dataset's dataspace */
+    get_args.op_type = H5VL_DATASET_GET_SPACE;
+    get_args.args.get_space.space_id = H5I_INVALID_HID;
+
+    if (H5VL_bypass_dataset_get(dset, &get_args, dxpl_id, req) < 0) {
+        fprintf(stderr, "unable to get dataset's dataspace\n");
+        ret_value = -1;
+        goto done;
+    }
+
+    if (get_args.args.get_space.space_id < 0) {
+        fprintf(stderr, "retrieved invalid space id\n");
+        ret_value = -1;
+        goto done;
+    }
+
+    dset_info->space_id = get_args.args.get_space.space_id;
+
+    /* Retrieve the dataset's location */
+    dset_opt_args.get_offset.offset = &(dset_info->location);
+    opt_args.op_type = H5VL_NATIVE_DATASET_GET_OFFSET;
+    opt_args.args = &dset_opt_args;
+
+    if (H5VL_bypass_dataset_optional(dset, &opt_args, dxpl_id, req) < 0) {
+        fprintf(stderr, "unable to get dataset's location\n");
+        ret_value = -1;
+        goto done;
+    }
+
+    /* For chunked datasets, this field is unused and will return an invalid value when queried */
+    if (dset_info->location == HADDR_UNDEF && dset_info->layout == H5D_CONTIGUOUS) {
+        fprintf(stderr, "retrieved invalid dataset address\n");
+        ret_value = -1;
+        goto done;
+    }
+
+    /* Retrieve the dataset's datatype class */
+    if ((dset_info->dtype_class = H5Tget_class(dset_info->dtype_id)) < 0) {
+        fprintf(stderr, "unable to get dataset's datatype class\n");
+        ret_value = -1;
+        goto done;
+    }
+
+    /* Retrieve the dataset's number of filters */
+    if ((num_filters = H5Pget_nfilters(dset_info->dcpl_id)) < 0) {
+        fprintf(stderr, "unable to get dataset's number of filters\n");
+        ret_value = -1;
+        goto done;
+    }
+
+    /* Retrieve parent file name */
+    if (get_filename_helper(dset, dset_info->file_name, H5I_DATASET, req) < 0) {
+        fprintf(stderr, "unable to get dataset's parent file name\n");
+        ret_value = -1;
+        goto done;
+    }
+
+done:
+    if (ret_value < 0 && dset_info) {
+        remove_dset_info_helper(dset_info);
+    } else {
+        *info_out = dset_info;
+    }
+
+    return ret_value;
+}
+
+static herr_t
+should_use_native(const dset_t *dset_info, bool *should_use_native) {
+    herr_t ret_value = 0;
+
+    assert(dset_info);
+    assert(should_use_native);
+
+    if (dset_info->num_filters > 0) {
+        *should_use_native = true;
+        goto done;
+    }
+        
+    if (H5D_VIRTUAL == dset_info->layout) {
+        *should_use_native = true;
+        goto done;
+    }
+
+    if (H5T_TIME == dset_info->dtype_class || H5T_OPAQUE == dset_info->dtype_class ||
+        H5T_COMPOUND == dset_info->dtype_class || H5T_REFERENCE == dset_info->dtype_class ||
+        H5T_VLEN == dset_info->dtype_class || H5T_ARRAY == dset_info->dtype_class) {
+        *should_use_native = true;
+        goto done;
+    }
+
+    // TBD: Link type?
+    *should_use_native = false;
+
+done:
+    return ret_value;
+}
