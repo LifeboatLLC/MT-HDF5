@@ -1370,14 +1370,30 @@ get_filename_helper(H5VL_bypass_t *obj, char *file_name, H5I_type_t obj_type, vo
     size_t               name_len  = 0; /* Length of file name */
     ssize_t              ret_value = -1;
 
+    assert(obj);
+    assert(obj->under_object);
+    assert(file_name);
+
     args.op_type                     = H5VL_FILE_GET_NAME;
     args.args.get_name.type          = obj_type;
-    args.args.get_name.buf_size      = BYPASS_NAME_SIZE_LONG;
+    args.args.get_name.buf_size      = 1024;
     args.args.get_name.buf           = file_name;
     args.args.get_name.file_name_len = &name_len;
 
     if (H5VL_bypass_file_get(obj, &args, H5P_DEFAULT, req) < 0) {
-        printf("In %s of %s at line %d: H5VL_bypass_file_get failed\n", __func__, __FILE__, __LINE__);
+        fprintf(stderr, "In %s of %s at line %d: H5VL_bypass_file_get failed\n", __func__, __FILE__, __LINE__);
+        ret_value = -1;
+        goto done;
+    }
+
+    if (name_len == 0) {
+        fprintf(stderr, "filename was unexpectedly empty\n");
+        ret_value = -1;
+        goto done;
+    }
+
+    if ((size_t)name_len != name_len) {
+        fprintf(stderr, "filename length was too large\n");
         ret_value = -1;
         goto done;
     }
@@ -1663,7 +1679,20 @@ get_dset_name_helper(H5VL_bypass_t *dset, char *name, void **req)
         goto done;
     }
 
+    if (dset_name_len == 0) {
+        fprintf(stderr, "dataset name length is unexpectedly zero\n");
+        ret_value = -1;
+        goto done;
+    }
+
+    if ((ssize_t)dset_name_len != dset_name_len) {
+        fprintf(stderr, "dataset name length is unexpectedly large\n");
+        ret_value = -1;
+        goto done;
+    }
+
     ret_value = (ssize_t)dset_name_len;
+
 done:
     return ret_value;
 } /* get_dset_name_helper */
@@ -3351,7 +3380,7 @@ done:
                     on open failure, error: %s\n", strerror(errno));
             }
             file_stuff[file_stuff_count].fd = -1;
-            memset(file_stuff[file_stuff_count].name, 0, BYPASS_NAME_SIZE_LONG);
+            memset(file_stuff[file_stuff_count].name, 0, 1024);
         }
     }
 
@@ -3610,18 +3639,29 @@ static herr_t
 H5VL_bypass_file_get(void *file, H5VL_file_get_args_t *args, hid_t dxpl_id, void **req)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)file;
-    herr_t         ret_value;
+    herr_t         ret_value = 0;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL FILE Get\n");
 #endif
+    assert(o->under_object);
 
-    ret_value = H5VLfile_get(o->under_object, o->under_vol_id, args, dxpl_id, req);
+    if (H5VLfile_get(o->under_object, o->under_vol_id, args, dxpl_id, req) < 0) {
+        fprintf(stderr, "unable to get file info\n");
+        ret_value = -1;
+        goto done;
+    }
 
     /* Check for async request */
-    if (req && *req)
-        *req = H5VL_bypass_new_obj(*req, o->under_vol_id);
+    if (req && *req) {
+        if ((*req = H5VL_bypass_new_obj(*req, o->under_vol_id)) == NULL) {
+            fprintf(stderr, "unable to create bypass file object\n");
+            ret_value = -1;
+            goto done;
+        }
+    }
 
+done:
     return ret_value;
 } /* end H5VL_bypass_file_get() */
 
@@ -3800,14 +3840,14 @@ remove_file_info_helper(unsigned index)
         }
 
         /* Zero out the last entry to avoid leaving duplicate information */
-        memset(file_stuff[file_stuff_count - 1].name, 0, BYPASS_NAME_SIZE_LONG);
+        memset(file_stuff[file_stuff_count - 1].name, 0, 1024);
         file_stuff[file_stuff_count - 1].fd = -1;
         file_stuff[file_stuff_count - 1].ref_count = 0;
         file_stuff[file_stuff_count - 1].num_reads = 0;
         file_stuff[file_stuff_count - 1].read_started = 0;
     } else {
         /* Just zero out the entry itself */
-        memset(file_stuff[index].name, 0, BYPASS_NAME_SIZE_LONG);
+        memset(file_stuff[index].name, 0, 1024);
         file_stuff[index].fd = -1;
         file_stuff[index].ref_count = 0;
         file_stuff[index].num_reads = 0;
@@ -3838,6 +3878,9 @@ H5VL_bypass_file_close(void *file, hid_t dxpl_id, void **req)
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL FILE Close\n");
 #endif
+
+    assert(o);
+    assert(o->under_object);
 
     /* Find the name of this file */
     if (get_filename_helper((H5VL_bypass_t *)file, file_name, H5I_FILE, req) < 0) {
