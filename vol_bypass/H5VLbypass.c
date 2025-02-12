@@ -1825,6 +1825,7 @@ check_dspaces_helper(hid_t dset_space_id, hid_t file_space_id, hid_t *file_space
                      hid_t *mem_space_id_copy)
 {
     herr_t ret_value = 0;
+    htri_t select_valid = 0;
 
     /* Settle the file data space */
     if (H5S_ALL == file_space_id)
@@ -1842,19 +1843,30 @@ check_dspaces_helper(hid_t dset_space_id, hid_t file_space_id, hid_t *file_space
         /* Use the original data space passed in from H5Dread or H5Dread_multi */
         *mem_space_id_copy = mem_space_id;
 
-    /* Make sure the selection + offset is within the extent of the dataspaces in
-     * file and memory */
-    if (H5Sselect_valid(*file_space_id_copy) <= 0) {
-        printf("In %s of %s at line %d: file data space selection isn't valid or "
-               "H5Sselect_valide failed\n",
+    /* Make sure the selection + offset is within the extent of the dataspaces in file and memory */
+    if ((select_valid = H5Sselect_valid(*file_space_id_copy)) < 0) {
+        printf("In %s of %s at line %d: H5Sselect_valid failed for file space\n",
                __func__, __FILE__, __LINE__);
         ret_value = -1;
         goto done;
     }
 
-    if (H5Sselect_valid(*mem_space_id_copy) <= 0) {
-        printf("In %s of %s at line %d: memory data space selection isn't valid or "
-               "H5Sselect_valide failed\n",
+    if (select_valid == 0) {
+        printf("In %s of %s at line %d: file data space selection isn't valid\n",
+               __func__, __FILE__, __LINE__);
+        ret_value = -1;
+        goto done;
+    }
+
+    if ((select_valid = H5Sselect_valid(*mem_space_id_copy)) < 0) {
+        printf("In %s of %s at line %d: H5Sselect_valid failed for mem space\n",
+               __func__, __FILE__, __LINE__);
+        ret_value = -1;
+        goto done;
+    }
+
+    if (select_valid == 0) {
+        printf("In %s of %s at line %d: memory data space selection isn't valid\n",
                __func__, __FILE__, __LINE__);
         ret_value = -1;
         goto done;
