@@ -1897,8 +1897,7 @@ done:
 static void *
 start_thread_for_pool(void *args)
 {
-    int thread_id = * (int*) args;
-    // int thread_id = ((info_for_thread_t *)args)->thread_id;
+    int thread_id = ((info_for_thread_t *)args)->thread_id;
     // int fd = ((info_for_thread_t *)args)->fd;
     void    *ret_value = (void*) 0;
     int     *file_indices_local = NULL;
