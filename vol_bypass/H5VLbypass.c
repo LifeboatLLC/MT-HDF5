@@ -4315,6 +4315,11 @@ should_use_native(const dset_t *dset_info, bool *should_use_native) {
         goto done;
     }
 
+    if (dset_info->layout == H5D_COMPACT) {
+        *should_use_native = true;
+        goto done;
+    }
+
     // TBD: Link type?
     *should_use_native = false;
 
