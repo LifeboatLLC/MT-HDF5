@@ -2507,12 +2507,6 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
                 selection_info.file_space_id = file_space_id_copy;
                 selection_info.mem_space_id  = mem_space_id_copy;
 
-                if (dset_info->location == HADDR_UNDEF) {
-                    fprintf(stderr, "dataset does not have a valid read location\n");
-                    ret_value = -1;
-                    goto done;
-                }
-
                 selection_info.chunk_addr    = dset_info->location;
 
                 process_vectors(buf[j], &selection_info);
@@ -4743,11 +4737,15 @@ get_dset_info(H5VL_bypass_t *dset, dset_t **info_out, hid_t dxpl_id, void** req)
     }
 
     /* For chunked datasets, this field is unused and will return an invalid value when queried */
+    // TBD - This seems unavoidable for empty datasets. Instead of failing, use
+    // this as a critria for using the Native VOL 
+    /*
     if (dset_info->location == HADDR_UNDEF && dset_info->layout == H5D_CONTIGUOUS) {
         fprintf(stderr, "retrieved invalid dataset address\n");
         ret_value = -1;
         goto done;
     }
+    */
 
     /* Retrieve the dataset's datatype class */
     if ((dset_info->dtype_class = H5Tget_class(dset_info->dtype_id)) < 0) {
@@ -4801,6 +4799,11 @@ should_use_native(const dset_t *dset_info, bool *should_use_native) {
     if (H5T_TIME == dset_info->dtype_class || H5T_OPAQUE == dset_info->dtype_class ||
         H5T_COMPOUND == dset_info->dtype_class || H5T_REFERENCE == dset_info->dtype_class ||
         H5T_VLEN == dset_info->dtype_class || H5T_ARRAY == dset_info->dtype_class) {
+        *should_use_native = true;
+        goto done;
+    }
+
+    if (dset_info->location == HADDR_UNDEF && dset_info->layout == H5D_CONTIGUOUS) {
         *should_use_native = true;
         goto done;
     }
