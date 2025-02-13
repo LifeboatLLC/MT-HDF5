@@ -1867,6 +1867,12 @@ read_big_data(int fd, int *buf, size_t size, off_t offset)
             if (bytes_read > 0)
                 offset += bytes_read;
             
+            if (bytes_read == 0) {
+                fprintf(stderr, "file read encountered EOF\n");
+                ret_value = -1;
+                goto done;
+            }
+
             /* Error messages for unexpected values of errno */
             if (-1 == bytes_read) {
                 switch (errno) {
@@ -1946,7 +1952,7 @@ start_thread_for_pool(void *args)
             pthread_cond_wait(&cond_local, &mutex_local);
         }
 
-        /* If a new read call has begin, flag thread as active*/
+        /* If a new read call has begun, flag thread as active*/
         if (!thread_loop_finish)
             md_for_thread.thread_is_active[thread_id] = true;
 
@@ -1997,9 +2003,10 @@ start_thread_for_pool(void *args)
             if (read_big_data(file_stuff[file_indices_local[i]].fd, vec_bufs_local[i], sizes_local[i],
                           addrs_local[i]) < 0)
             {
-                fprintf(stderr, "read_big_data failed\n");
-                ret_value = (void*) -1;
-                goto done;
+                fprintf(stderr, "read_big_data failed within file %s\n", file_stuff[file_indices_local[i]].name);
+                /* Return a failure code, but try to complete the rest of the read request.
+                 * This is important to properly decrement the reference count/num_reads on the local file object */
+                ret_value = (void *)-1;
             }
 
             if (pthread_mutex_lock(&mutex_local) != 0) {
@@ -2036,7 +2043,8 @@ start_thread_for_pool(void *args)
          * writes to the array are larger than expected */
         if (pthread_mutex_lock(&mutex_local) != 0) {
             fprintf(stderr, "failed to lock mutex\n");
-            return (void*) -1;
+            ret_value = (void*) -1;
+            goto done;
         }
 
         if (thread_loop_finish) {
@@ -2046,7 +2054,8 @@ start_thread_for_pool(void *args)
 
         if (pthread_mutex_unlock(&mutex_local) != 0) {
             fprintf(stderr, "failed to unlock mutex\n");
-            return (void*) -1;
+            ret_value = (void*) -1;
+            goto done;
         }
 
         /* If all task in the queue are finished and all the data read are finished, notify that
@@ -2064,6 +2073,9 @@ start_thread_for_pool(void *args)
     }
 
 done:
+    if (ret_value == (void*) -1) {
+        fprintf(stderr, "thread idx %d in pool failed\n", thread_id);
+    }
 
     free(file_indices_local);
     free(addrs_local);
@@ -2761,10 +2773,6 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
              * it finished putting tasks in the queue. */
             pthread_mutex_lock(&mutex_local);
             thread_task_finished = true;
-            /* Flag all threads as active */
-            for (i = 0; i < nthreads_tpool; i++)
-                md_for_thread.thread_is_active[i] = true;
-
             pthread_mutex_unlock(&mutex_local);
             pthread_cond_broadcast(&cond_local); /* Why do this signal/broadcast? */
 
@@ -2818,7 +2826,7 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
             goto done;
         }
 
-        if (!any_thread_active)
+        if (!any_thread_active && thread_task_count == 0)
             break;
 
         pthread_cond_wait(&cond_read_finished, &mutex_local);
