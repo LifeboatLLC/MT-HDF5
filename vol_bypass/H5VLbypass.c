@@ -4642,7 +4642,6 @@ get_dset_info(H5VL_bypass_t *dset, dset_t **info_out, hid_t dxpl_id, void** req)
     hid_t dcpl_id = H5I_INVALID_HID;
     H5VL_native_dataset_optional_args_t dset_opt_args;
     H5VL_optional_args_t opt_args;
-    int num_filters = 0;
     H5T_class_t dtype_class;
     dset_t *dset_info = NULL;
 
@@ -4755,7 +4754,7 @@ get_dset_info(H5VL_bypass_t *dset, dset_t **info_out, hid_t dxpl_id, void** req)
     }
 
     /* Retrieve the dataset's number of filters */
-    if ((num_filters = H5Pget_nfilters(dset_info->dcpl_id)) < 0) {
+    if ((dset_info->num_filters = H5Pget_nfilters(dset_info->dcpl_id)) < 0) {
         fprintf(stderr, "unable to get dataset's number of filters\n");
         ret_value = -1;
         goto done;
