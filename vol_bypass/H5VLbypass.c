@@ -3934,9 +3934,8 @@ H5VL_bypass_file_close(void *file, hid_t dxpl_id, void **req)
             if (!file_stuff[i].ref_count) {
                 if (close(file_stuff[i].fd) < 0) {
                     fprintf(stderr, "failed to close file descriptor for file %s\n", file_name);
+                    /* Indicate failure but try to complete file cleanup */
                     ret_value = -1;
-                    /* TBD: Failing here may leak some memory */
-                    goto done;
                 }
 
                 file_stuff[i].fd = -1;
@@ -3951,12 +3950,15 @@ H5VL_bypass_file_close(void *file, hid_t dxpl_id, void **req)
 
     if ((ret_value = H5VLfile_close(o->under_object, o->under_vol_id, dxpl_id, req)) < 0) {
         fprintf(stderr, "Failed to close file in underlying VOL connectors\n");
-        goto done;
+        ret_value = -1;
     }
 
     /* Check for async request */
-    if (req && *req)
-        *req = H5VL_bypass_new_obj(*req, o->under_vol_id);
+    if (ret_value >= 0 && req && *req)
+        if ((*req = H5VL_bypass_new_obj(*req, o->under_vol_id)) == NULL) {
+            fprintf(stderr, "Failed to create async request\n");
+            ret_value = -1;
+        }
 
     /* Release our wrapper, if underlying file was closed */
     if (ret_value >= 0)
