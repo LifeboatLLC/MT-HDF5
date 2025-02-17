@@ -10,8 +10,8 @@ DIM2=4
 NDSETS=4
 
 # Make sure these two environment variables aren't set in order to run the test without Bypass VOL
-unset HDF5_VOL_CONNECTOR
-unset HDF5_PLUGIN_PATH
+#unset HDF5_VOL_CONNECTOR
+#unset HDF5_PLUGIN_PATH
 
 echo "Test 0: Creating a HDF5 file with multiple datasets in it"
 ./h5_create -d ${DIM1}x${DIM2} -n ${NDSETS}
@@ -21,11 +21,11 @@ echo "Test 1: Reading multiple datasets in a single file with straight HDF5 (no 
 ./h5_read -t 0 -d ${DIM1}x${DIM2} -n ${NDSETS} -k
 
 # Set the environment variables to use Bypass VOL. Need to modify them with your own paths 
-export HDF5_PLUGIN_PATH=/Users/raylu/Lifeboat/HDF/MT-HDF5/vol_bypass
-export HDF5_VOL_CONNECTOR="bypass under_vol=0;under_info={};"
-export DYLD_LIBRARY_PATH=$DYLD_LIBRARY_PATH:/Users/raylu/Lifeboat/HDF/Experimental/build/hdf5/lib:$HDF5_PLUGIN_PATH
-export BYPASS_VOL_NTHREADS=${NTHREADS}
-export BYPASS_VOL_NSTEPS=${NSTEPS_QUEUE}
+#export HDF5_PLUGIN_PATH=/Users/raylu/Lifeboat/HDF/MT-HDF5/vol_bypass
+#export HDF5_VOL_CONNECTOR="bypass under_vol=0;under_info={};"
+#export DYLD_LIBRARY_PATH=$DYLD_LIBRARY_PATH:/Users/raylu/Lifeboat/HDF/Experimental/build/hdf5/lib:$HDF5_PLUGIN_PATH
+#export BYPASS_VOL_NTHREADS=${NTHREADS}
+#export BYPASS_VOL_NSTEPS=${NSTEPS_QUEUE}
 
 echo ""
 echo "Test 2a: Reading multiple datasets in a single file with Bypass VOL"
@@ -37,9 +37,9 @@ echo "Test 2b: Reading multiple datasets in a single file using H5Dread_multi wi
 
 # Disabled this test as the work is still ongoing
 # The C test must follow the test with Bypass VOL immediately to use info.log file which contains file name and data info
-# echo ""
-# echo "Test 3: Reading multiple datasets in a single file in C only"
-# ./posix_read -t ${NTHREADS} -d ${DIM1}x${DIM2} -n ${NDSETS} -k
+echo ""
+echo "Test 3: Reading multiple datasets in a single file in C only"
+./posix_read -t ${NTHREADS} -d ${DIM1}x${DIM2} -n ${NDSETS} -k
 
 # Avoid checking the correctness of the data if there are more than one section because the thread pool may still be 
 # reading the data during the check.  Each section corresponds to a H5Dread.  Sections are seperated by ### in info.log.

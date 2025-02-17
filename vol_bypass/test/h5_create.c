@@ -96,8 +96,10 @@ int create_files()
         else
             sprintf(file_name, "%s%d.h5", FILE_NAME, k + 1);
 
-        file = H5Fcreate(file_name, H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT);
-
+        if ((file = H5Fcreate(file_name, H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT)) < 0) {
+            fprintf(stderr, "Cannot create file %s\n", file_name);
+            return -1;
+        }
         /* Create and writes data to dataset(s) */
         for (n = 0; n < hand.num_dsets; n++) {
             if (hand.num_dsets == 1)
