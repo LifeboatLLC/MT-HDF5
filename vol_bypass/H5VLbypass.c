@@ -3360,7 +3360,7 @@ H5VL_bypass_file_create(const char *name, unsigned flags, hid_t fcpl_id, hid_t f
     }
 
     /* Open the file with the underlying VOL connector */
-    if ((under = H5VLfile_create(name, flags, fcpl_id, under_fapl_id, dxpl_id, req)) < 0) {
+    if ((under = H5VLfile_create(name, flags, fcpl_id, under_fapl_id, dxpl_id, req)) == NULL) {
         fprintf(stderr, "error while opening file with underlying VOL\n");
         goto error;
     }
