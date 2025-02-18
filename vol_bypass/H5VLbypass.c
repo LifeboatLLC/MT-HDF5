@@ -191,6 +191,9 @@ static herr_t H5VL_bypass_token_from_str(void *obj, H5I_type_t obj_type, const c
 /* Generic optional callback */
 static herr_t H5VL_bypass_optional(void *obj, H5VL_optional_args_t *args, hid_t dxpl_id, void **req);
 
+/* Flush the file containing the provided dataset */
+static herr_t flush_containing_file(H5VL_bypass_t *file);
+
 /*******************/
 /* Local variables */
 /*******************/
@@ -2160,11 +2163,20 @@ H5VL_bypass_dataset_read(size_t count, void *dset[],
                 goto done;
             }
 
-	    /* Reset for the next H5Dread */
-	    pthread_mutex_lock(&mutex_local);
-	    thread_task_finished = false;
-	    thread_loop_finish   = false;
-	    pthread_mutex_unlock(&mutex_local);
+            /* Reset for the next H5Dread */
+            pthread_mutex_lock(&mutex_local);
+
+            /* Future optimization: Only flush when a write has been performed*/
+            if (flush_containing_file((H5VL_bypass_t *)dset[j]) < 0) {
+                fprintf(stderr, "failed to flush dataset\n");
+                ret_value = -1;
+                goto done;
+            }
+
+
+            thread_task_finished = false;
+            thread_loop_finish   = false;
+            pthread_mutex_unlock(&mutex_local);
 
 	    /* Find out the file name */
 	    //get_filename_helper((H5VL_bypass_t *)(dset[j]), file_name, H5I_DATASET, req);
@@ -4268,3 +4280,22 @@ H5VL_bypass_optional(void *obj, H5VL_optional_args_t *args, hid_t dxpl_id, void 
 
     return ret_value;
 } /* end H5VL_bypass_optional() */
+
+/* Flush the file containing the provided dataset */
+static herr_t
+flush_containing_file(H5VL_bypass_t *dset) {
+    herr_t ret_value = 0;
+    H5VL_file_specific_args_t args;
+
+    args.args.flush.obj_type = H5I_DATASET;
+    args.args.flush.scope = H5F_SCOPE_LOCAL;
+
+    if ((H5VLfile_specific((void*) dset->under_object, dset->under_vol_id, &args, H5P_DEFAULT, NULL) < 0)) {
+        fprintf(stderr, "unable to flush file\n");
+        ret_value = -1;
+        goto done;
+    }
+
+done:
+    return ret_value;
+}
