@@ -4924,6 +4924,7 @@ flush_containing_file(H5VL_bypass_t *dset) {
     herr_t ret_value = 0;
     H5VL_file_specific_args_t args;
 
+    args.op_type = H5VL_FILE_FLUSH;
     args.args.flush.obj_type = H5I_DATASET;
     args.args.flush.scope = H5F_SCOPE_LOCAL;
 
