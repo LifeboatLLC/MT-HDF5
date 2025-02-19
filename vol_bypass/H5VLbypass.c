@@ -4795,10 +4795,7 @@ should_use_native(const dset_t *dset_info, bool *should_use_native) {
         goto done;
     }
 
-    if (H5T_TIME == dset_info->dtype_class || H5T_OPAQUE == dset_info->dtype_class ||
-        H5T_COMPOUND == dset_info->dtype_class || H5T_REFERENCE == dset_info->dtype_class ||
-        H5T_VLEN == dset_info->dtype_class || H5T_ARRAY == dset_info->dtype_class
-        || H5T_STRING == dset_info->dtype_class) {
+    if (H5T_INTEGER != dset_info->dtype_class && H5T_FLOAT != dset_info->dtype_class) {
         *should_use_native = true;
         goto done;
     }
