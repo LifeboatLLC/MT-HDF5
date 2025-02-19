@@ -3278,10 +3278,10 @@ static void *
 H5VL_bypass_file_create(const char *name, unsigned flags, hid_t fcpl_id, hid_t fapl_id, hid_t dxpl_id,
                         void **req)
 {
-    H5VL_bypass_info_t *info;
-    H5VL_bypass_t      *file;
-    hid_t               under_fapl_id;
-    void               *under;
+    H5VL_bypass_info_t *info = NULL;
+    H5VL_bypass_t      *file = NULL;
+    hid_t               under_fapl_id = H5I_INVALID_HID;
+    void               *under = NULL;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL FILE Create\n");
