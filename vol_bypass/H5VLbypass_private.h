@@ -69,6 +69,7 @@ static file_t *file_stuff;
 static int file_stuff_count = 0;
 static int file_stuff_size = FILE_STUFF_SIZE;
 
+<<<<<<< HEAD
 /* Dataset info */
 typedef struct {
 <<<<<<< HEAD
@@ -86,6 +87,8 @@ typedef struct {
     H5T_class_t dtype_class;
 } dset_t;
 
+=======
+>>>>>>> 1d0fb1c (Rework dataset/datatype handling)
 /* Log info to be written out for the C program */
 typedef struct {
     char    file_name[64];        /* file name to be read or written */
