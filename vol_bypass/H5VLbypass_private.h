@@ -67,18 +67,6 @@ static file_t *file_stuff;
 static int file_stuff_count = 0;
 static int file_stuff_size = FILE_STUFF_SIZE;
 
-/* Dataset info */
-typedef struct {
-    char file_name[1024];
-    H5D_layout_t layout;
-    hid_t dcpl_id;
-    hid_t dtype_id;
-    hid_t space_id;
-    haddr_t location;
-    int num_filters;
-    H5T_class_t dtype_class;
-} dset_t;
-
 /* Log info to be written out for the C program */
 typedef struct {
     char    file_name[64];        /* file name to be read or written */
