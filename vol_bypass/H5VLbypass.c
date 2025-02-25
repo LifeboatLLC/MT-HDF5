@@ -521,13 +521,13 @@ H5VL_bypass_init(hid_t vipl_id)
     // nsteps_tpool);
 
     /* Initialize the information strcuture for threads to use.  Do it before starting threads */
-    md_for_thread.file_indices   = md_for_thread.file_indices_local;
-    md_for_thread.addrs          = md_for_thread.addrs_local;
-    md_for_thread.sizes          = md_for_thread.sizes_local;
-    md_for_thread.vec_bufs       = md_for_thread.vec_bufs_local;
-    md_for_thread.vec_arr_nalloc = LOCAL_VECTOR_LEN;
+    if ((md_for_thread.tasks = (Bypass_task_t *)calloc(BYPASS_TASK_QUEUE_INIT_LEN, sizeof(Bypass_task_t))) == NULL) {
+        fprintf(stderr, "failed to allocate memory for task queue\n");
+        return -1;
+    }
+
+    md_for_thread.vec_arr_nalloc = BYPASS_TASK_QUEUE_INIT_LEN;
     md_for_thread.vec_arr_nused  = 0;
-    md_for_thread.free_memory    = false;
 
     /* Initialize thread active status to true */
     md_for_thread.thread_is_active = calloc(nthreads_tpool, sizeof(bool));
@@ -650,16 +650,7 @@ H5VL_bypass_term(void)
         free(md_for_thread.thread_is_active);
 
     /* Wait until all threads finish before releasing resources */
-    if (md_for_thread.free_memory) {
-        if (md_for_thread.file_indices)
-            free(md_for_thread.file_indices);
-        if (md_for_thread.addrs)
-            free(md_for_thread.addrs);
-        if (md_for_thread.sizes)
-            free(md_for_thread.sizes);
-        if (md_for_thread.vec_bufs)
-            free(md_for_thread.vec_bufs);
-    }
+    free(md_for_thread.tasks);
 
     return 0;
 } /* end H5VL_bypass_term() */
@@ -1847,9 +1838,16 @@ done:
 /* Break down into smaller sections if the data size is 2GB or bigger.  Need to change the type
  * of BUF to VOID to be more general */
 static herr_t
-read_big_data(int fd, int *buf, size_t size, off_t offset)
+read_big_data(Bypass_task_t *task)
 {
     herr_t ret_value = 0;
+
+    assert(task);
+
+    int fd = file_stuff[task->file_index].fd;
+    int *buf = task->vec_buf;
+    size_t size = task->size;
+    off_t offset = task->addr;
 
     while (size > 0) {
         int bytes_in   = 0;  /* # of bytes to read       */
@@ -1907,38 +1905,16 @@ start_thread_for_pool(void *args)
     int thread_id = ((info_for_thread_t *)args)->thread_id;
     // int fd = ((info_for_thread_t *)args)->fd;
     void    *ret_value = (void*) 0;
-    int     *file_indices_local = NULL;
-    haddr_t *addrs_local = NULL;
-    size_t  *sizes_local = NULL;
-    void   **vec_bufs_local = NULL;
     int      local_count = 0;
     int      i;
+    Bypass_task_t   *local_tasks;
 
-    // fprintf(stderr, "In start_thread_for_pool: %d\n", thread_id);
-
-    if ((file_indices_local = (int *)malloc(nsteps_tpool * sizeof(int))) == NULL) {
-        fprintf(stderr, "failed to allocate file indices\n");
-        ret_value = (void*) -1;
-        goto done;
-    }
-    
-    if ((addrs_local = (haddr_t *)malloc(nsteps_tpool * sizeof(haddr_t))) == NULL) {
-        fprintf(stderr, "failed to allocate addresses\n");
+    if ((local_tasks = (Bypass_task_t *)calloc(nsteps_tpool, sizeof(Bypass_task_t))) == NULL) {
+        fprintf(stderr, "failed to allocate memory for local tasks\n");
         ret_value = (void*) -1;
         goto done;
     }
 
-    if ((sizes_local = (size_t *)malloc(nsteps_tpool * sizeof(size_t))) == NULL) {
-        fprintf(stderr, "failed to allocate sizes\n");
-        ret_value = (void*) -1;
-        goto done;
-    }
-
-    if ((vec_bufs_local = (void *)malloc(nsteps_tpool * sizeof(void *))) == NULL) {
-        fprintf(stderr, "failed to allocate vector buffers\n");
-        ret_value = (void*) -1;
-        goto done;
-    }
     /* Rename thread_loop_finish to a more appropriate name */
     while (!thread_loop_finish || !stop_tpool) {
         if (pthread_mutex_lock(&mutex_local) != 0) {
@@ -1964,16 +1940,14 @@ start_thread_for_pool(void *args)
         local_count = MIN(thread_task_count, nsteps_tpool);
 
         for (i = 0; i < local_count; i++) {
-            file_indices_local[i] = md_for_thread.file_indices[info_pointer];
-            addrs_local[i]        = md_for_thread.addrs[info_pointer];
-            sizes_local[i]        = md_for_thread.sizes[info_pointer];
-            vec_bufs_local[i]     = md_for_thread.vec_bufs[info_pointer];
+            // TBD: Copy vs. pointer. For now, copy the task struct.
+            local_tasks[i] = md_for_thread.tasks[info_pointer];
 
             info_pointer++;
             thread_task_count--;
 
-            file_stuff[file_indices_local[i]].num_reads++;
-            file_stuff[file_indices_local[i]].read_started = true;
+            file_stuff[local_tasks[i].file_index].num_reads++;
+            file_stuff[local_tasks[i].file_index].read_started = true;
         }
 
         // fprintf(stderr, "thread %d: 1. local_count = %d, thread_task_count = %d, info_pointer = %d, addr =
@@ -1997,10 +1971,9 @@ start_thread_for_pool(void *args)
             // sizes_local = %ld, addrs_local = %llu\n", thread_id, i, file_indices_local[i],
             // vec_bufs_local[i], sizes_local[i], addrs_local[i]);
 
-            if (read_big_data(file_stuff[file_indices_local[i]].fd, vec_bufs_local[i], sizes_local[i],
-                          addrs_local[i]) < 0)
+            if (read_big_data(&local_tasks[i]) < 0)
             {
-                fprintf(stderr, "read_big_data failed within file %s\n", file_stuff[file_indices_local[i]].name);
+                fprintf(stderr, "read_big_data failed within file %s\n", file_stuff[local_tasks[i].file_index].name);
                 /* Return a failure code, but try to complete the rest of the read request.
                  * This is important to properly decrement the reference count/num_reads on the local file object */
                 ret_value = (void *)-1;
@@ -2012,18 +1985,25 @@ start_thread_for_pool(void *args)
                 goto done;
             }
 
-            file_stuff[file_indices_local[i]].num_reads--;
+            file_stuff[local_tasks[i].file_index].num_reads--;
 
             /* When there is no task left in the queue and all the reads finish for the current file, signal
              * the main process that this file can be closed.
              */
-            if (thread_loop_finish && (file_stuff[file_indices_local[i]].num_reads == 0)) {
+            if (thread_loop_finish && (file_stuff[local_tasks[i].file_index].num_reads == 0)) {
                 // fprintf(stderr, "thread %d: file name = %s, signal close_ready\n", thread_id,
                 // file_stuff[file_indices_local[i]].name);
                 /* There are currently no reads active on this file - it may be closed */
-                file_stuff[file_indices_local[i]].read_started = false;
-                pthread_cond_signal(&(file_stuff[file_indices_local[i]].close_ready));
+                file_stuff[local_tasks[i].file_index].read_started = false;
+                pthread_cond_signal(&(file_stuff[local_tasks[i].file_index].close_ready));
             }
+
+            /* Task complete - prevent accidental later references to its data */
+            local_tasks[i].file_index = -1;
+            local_tasks[i].vec_buf = NULL;
+            local_tasks[i].size = 0;
+            local_tasks[i].addr = 0;
+
 
             if (pthread_mutex_unlock(&mutex_local) != 0) {
                 fprintf(stderr, "failed to unlock mutex\n");
@@ -2074,10 +2054,7 @@ done:
         fprintf(stderr, "thread idx %d in pool failed\n", thread_id);
     }
 
-    free(file_indices_local);
-    free(addrs_local);
-    free(sizes_local);
-    free(vec_bufs_local);
+    free(local_tasks);
 
     return ret_value;
 } /* end start_thread_for_pool() */
@@ -2187,110 +2164,28 @@ process_vectors(void *rbuf, sel_info_t *selection_info)
         }
 
         if (md_for_thread.vec_arr_nused == md_for_thread.vec_arr_nalloc) {
-            /* Check if we're using the static arrays */
-            if (md_for_thread.addrs == md_for_thread.addrs_local) {
-                /* Allocate dynamic arrays.  Need to free them later */
-                if (NULL ==
-                    (md_for_thread.file_indices = malloc(sizeof(md_for_thread.file_indices_local) * 2)))
-                {
-                    fprintf(stderr, "memory allocation failed for file ids list\n");
-                    ret_value = -1;
-                    goto done;
-                }
+            void *tmp_ptr;
 
-                if (NULL == (md_for_thread.addrs = malloc(sizeof(md_for_thread.addrs_local) * 2)))
-                {
-                    fprintf(stderr, "memory allocation failed for address list\n");
-                    ret_value = -1;
-                    goto done;
-                }
-
-                if (NULL == (md_for_thread.sizes = malloc(sizeof(md_for_thread.sizes_local) * 2)))
-                {
-                    fprintf(stderr, "memory allocation failed for size list\n");
-                    ret_value = -1;
-                    goto done;
-                }
-
-                if (NULL == (md_for_thread.vec_bufs = malloc(sizeof(md_for_thread.vec_bufs_local) * 2)))
-                {
-                    fprintf(stderr, "memory allocation failed for buffer list\n");
-                    ret_value = -1;
-                    goto done;
-                }
-
-                /* Copy the existing data */
-                (void)memcpy(md_for_thread.file_indices, md_for_thread.file_indices_local,
-                             sizeof(md_for_thread.file_indices_local));
-                (void)memcpy(md_for_thread.addrs, md_for_thread.addrs_local,
-                             sizeof(md_for_thread.addrs_local));
-                (void)memcpy(md_for_thread.sizes, md_for_thread.sizes_local,
-                             sizeof(md_for_thread.sizes_local));
-                (void)memcpy(md_for_thread.vec_bufs, md_for_thread.vec_bufs_local,
-                             sizeof(md_for_thread.vec_bufs_local));
-            }
-            else {
-                void *tmp_ptr;
-
-                /* Reallocate arrays */
-                if (NULL == (tmp_ptr = realloc(md_for_thread.file_indices,
-                                               md_for_thread.vec_arr_nalloc *
-                                                   sizeof(*(md_for_thread.file_indices)) * 2)))
-                {
-                    fprintf(stderr, "memory reallocation failed for file ids list\n");
-                    ret_value = -1;
-                    goto done;
-                }
-
-                md_for_thread.file_indices = tmp_ptr;
-                if (NULL == (tmp_ptr = realloc(md_for_thread.addrs, md_for_thread.vec_arr_nalloc *
-                                                                        sizeof(*(md_for_thread.addrs)) * 2)))
-                {
-                    fprintf(stderr, "memory reallocation failed for address list\n");
-                    ret_value = -1;
-                    goto done;
-                }                                                                    
-
-                md_for_thread.addrs = tmp_ptr;
-                if (NULL == (tmp_ptr = realloc(md_for_thread.sizes, md_for_thread.vec_arr_nalloc *
-                                                                        sizeof(*(md_for_thread.sizes)) * 2)))
-                {
-                    fprintf(stderr, "memory reallocation failed for size list\n");
-                    ret_value = -1;
-                    goto done;
-                }
-
-                md_for_thread.sizes = tmp_ptr;
-                if (NULL ==
-                    (tmp_ptr = realloc(md_for_thread.vec_bufs,
-                                       md_for_thread.vec_arr_nalloc * sizeof(*(md_for_thread.vec_bufs)) * 2)))
-                {
-                    fprintf(stderr, "memory reallocation failed for buffer list\n");
-                    ret_value = -1;
-                    goto done;
-                }
-
-                md_for_thread.vec_bufs = tmp_ptr;
+            /* Reallocate task array */
+            if (NULL == (tmp_ptr = realloc(md_for_thread.tasks,
+                                            2 * md_for_thread.vec_arr_nalloc * sizeof(Bypass_task_t)))) {
+                fprintf(stderr, "memory reallocation failed for task array failed\n");
+                ret_value = -1;
+                goto done;
             }
 
-            /* Record that we've doubled the array sizes */
+            md_for_thread.tasks = tmp_ptr;
+
+            /* Record that we've doubled the array size */
             md_for_thread.vec_arr_nalloc *= 2;
-
-            md_for_thread.free_memory = true;
         }
 
         /* Add this segment to vector read list */
-        md_for_thread.file_indices[md_for_thread.vec_arr_nused] = selection_info->my_file_index;
-        md_for_thread.addrs[md_for_thread.vec_arr_nused] =
-            selection_info->chunk_addr +
-            file_off[file_seq_i]; /* Add the base offset of the dataset to the address */
-        md_for_thread.sizes[md_for_thread.vec_arr_nused]    = io_len;
-        md_for_thread.vec_bufs[md_for_thread.vec_arr_nused] = (void *)((uint8_t *)rbuf + mem_off[mem_seq_i]);
-
-        // fprintf(stderr, "In process_vector: %d. addr = %llu, sizes = %llu, buf = %p\n",
-        // md_for_thread.vec_arr_nused, md_for_thread.addrs[md_for_thread.vec_arr_nused],
-        // md_for_thread.sizes[md_for_thread.vec_arr_nused],
-        // md_for_thread.vec_bufs[md_for_thread.vec_arr_nused]);
+        md_for_thread.tasks[md_for_thread.vec_arr_nused].file_index = selection_info->my_file_index;
+        md_for_thread.tasks[md_for_thread.vec_arr_nused].addr =
+            selection_info->chunk_addr + file_off[file_seq_i]; /* Add the base offset of the dataset to the address */
+        md_for_thread.tasks[md_for_thread.vec_arr_nused].size = io_len;
+        md_for_thread.tasks[md_for_thread.vec_arr_nused].vec_buf = (void *)((uint8_t *)rbuf + mem_off[mem_seq_i]);
 
         md_for_thread.vec_arr_nused++;
 

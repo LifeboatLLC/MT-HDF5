@@ -36,6 +36,7 @@
 #define THREAD_STEP        1024
 #define NTHREADS_MAX       32
 #define BYPASS_NAME_SIZE_LONG   1024
+#define BYPASS_TASK_QUEUE_INIT_LEN 128
 #define MIN(a, b)          (((a) < (b)) ? (a) : (b))
 #define GB (1024 * 1024 * 1024)
 #define MB (1024 * 1024)
@@ -119,23 +120,22 @@ typedef struct {
     int      fd;
 } info_for_thread_t;
 
+typedef struct Bypass_task_t {
+    int     file_index; /* Index of the file containing the dset to read from in the file_stuff array */
+    haddr_t addr;       /* Location in filesystem file to read from */
+    size_t  size;
+    void   *vec_buf;    /* User buffer to populate */
+} Bypass_task_t;
+
 typedef struct {
     int      thread_id;
     int      fd;            /* Remove this field and use file_indices */
     uint32_t step;
-    int      *file_indices;
-    haddr_t  *addrs;
-    size_t   *sizes;
-    void     **vec_bufs;
 
-    int        file_indices_local[LOCAL_VECTOR_LEN];
-    haddr_t    addrs_local[LOCAL_VECTOR_LEN];
-    size_t     sizes_local[LOCAL_VECTOR_LEN];
-    void       *vec_bufs_local[LOCAL_VECTOR_LEN];
+    Bypass_task_t   *tasks;
 
     size_t     vec_arr_nalloc;
     size_t     vec_arr_nused;
-    bool       free_memory;
 
     bool       *thread_is_active; /* Array of active status for each tpool thread */
 } info_for_tpool_t;
