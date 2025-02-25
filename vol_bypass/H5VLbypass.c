@@ -274,6 +274,9 @@ static herr_t get_dtype_info_helper(hid_t type_id, dtype_info_t *type_info_out);
 /* Flush the file containing the provided dataset */
 static herr_t flush_containing_file(H5VL_bypass_t *file);
 
+static H5D_space_status_t
+get_dset_space_status(H5VL_bypass_t *dset_obj, hid_t dxpl_id, void **req);
+
 /*******************/
 /* Local variables */
 /*******************/
@@ -2478,6 +2481,7 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
     H5S_sel_type file_sel_type = H5S_SEL_ERROR;
     bool types_equal = false;
     dtype_info_t mem_type_info;
+    H5D_space_status_t dset_space_status = H5D_SPACE_STATUS_ERROR;
 
     // hid_t  native_dtype;
 
@@ -2566,8 +2570,15 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
 
         types_equal = bypass_types_equal(&bypass_dset->dtype_info, &mem_type_info);
 
+        if ((dset_space_status = get_dset_space_status(dset[j], plist_id, req)) < 0) {
+            fprintf(stderr, "failed to get dataset space status\n");
+            ret_value = -1;
+            goto done;
+        }
+
         read_use_native = dset_use_native || !types_equal || 
-            external_link_access || mem_sel_type == H5S_SEL_POINTS || file_sel_type == H5S_SEL_POINTS;
+            external_link_access || mem_sel_type == H5S_SEL_POINTS || file_sel_type == H5S_SEL_POINTS
+            || dset_space_status != H5D_SPACE_STATUS_ALLOCATED;
 
         if (!read_use_native) {
             /* Flush dataset and then query location in file */
@@ -2578,7 +2589,7 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
             }
 
             pthread_mutex_lock(&mutex_local);
-            
+
             if (flush_containing_file((H5VL_bypass_t *)dset[j]) < 0) {
                 fprintf(stderr, "failed to flush dataset\n");
                 ret_value = -1;
@@ -2591,6 +2602,7 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
             * no real data written - use Native VOL to handle fill value on the read. */
             if (selection_info.chunk_addr == HADDR_UNDEF && bypass_dset->layout == H5D_CONTIGUOUS)
                 read_use_native = true;
+            
         }
 
         if (read_use_native) {
@@ -2843,8 +2855,9 @@ static herr_t
 H5VL_bypass_dataset_specific(void *obj, H5VL_dataset_specific_args_t *args, hid_t dxpl_id, void **req)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
-    hid_t          under_vol_id;
-    herr_t         ret_value;
+    hid_t under_vol_id;
+    herr_t ret_value;
+    bool req_created = false;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL H5Dspecific\n");
@@ -2862,7 +2875,7 @@ H5VL_bypass_dataset_specific(void *obj, H5VL_dataset_specific_args_t *args, hid_
     }
 
     /* Check for async request */
-    if (req && *req)
+    if (req && *req) {
         *req = H5VL_bypass_new_obj(*req, under_vol_id);
         req_created = true;
     }
@@ -2898,6 +2911,7 @@ H5VL_bypass_dataset_specific(void *obj, H5VL_dataset_specific_args_t *args, hid_
 
         o->u.dataset.space_id = get_args.args.get_space.space_id;
     }
+
 done:
     if (ret_value < 0) {
         if (req_created)
@@ -5277,5 +5291,26 @@ static bool bypass_types_equal(dtype_info_t *type_info1, dtype_info_t *type_info
     if (type_info1->sign != type_info2->sign)
         ret_value = false;
 
+    return ret_value;
+}
+
+static H5D_space_status_t
+get_dset_space_status(H5VL_bypass_t *dset_obj, hid_t dxpl_id, void **req) {
+    H5D_space_status_t ret_value = H5D_SPACE_STATUS_ERROR;
+    H5VL_dataset_get_args_t get_args;
+
+    assert(dset_obj);
+    assert(dset_obj->type == H5I_DATASET);
+
+    get_args.op_type               = H5VL_DATASET_GET_SPACE_STATUS;
+    get_args.args.get_space_status.status = &ret_value;
+
+    if (H5VL_bypass_dataset_get(dset_obj, &get_args, dxpl_id, req) < 0) {
+        fprintf(stderr, "unable to get dataset's space status\n");
+        ret_value = H5D_SPACE_STATUS_ERROR;
+        goto done;
+    }
+
+done:
     return ret_value;
 }
