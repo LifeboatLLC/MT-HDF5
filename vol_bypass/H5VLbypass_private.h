@@ -120,11 +120,19 @@ typedef struct {
     int      fd;
 } info_for_thread_t;
 
+/* Struct containing information about the thread that called H5Dread() */
+typedef struct Bypass_task_author_t {
+    int num_tasks_unfinished;
+    pthread_mutex_t mutex;
+    pthread_cond_t  cond;
+} Bypass_task_author_t;
+
 typedef struct Bypass_task_t {
     int     file_index; /* Index of the file containing the dset to read from in the file_stuff array */
     haddr_t addr;       /* Location in filesystem file to read from */
     size_t  size;
     void   *vec_buf;    /* User buffer to populate */
+    Bypass_task_author_t *author;
 } Bypass_task_t;
 
 typedef struct {
@@ -136,8 +144,6 @@ typedef struct {
 
     size_t     vec_arr_nalloc;
     size_t     vec_arr_nused;
-
-    bool       *thread_is_active; /* Array of active status for each tpool thread */
 } info_for_tpool_t;
 
 static info_t *info_stuff;

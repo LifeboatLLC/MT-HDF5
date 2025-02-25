@@ -225,9 +225,6 @@ static herr_t H5VL_bypass_token_from_str(void *obj, H5I_type_t obj_type, const c
 /* Generic optional callback */
 static herr_t H5VL_bypass_optional(void *obj, H5VL_optional_args_t *args, hid_t dxpl_id, void **req);
 
-/* Check if any threads are still performing or waiting for tasks */
-herr_t is_any_thread_active(bool *out);
-
 /*******************/
 /* Local variables */
 /*******************/
@@ -529,12 +526,6 @@ H5VL_bypass_init(hid_t vipl_id)
     md_for_thread.vec_arr_nalloc = BYPASS_TASK_QUEUE_INIT_LEN;
     md_for_thread.vec_arr_nused  = 0;
 
-    /* Initialize thread active status to true */
-    md_for_thread.thread_is_active = calloc(nthreads_tpool, sizeof(bool));
-
-    for (i = 0; i < nthreads_tpool; i++)
-        md_for_thread.thread_is_active[i] = true;
-
     info_for_thread = malloc(nthreads_tpool * sizeof(info_for_thread_t));
 
     pthread_mutexattr_init(&attr);
@@ -646,8 +637,6 @@ H5VL_bypass_term(void)
         free(dset_stuff);
     if (info_for_thread)
         free(info_for_thread);
-    if (md_for_thread.thread_is_active)
-        free(md_for_thread.thread_is_active);
 
     /* Wait until all threads finish before releasing resources */
     free(md_for_thread.tasks);
@@ -1928,10 +1917,6 @@ start_thread_for_pool(void *args)
             pthread_cond_wait(&cond_local, &mutex_local);
         }
 
-        /* If a new read call has begun, flag thread as active*/
-        if (!thread_loop_finish)
-            md_for_thread.thread_is_active[thread_id] = true;
-
         // fprintf(stderr, "after wait\n");
 
         /* THREAD_TASK_COUNT can be smaller (LEFTOVER being passed into submit_task() in read_vectors()) or
@@ -1979,6 +1964,26 @@ start_thread_for_pool(void *args)
                 ret_value = (void *)-1;
             }
 
+            /* Update author under author mutex */
+            if (pthread_mutex_lock(&local_tasks[i].author->mutex) < 0) {
+                fprintf(stderr, "failed to lock author mutex\n");
+                ret_value = (void*) -1;
+                goto done;
+            }
+            
+            local_tasks[i].author->num_tasks_unfinished--;
+            
+            if (local_tasks[i].author->num_tasks_unfinished == 0) {
+                pthread_cond_signal(&local_tasks[i].author->cond);
+            }
+            
+            if (pthread_mutex_unlock(&local_tasks[i].author->mutex) < 0) {
+                fprintf(stderr, "failed to unlock author mutex\n");
+                ret_value = (void*) -1;
+                goto done;
+            }
+
+            /* Update queue under Bypass mutex */
             if (pthread_mutex_lock(&mutex_local) != 0) {
                 fprintf(stderr, "failed to lock mutex\n");
                 ret_value = (void*) -1;
@@ -2003,6 +2008,7 @@ start_thread_for_pool(void *args)
             local_tasks[i].vec_buf = NULL;
             local_tasks[i].size = 0;
             local_tasks[i].addr = 0;
+            local_tasks[i].author = NULL;
 
 
             if (pthread_mutex_unlock(&mutex_local) != 0) {
@@ -2010,29 +2016,6 @@ start_thread_for_pool(void *args)
                 ret_value = (void*) -1;
                 goto done;
             }
-        }
-
-        /* If all tasks have been taken on by other threads and this thread's work is complete,
-         * flag it as inactive */
-
-        /* TBD: Lock is not in principal necessary here because each thread has a unique index.
-         * Leave it for now to prevent problems if 
-         * writes to the array are larger than expected */
-        if (pthread_mutex_lock(&mutex_local) != 0) {
-            fprintf(stderr, "failed to lock mutex\n");
-            ret_value = (void*) -1;
-            goto done;
-        }
-
-        if (thread_loop_finish) {
-            md_for_thread.thread_is_active[thread_id] = false;
-            pthread_cond_signal(&cond_read_finished);
-        }
-
-        if (pthread_mutex_unlock(&mutex_local) != 0) {
-            fprintf(stderr, "failed to unlock mutex\n");
-            ret_value = (void*) -1;
-            goto done;
         }
 
         /* If all task in the queue are finished and all the data read are finished, notify that
@@ -2060,7 +2043,7 @@ done:
 } /* end start_thread_for_pool() */
 
 static herr_t
-process_vectors(void *rbuf, sel_info_t *selection_info)
+process_vectors(void *rbuf, sel_info_t *selection_info, Bypass_task_author_t *author)
 {
     herr_t   ret_value = 0;
     hid_t    file_iter_id, mem_iter_id;
@@ -2072,6 +2055,7 @@ process_vectors(void *rbuf, sel_info_t *selection_info)
     size_t   file_len[SEL_SEQ_LIST_LEN], mem_len[SEL_SEQ_LIST_LEN];
     size_t   io_len;
     int      local_count_for_signal = 0;
+    Bypass_task_t   task;
 
     /* Contiguous is treated as a single chunk */
     if ((hss_nelmts = H5Sget_select_npoints(selection_info->file_space_id)) < 0) {
@@ -2180,12 +2164,23 @@ process_vectors(void *rbuf, sel_info_t *selection_info)
             md_for_thread.vec_arr_nalloc *= 2;
         }
 
-        /* Add this segment to vector read list */
-        md_for_thread.tasks[md_for_thread.vec_arr_nused].file_index = selection_info->my_file_index;
-        md_for_thread.tasks[md_for_thread.vec_arr_nused].addr =
-            selection_info->chunk_addr + file_off[file_seq_i]; /* Add the base offset of the dataset to the address */
-        md_for_thread.tasks[md_for_thread.vec_arr_nused].size = io_len;
-        md_for_thread.tasks[md_for_thread.vec_arr_nused].vec_buf = (void *)((uint8_t *)rbuf + mem_off[mem_seq_i]);
+        /* Assemble the task */
+        task.file_index = selection_info->my_file_index;
+        /* Add the base offset of the dataset to the address */
+        task.addr = selection_info->chunk_addr + file_off[file_seq_i];
+        task.size = io_len;
+        task.vec_buf = (void *)((uint8_t *)rbuf + mem_off[mem_seq_i]);
+        task.author = author;
+
+        /* Note that because this task may be added to queue concurrently with
+         * another task from this author being completed, this shared count need to be modified
+         * under the author mutex */
+        pthread_mutex_lock(&author->mutex);
+        task.author->num_tasks_unfinished++;
+        pthread_mutex_unlock(&author->mutex);
+
+        /* Add this task to the queue */
+        md_for_thread.tasks[md_for_thread.vec_arr_nused] = task;
 
         md_for_thread.vec_arr_nused++;
 
@@ -2275,7 +2270,7 @@ done:
 
 static herr_t
 process_chunks(void *rbuf, void *dset, hid_t dcpl_id, hid_t mem_space, hid_t file_space,
-               sel_info_t *selection_info, void **req)
+               sel_info_t *selection_info, Bypass_task_author_t *author, void **req)
 {
     hid_t        file_space_copy, mem_selection_id;
     hsize_t      chunk_dims[DIM_RANK_MAX];
@@ -2415,7 +2410,7 @@ process_chunks(void *rbuf, void *dset, hid_t dcpl_id, hid_t mem_space, hid_t fil
             selection_info->chunk_addr    = chunk_addr;
 
             /* Retrieve the pieces of data (vectors) from the chunk and put them into the memory */
-            if (process_vectors(rbuf, selection_info) < 0) {
+            if (process_vectors(rbuf, selection_info, author) < 0) {
                 fprintf(stderr, "failed to insert vectors into queue\n");
                 ret_value = -1;
                 goto done;
@@ -2472,13 +2467,22 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
     char       dset_name[1024];
     sel_info_t selection_info;
     int        i, j;
-    bool       any_thread_active = false;
     bool       read_use_native   = false;
+    Bypass_task_author_t *author;
     // hid_t  native_dtype;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL DATASET Read\n");
 #endif
+
+    if ((author = malloc(sizeof(Bypass_task_author_t))) == NULL) {
+        fprintf(stderr, "unable to allocate author\n");
+        return -1;
+    }
+    
+    author->num_tasks_unfinished = 0;
+    pthread_mutex_init(&author->mutex, NULL);
+    pthread_cond_init(&author->cond, NULL);
 
     /* Loop through all datasets and process them individually */
     for (j = 0; j < count; j++) {
@@ -2586,7 +2590,7 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
                 // process_chunks(buf[j], dset[j], dcpl_id, mem_space_id[j], file_space_id[j],
                 // &selection_info, req);
                 process_chunks(buf[j], dset[j], dcpl_id, mem_space_id_copy, file_space_id_copy,
-                               &selection_info, req);
+                               &selection_info, author, req);
             }
             else if (H5D_CONTIGUOUS == dset_layout) {
                 selection_info.file_space_id = file_space_id_copy;
@@ -2601,7 +2605,7 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
                 selection_info.chunk_addr    = dset_loc;
 
                 /* Handles the hyperslab selection and read the data */
-                if (process_vectors(buf[j], &selection_info) < 0) {
+                if (process_vectors(buf[j], &selection_info, author) < 0) {
                     fprintf(stderr, "failed to insert vectors into queue\n");
                     ret_value = -1;
                     goto done;
@@ -2643,39 +2647,18 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
 
 
     /* Do not return until the thread pool finishes the read */
-    /* TBD: Enforcing this will become more complicated once multiple
-     * application threads making concurrent H5Dread() calls is supported. */
-    if (pthread_mutex_lock(&mutex_local) < 0) {
+    if (pthread_mutex_lock(&author->mutex) < 0) {
         printf("In %s of %s at line %d: pthread_mutex_lock failed\n", __func__, __FILE__, __LINE__);
         ret_value = -1;
         goto done;
     }
 
-    /* Only finish H5Dread() once all threads are inactive and no tasks are undone */
-    /* Only block here if Bypass VOL was used for the read */
-    while (!read_use_native) {
-        any_thread_active = false;
-
-        if (is_any_thread_active(&any_thread_active) < 0) {
-            fprintf(stderr, "Unable to query thread active status\n");
-            /* Prevent deadlock on error */
-            pthread_mutex_unlock(&mutex_local);
-            ret_value = -1;
-            goto done;
-        }
-
-        if (!any_thread_active && thread_task_count == 0)
-            break;
-
-        pthread_cond_wait(&cond_read_finished, &mutex_local);
+    /* Only finish the read call once all this thread's tasks are complete */
+    while (author->num_tasks_unfinished > 0) {
+        pthread_cond_wait(&author->cond, &author->mutex);
     }
 
-    if (ret_value < 0) {
-        fprintf(stderr, "Unable to query thread active status\n");
-        goto done;
-    }
-
-    if (pthread_mutex_unlock(&mutex_local) < 0) {
+    if (pthread_mutex_unlock(&author->mutex) < 0) {
         printf("In %s of %s at line %d: pthread_mutex_unlock failed\n", __func__, __FILE__, __LINE__);
         ret_value = -1;
         goto done;
@@ -2684,6 +2667,11 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
     assert(thread_task_count == 0);
 
 done:
+
+    pthread_mutex_destroy(&author->mutex);
+    pthread_cond_destroy(&author->cond);
+    free(author);
+
     return ret_value;
 } /* end H5VL_bypass_dataset_read() */
 
@@ -4718,30 +4706,3 @@ H5VL_bypass_optional(void *obj, H5VL_optional_args_t *args, hid_t dxpl_id, void 
 
     return ret_value;
 } /* end H5VL_bypass_optional() */
-
-/* This is a helper function to check if any thread is active. */
-herr_t
-is_any_thread_active(bool *out) {
-    herr_t ret_value = 0;
-
-    assert(out);
-
-    if (pthread_mutex_lock(&mutex_local) != 0) {
-        fprintf(stderr, "pthread_mutex_lock failed\n");
-        ret_value = -1;
-        goto done;
-    }
-
-    assert(md_for_thread.thread_is_active);
-
-    for (int i = 0; i < nthreads_tpool; i++)
-        *out = *out || md_for_thread.thread_is_active[i];
-
-done:
-    if (pthread_mutex_unlock(&mutex_local) != 0) {
-        fprintf(stderr, "pthread_mutex_unlock failed\n");
-        ret_value = -1;
-    }
-
-    return ret_value;
-}
