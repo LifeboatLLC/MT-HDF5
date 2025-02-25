@@ -2849,16 +2849,60 @@ H5VL_bypass_dataset_specific(void *obj, H5VL_dataset_specific_args_t *args, hid_
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL H5Dspecific\n");
 #endif
+    assert(o->type == H5I_DATASET);
 
     // Save copy of underlying VOL connector ID and prov helper, in case of
     // refresh destroying the current object
     under_vol_id = o->under_vol_id;
 
-    ret_value = H5VLdataset_specific(o->under_object, o->under_vol_id, args, dxpl_id, req);
+    if (H5VLdataset_specific(o->under_object, o->under_vol_id, args, dxpl_id, req) < 0) {
+        fprintf(stderr, "H5VLdataset_specific failed\n");
+        ret_value = -1;
+        goto done;
+    }
 
     /* Check for async request */
     if (req && *req)
         *req = H5VL_bypass_new_obj(*req, under_vol_id);
+        req_created = true;
+    }
+
+    /* If dataspace was changed, update the stored dataspace */
+    if (args->op_type == H5VL_DATASET_SET_EXTENT) {
+        H5VL_dataset_get_args_t get_args;        
+
+        if (H5Sclose(o->u.dataset.space_id) < 0) {
+            fprintf(stderr, "unable to close old dataspace\n");
+            ret_value = -1;
+            goto done;
+        }
+        
+        o->u.dataset.space_id = H5I_INVALID_HID;
+
+        /* Figure out the dataset's dataspace */
+        get_args.op_type                 = H5VL_DATASET_GET_SPACE;
+        get_args.args.get_space.space_id = H5I_INVALID_HID;
+
+        /* Retrieve the dataset's dataspace ID */
+        if (H5VL_bypass_dataset_get(obj, &get_args, dxpl_id, req) < 0) {
+            fprintf(stderr, "unable to get opened dataset's dataspace\n");
+            ret_value = -1;
+            goto done;
+        }
+
+        if (get_args.args.get_space.space_id == H5I_INVALID_HID) {
+            fprintf(stderr, "retrieved invalid dataspace for dataset\n");
+            ret_value = -1;
+            goto done;
+        }
+
+        o->u.dataset.space_id = get_args.args.get_space.space_id;
+    }
+done:
+    if (ret_value < 0) {
+        if (req_created)
+            H5VL_bypass_free_obj(*req);
+    }
 
     return ret_value;
 } /* end H5VL_bypass_dataset_specific() */
