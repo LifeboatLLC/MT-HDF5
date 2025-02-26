@@ -1924,7 +1924,9 @@ process_vectors(void *rbuf, sel_info_t *selection_info)
 	}
 
 	/* Save the info for the C log file */
-	{
+    pthread_mutex_lock(&mutex_local);
+
+    {
 	    /* Enlarge the size of the info for C and Re-allocate the memory if necessary */
 	    if (info_count == info_size) {
 		info_size  *= 2;
@@ -1946,6 +1948,8 @@ process_vectors(void *rbuf, sel_info_t *selection_info)
 	    /* Increment the counter */
 	    info_count++;
 	}
+
+    pthread_mutex_unlock(&mutex_local);
 
 	/* Update file sequence */
 	if (io_len == file_len[file_seq_i])
@@ -2208,6 +2212,7 @@ H5VL_bypass_dataset_read(size_t count, void *dset[],
 	    pthread_cond_broadcast(&cond_local);  /* Why do this signal/broadcast? */
 
 	    /* Save the info for the C log file */
+        pthread_mutex_lock(&mutex_local);
 	    {
 		/* Enlarge the size of the info for C and Re-allocate the memory if necessary */
 		if (info_count == info_size) {
@@ -2223,6 +2228,7 @@ H5VL_bypass_dataset_read(size_t count, void *dset[],
 		/* Increment the counter */
 		info_count++;
 	    }
+        pthread_mutex_unlock(&mutex_local);
 	}
 
         dset_found = false;
