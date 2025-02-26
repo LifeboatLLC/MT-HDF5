@@ -2052,9 +2052,15 @@ process_vectors(void *rbuf, sel_info_t *selection_info)
                 goto done;
             }
 
-            nelmts -= seq_nelem;
-            file_seq_i = 0;
+        if (file_nseq == 0) {
+            fprintf(stderr, "no file sequences retrieved from iteration\n");
+            ret_value = -1;
+            goto done;
         }
+
+	    nelmts -= seq_nelem;
+	    file_seq_i = 0;
+	}
 
         /* Fill/refill memory sequence list if necessary */
         if (mem_seq_i == SEL_SEQ_LIST_LEN) {
@@ -2066,8 +2072,14 @@ process_vectors(void *rbuf, sel_info_t *selection_info)
                 goto done;
             }
 
-            mem_seq_i = 0;
+        if (mem_nseq == 0) {
+            fprintf(stderr, "no memory sequences retrieved from iteration\n");
+            ret_value = -1;
+            goto done;
         }
+
+	   mem_seq_i = 0;
+	}
 
         /* Calculate length of this IO */
         io_len = MIN(file_len[file_seq_i], mem_len[mem_seq_i]);
