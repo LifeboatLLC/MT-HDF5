@@ -113,7 +113,7 @@ void* read_partial_dset_with_hdf5(void* arg)
 		     * reading the data during the check.  The way thread pool is set up doesn't guarantee the data reading is finished during the check.
 		     * Sleeping for a while may give the thread pool enough time to finish reading the data.
 		     */
-		    sleep(1);
+		    //sleep(1);
 
 		    nerrors = check_data(data, 0, i);
                 }
@@ -298,7 +298,7 @@ void* read_multiple_dsets_with_hdf5(void* arg)
 	     * reading the data during the check.  The way thread pool is set up doesn't guarantee the data reading is finished during the check.
 	     * Sleeping for a while may give the thread pool enough time to finish reading the data.
 	     */
-	    sleep(1);
+	    //sleep(1);
 
             if (hand.num_threads > 0)
                 nerrors = check_data(data, (k * hand.num_threads + thread_id), 0);
@@ -404,6 +404,7 @@ void* read_multiple_files_with_hdf5(void* arg)
 {
     int thread_id = ((args_t *)arg)->thread_id;
     char file_name[1024];
+    char dset_name[1024];
     int  num_files_local = 0;
     int *data, *p;
     hsize_t dimsm[2];    /* memory space dimensions */
@@ -432,16 +433,24 @@ void* read_multiple_files_with_hdf5(void* arg)
         printf("data_out is NULL\n");
 
     for (i = 0; i < num_files_local; i++) {
-        if (hand.num_threads > 0)
+	/* When a single dataset in multiple files is created, different dataset names were used
+	 * since Bypass VOL uses names to identify datasets.  The numbers in dataset names match
+         * the number in file names.
+	 */
+        if (hand.num_threads > 0) {
             sprintf(file_name, "%s%d.h5", FILE_NAME, (i * hand.num_threads + thread_id + 1));
-        else
+            sprintf(dset_name, "%s%d", DATASETNAME, (i * hand.num_threads + thread_id + 1));
+        } else {
             sprintf(file_name, "%s%d.h5", FILE_NAME, i + 1);
+	    sprintf(dset_name, "%s%d", DATASETNAME, i + 1);
+        }
 
         memset(data, 0, (hand.dset_dim1 * hand.dset_dim2 * sizeof(int)));
 
         /* Open the file and the dataset */
         file[i]    = H5Fopen(file_name, H5F_ACC_RDONLY, H5P_DEFAULT);
-        dataset[i] = H5Dopen2(file[i], DATASETNAME, H5P_DEFAULT);
+
+        dataset[i] = H5Dopen2(file[i], dset_name, H5P_DEFAULT);
 
         dataspace[i] = H5Dget_space(dataset[i]); /* dataspace handle */
 
@@ -471,7 +480,7 @@ void* read_multiple_files_with_hdf5(void* arg)
 	     * reading the data during the check.  The way thread pool is set up doesn't guarantee the data reading is finished during the check.
 	     * Sleeping for a while may give the thread pool enough time to finish reading the data.
 	     */
-	    sleep(1);
+	    //sleep(1);
 
             if (hand.num_threads > 0)
                 nerrors = check_data(data, (i * hand.num_threads + thread_id), 0);
@@ -509,6 +518,7 @@ void* read_multiple_files_with_hdf5_multi(void* arg)
 {
     int thread_id = ((args_t *)arg)->thread_id;
     char file_name[1024];
+    char dset_name[1024];
     int  num_files_local = 0;
     void *data, *p;
     void **rbufs;
@@ -546,14 +556,23 @@ void* read_multiple_files_with_hdf5_multi(void* arg)
     mem_dtype_ids  = (hid_t *)malloc(num_files_local * sizeof(hid_t));
 
     for (i = 0; i < num_files_local; i++) {
-        if (hand.num_threads > 0)
+	/* When a single dataset in multiple files is created, different dataset names were used
+	 * since Bypass VOL uses names to identify datasets.  The numbers in dataset names match
+         * the number in file names.
+	 */
+        if (hand.num_threads > 0) {
             sprintf(file_name, "%s%d.h5", FILE_NAME, (i * hand.num_threads + thread_id + 1));
-        else
+            sprintf(dset_name, "%s%d", DATASETNAME, (i * hand.num_threads + thread_id + 1));
+        } else {
             sprintf(file_name, "%s%d.h5", FILE_NAME, i + 1);
+	    sprintf(dset_name, "%s%d", DATASETNAME, i + 1);
+        }
 
         /* Open the file and the dataset */
         file[i]    = H5Fopen(file_name, H5F_ACC_RDONLY, H5P_DEFAULT);
-        dataset[i] = H5Dopen2(file[i], DATASETNAME, H5P_DEFAULT);
+
+        dataset[i] = H5Dopen2(file[i], dset_name, H5P_DEFAULT);
+
         mem_dtype_ids[i] = H5T_NATIVE_INT;
 
         dataspace[i] = H5Dget_space(dataset[i]); /* dataspace handle */
@@ -582,7 +601,7 @@ void* read_multiple_files_with_hdf5_multi(void* arg)
      * Sleeping for a while may give the thread pool enough time to finish reading the data.
      */
     if (hand.check_data && !hand.random_data)
-	sleep(1);
+	//sleep(1);
 
     for (i = 0; i < num_files_local; i++) {
 	if (hand.check_data && !hand.random_data)

@@ -100,9 +100,15 @@ int create_files()
 
         /* Create and writes data to dataset(s) */
         for (n = 0; n < hand.num_dsets; n++) {
-            if (hand.num_dsets == 1)
-                sprintf(dset_name, "%s", DATASETNAME);
-            else
+            if (hand.num_dsets == 1) {
+                if (hand.num_files == 1)
+                    sprintf(dset_name, "%s", DATASETNAME);
+                else
+                    /* When creating single dataset in multiple files, assign different dataset names
+                     * since Bypass VOL uses names to identify datasets.
+                     */
+                    sprintf(dset_name, "%s%d", DATASETNAME, k + 1);
+            } else
                 sprintf(dset_name, "%s%d", DATASETNAME, n + 1);
 
             /* Create a new dataset */
