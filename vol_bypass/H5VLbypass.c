@@ -1896,7 +1896,7 @@ start_thread_for_pool(void *args)
         }
 
         // fprintf(stderr, "thread %d: before wait\n", thread_id);
-        while (queue_task_count == 0 && !thread_task_finished) {
+        while (queue_task_count == 0 && !thread_task_finished)
             pthread_cond_wait(&cond_local, &mutex_local);
 
         // fprintf(stderr, "after wait\n");
@@ -2179,6 +2179,8 @@ process_vectors(void *rbuf, sel_info_t *selection_info, Bypass_task_author_t *au
         }
 
         /* Save the info for the C log file */
+        pthread_mutex_lock(&mutex_local);
+
         {
             /* Enlarge the size of the info for C and Re-allocate the memory if necessary */
             if (info_count == info_size) {
@@ -2189,7 +2191,6 @@ process_vectors(void *rbuf, sel_info_t *selection_info, Bypass_task_author_t *au
                     goto done;
                 }
             }
-
             /* Save the info in the structure */
             strcpy(info_stuff[info_count].file_name, selection_info->file_name);
             strcpy(info_stuff[info_count].dset_name, selection_info->dset_name);
@@ -2207,6 +2208,8 @@ process_vectors(void *rbuf, sel_info_t *selection_info, Bypass_task_author_t *au
             /* Increment the counter */
             info_count++;
         }
+
+        pthread_mutex_unlock(&mutex_local);
 
         /* Update file sequence */
         if (io_len == file_len[file_seq_i])
@@ -2605,6 +2608,8 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
             pthread_cond_broadcast(&cond_local); /* Why do this signal/broadcast? */
 
             /* Save the info for the C log file */
+            pthread_mutex_lock(&mutex_local);
+
             {
                 /* Enlarge the size of the info for C and Re-allocate the memory if necessary */
                 if (info_count == info_size) {
@@ -2621,7 +2626,8 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
                 /* Increment the counter */
                 info_count++;
             }
-        }
+            pthread_mutex_unlock(&mutex_local);
+	    }
 
         dset_found = false;
     }
