@@ -2001,10 +2001,12 @@ start_thread_for_pool(void *args)
 
             file_stuff[file_indices_local[i]].num_reads--;
 
-            /* When there is no task left in the queue and all the reads finish for
-             * the current file, signal the main process that this file can be closed.
-             */
-            if (thread_loop_finish && (file_stuff[file_indices_local[i]].num_reads == 0)) {
+            /* If the active read count for this file has dropped to zero, close it.
+             * TBD - Certain access patterns may lead to the same file being opened/closed many times.
+             * However, it was necessary to remove the thread_loop_finish check here
+             * in order to prevent a scenario where a busy queue prevents the file from
+             * being released entirely. */
+            if (file_stuff[local_tasks[i].file_index].num_reads == 0) {
                 // fprintf(stderr, "thread %d: file name = %s, signal close_ready\n", thread_id,
                 // file_stuff[file_indices_local[i]].name);
                 /* There are currently no reads active on this file - it may be closed */
