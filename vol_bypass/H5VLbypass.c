@@ -235,7 +235,7 @@ static const H5VL_class_t H5VL_bypass_g = {
     (H5VL_class_value_t)H5VL_BYPASS_VALUE, /* value        */
     H5VL_BYPASS_NAME,                      /* name         */
     H5VL_BYPASS_VERSION,                   /* connector version */
-    0,                                     /* capability flags */
+    H5VL_CAP_FLAG_THREADSAFE,              /* capability flags */
     H5VL_bypass_init,                      /* initialize   */
     H5VL_bypass_term,                      /* terminate    */
     {
