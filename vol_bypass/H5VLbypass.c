@@ -1896,21 +1896,22 @@ start_thread_for_pool(void *args)
         }
 
         // fprintf(stderr, "thread %d: before wait\n", thread_id);
-        while (thread_task_count == 0 && !thread_task_finished)
+        while (queue_task_count == 0 && !thread_task_finished) {
             pthread_cond_wait(&cond_local, &mutex_local);
 
         // fprintf(stderr, "after wait\n");
 
-        /* THREAD_TASK_COUNT can be smaller (LEFTOVER being passed into submit_task() in read_vectors()) or
+        /* QUEUE_TASK_COUNT can be smaller (LEFTOVER being passed into submit_task() in read_vectors()) or
          * larger (submit_task() keeps adding more before they are processed) than nsteps_tpool.
          * Choose the smaller value */
-        local_count = MIN(thread_task_count, nsteps_tpool);
+        local_count = MIN(queue_task_count, nsteps_tpool);
 
         for (i = 0; i < local_count; i++) {
             local_tasks[i] = md_for_thread.tasks[info_pointer];
 
             info_pointer++;
-            thread_task_count--;
+
+            queue_task_count--;
 
             task_file_index = local_tasks[i].file_index;
             file_stuff[task_file_index].num_reads++;
@@ -1923,7 +1924,7 @@ start_thread_for_pool(void *args)
 
         /* Turn on the flag thread_loop_finish if H5Dread finished putting all tasks in the queue
          * (thread_task_finished is on) and the thread pool processed all the task in the queue */
-        if (thread_task_finished && thread_task_count == 0)
+        if (thread_task_finished && queue_task_count == 0)
             thread_loop_finish = true;
 
         if (pthread_mutex_unlock(&mutex_local) != 0) {
@@ -2161,7 +2162,7 @@ process_vectors(void *rbuf, sel_info_t *selection_info, Bypass_task_author_t *au
         md_for_thread.vec_arr_nused++;
 
         /* Increment the task in the queue of the thread pool */
-        thread_task_count++;
+        queue_task_count++;
 
         local_count_for_signal++;
 
@@ -2647,10 +2648,9 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
         goto done;
     }
 
-    assert(thread_task_count == 0);
+    assert(author->num_tasks_unfinished == 0);
 
 done:
-
     pthread_mutex_destroy(&author->mutex);
     pthread_cond_destroy(&author->cond);
     free(author);

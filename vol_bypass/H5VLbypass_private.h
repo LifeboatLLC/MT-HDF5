@@ -49,7 +49,7 @@ pthread_cond_t  continue_local;
 int  nthreads_tpool       = NUM_LOCAL_THREADS;
 int  nsteps_tpool         = THREAD_STEP;
 int  info_pointer         = 0;
-int  thread_task_count    = 0;
+int  queue_task_count    = 0;
 bool thread_task_finished = false;                   /* Flag for H5Dread to notify the thread pool that it finished putting tasks in the queue */
 bool thread_loop_finish   = false;
 bool stop_tpool           = false;                   /* Flag to tell the thread pool to terminate, turned on in H5VL_bypass_term */
