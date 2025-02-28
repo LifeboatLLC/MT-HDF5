@@ -1717,76 +1717,9 @@ done:
     return ret_value;
 } /* get_num_chunks_helper */
 
-static herr_t
-get_chunk_info_helper(H5VL_bypass_t *dset, hid_t fspace_id, hsize_t chk_index, hsize_t *offset /*out*/,
-                      unsigned *filter_mask /*out*/, haddr_t *addr /*out*/, hsize_t *size /*out*/, void **req)
-{
-    H5VL_optional_args_t                vol_cb_args;   /* Arguments to VOL callback */
-    H5VL_native_dataset_optional_args_t dset_opt_args; /* Arguments for optional operation */
-    hsize_t                             nchunks   = 0; /* Number of chunks */
-    herr_t                              ret_value = 0;
-
-    /* Check arguments */
-    if (NULL == dset) {
-        printf("In %s of %s at line %d: dset parameter can't be a null pointer\n", __func__, __FILE__,
-               __LINE__);
-        ret_value = -1;
-        goto done;
-    }
-
-    if (NULL == offset && NULL == filter_mask && NULL == addr && NULL == size) {
-        printf("In %s of %s at line %d: invalid arguments, must have at least one "
-               "non-null output argument\n",
-               __func__, __FILE__, __LINE__);
-        ret_value = -1;
-        goto done;
-    }
-
-    /* Set up VOL callback arguments */
-    dset_opt_args.get_num_chunks.space_id = fspace_id;
-    dset_opt_args.get_num_chunks.nchunks  = &nchunks;
-    vol_cb_args.op_type                   = H5VL_NATIVE_DATASET_GET_NUM_CHUNKS;
-    vol_cb_args.args                      = &dset_opt_args;
-
-    /* Get the number of written chunks to check range */
-    if (H5VL_bypass_dataset_optional(dset, &vol_cb_args, H5P_DEFAULT, req) < 0) {
-        printf("In %s of %s at line %d: H5VL_bypass_dataset_optional failed\n", __func__, __FILE__, __LINE__);
-        ret_value = -1;
-        goto done;
-    }
-
-    /* Check range for chunk index */
-    if (chk_index >= nchunks) {
-        printf("In %s of %s at line %d: chunk index is out of range\n", __func__, __FILE__, __LINE__);
-        ret_value = -1;
-        goto done;
-    }
-
-    /* Set up VOL callback arguments */
-    dset_opt_args.get_chunk_info_by_idx.space_id    = fspace_id;
-    dset_opt_args.get_chunk_info_by_idx.chk_index   = chk_index;
-    dset_opt_args.get_chunk_info_by_idx.offset      = offset;
-    dset_opt_args.get_chunk_info_by_idx.filter_mask = filter_mask;
-    dset_opt_args.get_chunk_info_by_idx.addr        = addr;
-    dset_opt_args.get_chunk_info_by_idx.size        = size;
-    vol_cb_args.op_type                             = H5VL_NATIVE_DATASET_GET_CHUNK_INFO_BY_IDX;
-    vol_cb_args.args                                = &dset_opt_args;
-
-    /* Call private function to get the chunk info given the chunk's index */
-    if (H5VL_bypass_dataset_optional(dset, &vol_cb_args, H5P_DEFAULT, req) < 0) {
-        printf("In %s of %s at line %d: H5VL_bypass_dataset_optional failed\n", __func__, __FILE__, __LINE__);
-        ret_value = -1;
-        goto done;
-    }
-
-done:
-    return ret_value;
-} /* get_chunk_info_helper */
-
-/* Figure out the data spaces in file and memory and make sure the selection is
- * valid. Below is the table borrowed from the reference manual entry for
- * H5Dread:
- *
+/* Figure out the data spaces in file and memory and make sure the selection is valid.
+ * Below is the table borrowed from the reference manual entry for H5Dread:
+ * 
  * mem_space_id	file_space_id	Behavior
  *
  * valid ID	valid ID	mem_space_id specifies the memory dataspace and the
@@ -2800,10 +2733,9 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
                 if (!strcmp(file_stuff[i].name, file_name)) {
                     selection_info.my_file_index = i; /* Save this index in the list of FILE_T structures for
                                                          quick lookup later */
-
                     break;
                 }
-        }
+            }
 
             if (selection_info.my_file_index == -1) {
                 printf("In %s of %s at line %d: can't find the file with the name %s\n", __func__, __FILE__,
@@ -2831,7 +2763,14 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
             } else if (H5D_CONTIGUOUS == dset_layout) {
                 selection_info.file_space_id = file_space_id_copy;
                 selection_info.mem_space_id = mem_space_id_copy;
-                selection_info.chunk_addr = dset_loc;
+
+                if (dset_loc == HADDR_UNDEF) {
+                    fprintf(stderr, "dataset does not have a valid read location\n");
+                    ret_value = -1;
+                    goto done;
+                }
+
+                selection_info.chunk_addr    = dset_loc;
 
                 /* Handles the hyperslab selection and read the data */
                 if (process_vectors(buf[j], &selection_info) < 0) {
