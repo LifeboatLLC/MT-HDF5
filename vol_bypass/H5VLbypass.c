@@ -2594,13 +2594,6 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
                 }
             }
 
-            /* Signal the thread pool to finish this read. Notify the thread pool that it finished putting
-             * tasks in the queue. */
-            pthread_mutex_lock(&mutex_local);
-            thread_task_finished = true;
-            pthread_mutex_unlock(&mutex_local);
-            pthread_cond_broadcast(&cond_local); /* Why do this signal/broadcast? */
-
             /* Save the info for the C log file */
             {
                 /* Enlarge the size of the info for C and Re-allocate the memory if necessary */
@@ -2622,6 +2615,13 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
 
         dset_found = false;
     }
+
+    /* Notify the thread pool that all tasks from this call have
+     * been added to the queue*/
+    pthread_mutex_lock(&mutex_local);
+    thread_task_finished = true;
+    pthread_mutex_unlock(&mutex_local);
+    pthread_cond_broadcast(&cond_local);
 
     /* Check for async request */
     if (req && *req)
