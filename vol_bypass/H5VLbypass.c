@@ -2385,16 +2385,15 @@ static herr_t
 process_chunks(void *rbuf, void *dset, hid_t dcpl_id, hid_t mem_space, hid_t file_space,
                sel_info_t *selection_info, void **req)
 {
-    hid_t        file_space_copy, mem_selection_id;
+    hid_t        file_space_copy = H5I_INVALID_HID, mem_selection_id = H5I_INVALID_HID;
     hsize_t      chunk_dims[DIM_RANK_MAX];
     int          dset_dim_rank = 0;
     hsize_t      num_chunks    = 0;
-    haddr_t      chunk_addr;
+    haddr_t      chunk_addr = HADDR_UNDEF;
     unsigned     filter_mask;
     hsize_t      chunk_offset[DIM_RANK_MAX], chunk_size;
-    hssize_t     selection_offset[DIM_RANK_MAX];
     hssize_t     select_npoints = 0;
-    H5S_sel_type select_type;
+    H5S_sel_type select_type = H5S_SEL_ERROR;
     hsize_t      dims_retrieved[DIM_RANK_MAX];
     hsize_t      offsets[DIM_RANK_MAX];
     int          i, j;
@@ -2488,17 +2487,13 @@ process_chunks(void *rbuf, void *dset, hid_t dcpl_id, hid_t mem_space, hid_t fil
                 goto done;
             }
 
-            for (j = 0; j < dset_dim_rank; j++)
-                selection_offset[j] = chunk_offset[j];
-
-            /* Move the file space selection in this chunk to upper-left corner and
-             * adjust (shrink) its extent to the size of the chunk. In other words,
-             * the 'file_space_copy' that contains the data selection in file which
-             * falls into the current chunk is adjusted from the size of the dataset
-             * to the size of chunk which still contains the same data selection.
-             * 'chunk_addr' is the original point for 'file_space_copy'.
+            /* Move the file space selection in this chunk to upper-left corner and adjust (shrink) its extent
+             * to the size of the chunk. In other words, the 'file_space_copy' that contains the data
+             * selection in file which falls into the current chunk is adjusted from the size of the dataset
+             * to the size of chunk which still contains the same data selection. 'chunk_addr' is the original
+             * point for 'file_space_copy'.
              */
-            if (H5Sselect_adjust(file_space_copy, selection_offset) < 0) {
+            if (H5Sselect_adjust(file_space_copy, chunk_offset) < 0) {
                 printf("In %s of %s at line %d: H5Sselect_adjust failed\n", __func__, __FILE__, __LINE__);
                 ret_value = -1;
                 goto done;
