@@ -2170,15 +2170,20 @@ H5VL_bypass_dataset_read(size_t count, void *dset[],
 	    //get_filename_helper((H5VL_bypass_t *)(dset[j]), file_name, H5I_DATASET, req);
 //fprintf(stderr, "%s at %d: file_name = %s\n", __func__, __LINE__, file_name);
 
+            selection_info.my_file_index = -1;
+
 	    /* Find the correct data file */
 	    for (i = 0; i < file_stuff_count; i++) {
-		if (!strcmp(file_stuff[i].name, file_name))
+		if (!strcmp(file_stuff[i].name, file_name)) {
 		    selection_info.my_file_index = i;             /* Save this index in the list of FILE_T structures for quick lookup later */
-                else {
-                    printf("In %s of %s at line %d: can't find the file with the name %s\n", __func__, __FILE__, __LINE__, file_name);
-                    ret_value = -1;
-                    goto done;
+                    break;
                 }
+            }
+
+            if (selection_info.my_file_index == -1) {
+	        printf("In %s of %s at line %d: can't find the file with the name %s\n", __func__, __FILE__, __LINE__, file_name);
+	        ret_value = -1;
+	        goto done;
             }
 
 	    /* Initialize data selection info */
