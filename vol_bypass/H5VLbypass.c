@@ -56,6 +56,12 @@ extern int errno;
 /* (Uncomment to enable) */
 /* #define ENABLE_BYPASS_LOGGING */
 
+/* DIM_RANK_MAX zeros */
+#define ZERO_OFFSETS   (hsize_t[]) {0, 0, 0, 0, 0, 0, 0, 0,\
+                                    0, 0, 0, 0, 0, 0, 0, 0,\
+                                    0, 0, 0, 0, 0, 0, 0, 0,\
+                                    0, 0, 0, 0, 0, 0, 0, 0}
+
 /************/
 /* Typedefs */
 /************/
@@ -93,6 +99,19 @@ typedef struct H5VL_bypass_wrap_ctx_t {
     hid_t under_vol_id;   /* VOL ID for under VOL */
     void *under_wrap_ctx; /* Object wrapping context for under VOL */
 } H5VL_bypass_wrap_ctx_t;
+
+/* Struct to store info for chunk iteration.*/
+typedef struct chunk_cb_info_t {
+    hid_t file_space;
+    hid_t mem_space;
+    hid_t file_space_copy;
+    int dset_dim_rank;
+    H5S_sel_type select_type;
+    hsize_t dset_dims[DIM_RANK_MAX];
+    hsize_t chunk_dims[DIM_RANK_MAX]; // TBD: Assumes chunk dims are treated as constant even for edge chunks
+    sel_info_t *selection_info;
+    void *rbuf;
+} chunk_cb_info_t;
 
 /********************* */
 /* Function prototypes */
@@ -2381,161 +2400,188 @@ done:
     return ret_value;
 } /* end process_vectors() */
 
-static herr_t
-process_chunks(void *rbuf, void *dset, hid_t dcpl_id, hid_t mem_space, hid_t file_space,
-               sel_info_t *selection_info, void **req)
-{
-    hid_t        file_space_copy = H5I_INVALID_HID, mem_selection_id = H5I_INVALID_HID;
-    hsize_t      chunk_dims[DIM_RANK_MAX];
-    int          dset_dim_rank = 0;
-    hsize_t      num_chunks    = 0;
-    haddr_t      chunk_addr = HADDR_UNDEF;
-    unsigned     filter_mask;
-    hsize_t      chunk_offset[DIM_RANK_MAX], chunk_size;
-    hssize_t     select_npoints = 0;
-    H5S_sel_type select_type = H5S_SEL_ERROR;
-    hsize_t      dims_retrieved[DIM_RANK_MAX];
-    hsize_t      offsets[DIM_RANK_MAX];
-    int          i, j;
-    herr_t       ret_value = 0;
+static int
+process_chunk_cb(const hsize_t *chunk_offsets, unsigned filter_mask,
+    haddr_t chunk_addr, hsize_t chunk_size, void *op_data) {
 
-    memset(offsets, 0, sizeof(hsize_t) * DIM_RANK_MAX);
+    /* Set to H5_ITER_STOP in case of error here - see note in lib documentation on H5D_chunk_iter_op_t */
+    herr_t ret_value = H5_ITER_CONT;
+    chunk_cb_info_t *cb_info = (chunk_cb_info_t *)op_data;
 
-    /* Maybe use the dataset's dataspace return from H5Dget_space */
-    if ((dset_dim_rank = H5Sget_simple_extent_ndims(file_space)) < 0) {
+    int select_npoints = 0;
+    hid_t mem_selection_id = H5I_INVALID_HID;
+
+    assert(cb_info);
+
+    /* Reset the file space copy to initial selection/extent */
+    // TBD - Only if hyperslab already?
+    if (H5Sselect_copy(cb_info->file_space_copy, cb_info->file_space) < 0) {
+        fprintf(stderr, "unable to copy file space\n");
+        ret_value = H5_ITER_STOP;
+        goto done;
+    }
+
+    /* To calculate the intersection area in the next step, there must be a hyperslab selection to start
+        * with. If there is no hyperslab selection in the file dataspace, select the whole dataspace. */
+    if (H5S_SEL_HYPERSLABS != cb_info->select_type) {
+        if (H5Sselect_hyperslab(cb_info->file_space_copy, H5S_SELECT_SET,
+            ZERO_OFFSETS, NULL, cb_info->dset_dims, NULL) < 0) {
+
+            printf("In %s of %s at line %d: H5Sselect_hyperslab failed\n", __func__, __FILE__, __LINE__);
+            ret_value = H5_ITER_STOP;
+            goto done;
+        }
+    }
+
+    if (H5Sset_extent_simple(cb_info->file_space_copy, cb_info->dset_dim_rank, cb_info->dset_dims, NULL) < 0) {
+        fprintf(stderr, "unable to set the extent of the file space\n");
+        ret_value = H5_ITER_STOP;
+        goto done;
+    }
+
+    /* Get the intersection between file space selection and this chunk. In other words,
+     * get the file space selection falling into this chunk. */
+    if (H5Sselect_hyperslab(cb_info->file_space_copy, H5S_SELECT_AND, chunk_offsets, NULL, cb_info->chunk_dims, NULL) < 0) {
+        printf("In %s of %s at line %d: H5Sselect_hyperslab failed\n", __func__, __FILE__, __LINE__);
+        ret_value = H5_ITER_STOP;
+        goto done;
+    }
+
+    if ((select_npoints = H5Sget_select_npoints(cb_info->file_space_copy)) < 0) {
+        fprintf(stderr, "unable to get the number of points in file selection\n");
+        ret_value = H5_ITER_STOP;
+        goto done;
+    }
+
+    /* No selection overlap; move on to the next chunk */
+    if (select_npoints == 0)
+        goto done;
+
+    /* Key function: get the data selection in memory which matches the file space selection falling
+        * into this chunk */
+    if ((mem_selection_id = H5Sselect_project_intersection(cb_info->file_space,
+        cb_info->mem_space, cb_info->file_space_copy)) < 0) {
+        fprintf(stderr, "unable to get projected dataspace intersection\n");
+        ret_value = H5_ITER_STOP;
+        goto done;
+    }
+
+    /* Move the file space selection in this chunk to upper-left corner and adjust (shrink) its extent
+     * to the size of the chunk. In other words, the 'file_space_copy' that contains the data
+     * selection in file which falls into the current chunk is adjusted from the size of the dataset
+     * to the size of chunk which still contains the same data selection. 'chunk_addr' is the original
+     * point for 'file_space_copy'.
+     */
+    if (H5Sselect_adjust(cb_info->file_space_copy, chunk_offsets) < 0) {
+        printf("In %s of %s at line %d: H5Sselect_adjust failed\n", __func__, __FILE__, __LINE__);
+        ret_value = H5_ITER_STOP;
+        goto done;
+    }
+
+    if (H5Sset_extent_simple(cb_info->file_space_copy, cb_info->dset_dim_rank,
+        cb_info->chunk_dims, cb_info->chunk_dims) < 0) {
+        fprintf(stderr, "unable to set dataspace extent\n");
+        ret_value = H5_ITER_STOP;
+        goto done;
+    }
+
+    /* Save the information for this chunk */
+    cb_info->selection_info->mem_space_id  = mem_selection_id;
+    cb_info->selection_info->file_space_id = cb_info->file_space_copy;
+    cb_info->selection_info->chunk_addr    = chunk_addr;
+
+    /* Retrieve the pieces of data (vectors) from the chunk and put them into the memory */
+    process_vectors(cb_info->rbuf, cb_info->selection_info);
+
+done:
+    /* Close the space ID for the memory selection */
+    if (ret_value == H5_ITER_CONT) {
+        if (mem_selection_id > 0 && H5Sclose(mem_selection_id) < 0) {
+            fprintf(stderr, "unable to close memory selection\n");
+            ret_value = H5_ITER_STOP;
+        }
+    } else {
+        H5E_BEGIN_TRY {
+            H5Sclose(mem_selection_id);
+        } H5E_END_TRY;
+    }
+
+    return ret_value;
+}
+
+static herr_t process_chunks(void *rbuf, void *dset, hid_t dcpl_id, hid_t dxpl_id, hid_t mem_space, hid_t file_space,
+               sel_info_t *selection_info, void **req) {
+    herr_t ret_value = 0;
+    H5VL_bypass_t *dset_obj = (H5VL_bypass_t *)dset;
+    H5VL_native_dataset_optional_args_t dset_opt_args;
+    H5VL_optional_args_t opt_args;
+    chunk_cb_info_t chunk_cb_info;
+
+    assert(dset_obj);
+    assert(dset_obj->under_object);
+
+    if ((chunk_cb_info.dset_dim_rank = H5Sget_simple_extent_ndims(file_space)) < 0) {
         fprintf(stderr, "unable to get the file space rank of chunked dataset\n");
         ret_value = -1;
         goto done;
     }
 
-    if (H5Pget_chunk(dcpl_id, dset_dim_rank, chunk_dims) < 0) {
-        fprintf(stderr, "unable to get the chunk dimensions of chunked dataset\n");
+    /* Get selection type */
+    if ((chunk_cb_info.select_type = H5Sget_select_type(file_space)) < 0) {
+        fprintf(stderr, "unable to get the selection type of file space\n");
         ret_value = -1;
         goto done;
     }
 
-    if (H5Sget_simple_extent_dims(file_space, dims_retrieved, NULL) < 0) {
-        fprintf(stderr, "unable to get dimensions of chunked dataset\n");
+    /* Retrieve dataset dimensions */
+    if (H5Sget_simple_extent_dims(file_space, chunk_cb_info.dset_dims, NULL) < 0) {
+        fprintf(stderr, "failed to get dataset dimensions\n");
         ret_value = -1;
         goto done;
     }
 
-    if (get_num_chunks_helper(dset, file_space, &num_chunks, req) < 0) {
-        fprintf(stderr, "unable to get the number of chunks\n");
+    /* Retrieve chunk dimensions from DCPL */
+    if (H5Pget_chunk(dcpl_id, chunk_cb_info.dset_dim_rank, chunk_cb_info.chunk_dims) < 0) {
+        fprintf(stderr, "failed to get chunk dimensions from DCPL\n");
+        ret_value = -1;
+        goto done;
+    }
+    
+    /* Create a temporary dataspace that will have its select/extent modified during each
+     * chunk callback */
+    if ((chunk_cb_info.file_space_copy = H5Scopy(file_space)) < 0) {
+        fprintf(stderr, "failed to copy file space\n");
         ret_value = -1;
         goto done;
     }
 
-    /* Iterate through all chunks and get the data selection falling into each
-     * chunk and the matching selection in memory */
-    for (i = 0; i < num_chunks; i++) {
-        if (get_chunk_info_helper(dset, file_space, i, chunk_offset, &filter_mask, &chunk_addr, &chunk_size, req) < 0) {
-            fprintf(stderr, "unable to get chunk info for chunk #%d\n", i);
-            ret_value = -1;
-            goto done;
-        }
+    chunk_cb_info.file_space = file_space;
+    chunk_cb_info.mem_space = mem_space;
+    chunk_cb_info.selection_info = selection_info;
+    chunk_cb_info.rbuf = rbuf;
 
-        if ((file_space_copy = H5Scopy(file_space)) < 0) {
-            fprintf(stderr, "unable to copy filespace\n");
-            ret_value = -1;
-            goto done;
-        }
+    dset_opt_args.chunk_iter.op = process_chunk_cb;
+    dset_opt_args.chunk_iter.op_data = (void*)&chunk_cb_info;
 
-        if ((select_type = H5Sget_select_type(file_space_copy)) < 0) {
-            fprintf(stderr, "unable to get the selection type of file space\n");
-            ret_value = -1;
-            goto done;
-        }
+    opt_args.args = (void*) &dset_opt_args;
+    opt_args.op_type = H5VL_NATIVE_DATASET_CHUNK_ITER;
 
-        /* To calculate the intersection area in the next step, there must be a
-         * hyperslab selection to start with. If there is no hyperslab selection in
-         * the file dataspace, select the whole dataspace. */
-        if (H5S_SEL_HYPERSLABS != select_type &&
-            H5Sselect_hyperslab(file_space_copy, H5S_SELECT_SET, offsets, NULL, dims_retrieved, NULL) < 0) {
-            printf("In %s of %s at line %d: H5Sselect_hyperslab failed\n", __func__, __FILE__, __LINE__);
-            ret_value = -1;
-            goto done;
-        }
-
-        /* Get the intersection between file space selection and this chunk. In
-         * other words, get the file space selection falling into this chunk. */
-        if (H5Sselect_hyperslab(file_space_copy, H5S_SELECT_AND, chunk_offset, NULL, chunk_dims, NULL) < 0) {
-            printf("In %s of %s at line %d: H5Sselect_hyperslab failed\n", __func__, __FILE__, __LINE__);
-            ret_value = -1;
-            goto done;
-        }
-
-        if ((select_npoints = H5Sget_select_npoints(file_space_copy)) < 0) {
-            fprintf(stderr, "unable to get the number of points in file selection\n");
-            ret_value = -1;
-            goto done;
-        }
-
-        /* printf("\t\t2. chunk_offset={%llu, %llu}, chunk_dims={%llu, %llu},
-           chunk_addr = %llu, chunk_size = %llu, select_npoints = %llu\n",
-           chunk_offset[0], chunk_offset[1], chunk_dims[0], chunk_dims[1],
-           chunk_addr, chunk_size, select_npoints); */
-
-        /* If the any selection falls into this chunk, save the selection
-         * information */
-        if (select_npoints > 0) {
-            /* Key function: get the data selection in memory which matches the file space selection falling
-             * into this chunk */
-            if ((mem_selection_id = H5Sselect_project_intersection(file_space, mem_space, file_space_copy)) < 0) {
-                fprintf(stderr, "unable to get projected dataspace intersection\n");
-                ret_value = -1;
-                goto done;
-            }
-
-            /* Move the file space selection in this chunk to upper-left corner and adjust (shrink) its extent
-             * to the size of the chunk. In other words, the 'file_space_copy' that contains the data
-             * selection in file which falls into the current chunk is adjusted from the size of the dataset
-             * to the size of chunk which still contains the same data selection. 'chunk_addr' is the original
-             * point for 'file_space_copy'.
-             */
-            if (H5Sselect_adjust(file_space_copy, chunk_offset) < 0) {
-                printf("In %s of %s at line %d: H5Sselect_adjust failed\n", __func__, __FILE__, __LINE__);
-                ret_value = -1;
-                goto done;
-            }
-
-            if (H5Sset_extent_simple(file_space_copy, dset_dim_rank, chunk_dims, chunk_dims) < 0) {
-                fprintf(stderr, "unable to set dataspace extent\n");
-                ret_value = -1;
-                goto done;
-            }
-
-            /* Save the information for this chunk */
-            selection_info->mem_space_id  = mem_selection_id;
-            selection_info->file_space_id = file_space_copy;
-            selection_info->chunk_addr    = chunk_addr;
-
-            /* Retrieve the pieces of data (vectors) from the chunk and put them into the memory */
-            if (process_vectors(rbuf, selection_info) < 0) {
-                fprintf(stderr, "failed to insert vectors into queue\n");
-                ret_value = -1;
-                goto done;
-            }
-
-            /* Close the space ID for the memory selection */
-            if (H5Sclose(mem_selection_id) < 0) {
-                fprintf(stderr, "unable to close memory selection\n");
-                ret_value = -1;
-                goto done;
-            }
-        }
-
-        /* Close the space ID for the file */
-        if (H5Sclose(file_space_copy) < 0) {
-            fprintf(stderr, "unable to close file selection");
-            ret_value = -1;
-            goto done;
-        }
+    if (H5VLdataset_optional(dset_obj->under_object, dset_obj->under_vol_id, &opt_args, dxpl_id, req) < 0) {
+        fprintf(stderr, "failed to iterate over chunks for processing\n");
+        ret_value = -1;
+        goto done;
     }
 
 done:
+    if (H5Sclose(chunk_cb_info.file_space_copy) < 0) {
+        fprintf(stderr, "failed to close file space copy\n");
+        ret_value = -1;
+        goto done;
+    }
+
     return ret_value;
-} /* end process_chunks() */
+}
+
 
 /*-------------------------------------------------------------------------
  * Function:    H5VL_bypass_dataset_read
@@ -2742,6 +2788,30 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
             thread_loop_finish   = false;
             pthread_mutex_unlock(&mutex_local);
 
+            /* Find out the file name */
+            // get_filename_helper((H5VL_bypass_t *)(dset[j]), file_name, H5I_DATASET,
+            // req); fprintf(stderr, "%s at %d: file_name = %s\n", __func__, __LINE__,
+            // file_name);
+
+            selection_info.my_file_index = -1;
+
+            /* Find the correct data file */
+            for (i = 0; i < file_stuff_count; i++) {
+                if (!strcmp(file_stuff[i].name, file_name)) {
+                    selection_info.my_file_index = i; /* Save this index in the list of FILE_T structures for
+                                                         quick lookup later */
+
+                    break;
+                }
+        }
+
+            if (selection_info.my_file_index == -1) {
+                printf("In %s of %s at line %d: can't find the file with the name %s\n", __func__, __FILE__,
+                       __LINE__, file_name);
+                ret_value = -1;
+                goto done;
+            }
+
             /* Initialize data selection info */
             strcpy(selection_info.file_name, bypass_obj->file_name);
             if (get_dset_name_helper((H5VL_bypass_t *)(dset[j]), selection_info.dset_name, req) < 0) {
@@ -2752,17 +2822,16 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
 
             selection_info.dtype_size = bypass_dset->dtype_info.size;
 
-            if (H5D_CHUNKED == bypass_dset->layout) {
+            if (H5D_CHUNKED == dset_layout) {
                 /* Iterate through all chunks and map the data selection in each chunk to the memory.
-                 * Put the selections into a queue for the thread pool to read the data */
-                // process_chunks(buf[j], dset[j], dcpl_id, mem_space_id[j], file_space_id[j],
-                // &selection_info, req);
-                process_chunks(buf[j], dset[j], bypass_dset->dcpl_id, mem_space_id_copy, file_space_id_copy,
-                               &selection_info, req);
-            }
-            else if (H5D_CONTIGUOUS == bypass_dset->layout) {
+                * Put the selections into a queue for the thread pool to read the data */ 
+                //process_chunks(buf[j], dset[j], dcpl_id, mem_space_id[j], file_space_id[j], &selection_info, req);
+                process_chunks(buf[j], dset[j], dcpl_id, plist_id, mem_space_id_copy, file_space_id_copy, &selection_info, req);
+
+            } else if (H5D_CONTIGUOUS == dset_layout) {
                 selection_info.file_space_id = file_space_id_copy;
-                selection_info.mem_space_id  = mem_space_id_copy;
+                selection_info.mem_space_id = mem_space_id_copy;
+                selection_info.chunk_addr = dset_loc;
 
                 /* Handles the hyperslab selection and read the data */
                 if (process_vectors(buf[j], &selection_info) < 0) {
