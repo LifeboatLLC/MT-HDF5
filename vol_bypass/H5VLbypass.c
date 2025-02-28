@@ -2510,17 +2510,6 @@ process_chunks(void *rbuf, void *dset, hid_t dcpl_id, hid_t mem_space, hid_t fil
                 goto done;
             }
 
-            if ((select_npoints = H5Sget_select_npoints(file_space_copy)) < 0) {
-                fprintf(stderr, "unable to get the number of points in file selection\n");
-                ret_value = -1;
-                goto done;
-            }
-            // printf("\t\t5. chunk_offset={%llu, %llu}, chunk_addr = %llu, chunk_size = %llu, select_npoints
-            // = %llu\n", chunk_offset[0], chunk_offset[1], chunk_addr, chunk_size, select_npoints);
-            // printf("\t\t select_npoints in memory = %llu\n", H5Sget_select_npoints(mem_selection_id));
-            // printf("\t\t start[0] = %llu, start[1] = %llu, end[0] = %llu, end[1] = %llu\n", start[0],
-            // start[1], end[0], end[1]);
-
             /* Save the information for this chunk */
             selection_info->mem_space_id  = mem_selection_id;
             selection_info->file_space_id = file_space_copy;
