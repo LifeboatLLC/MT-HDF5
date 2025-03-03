@@ -16,28 +16,62 @@ Error checking is omitted in the following examples for simplicity.
 \begin{minted}{C}
 #include "testframe.h"
 
+static herr_t
+test1(TestParams_t *params)
+{
+    int *test_data = (int *)params->UserParams;
+
+    if (unsupported_functionality)
+        return SKIP;
+
+    /* Do test */
+    ...
+
+    return SUCCEED;
+
+error:
+    return FAIL;
+}
+
+static herr_t
+test2(TestParams_t *params)
+{
+    int *test_data = (int *)params->UserParams;
+
+    if (unsupported_functionality)
+        return SKIP;
+
+    /* Do test */
+    ...
+
+    return SUCCEED;
+
+error:
+    return FAIL;
+}
+
 int
 main(int argc, char **argv)
 {
+    int test1_data = 1;
+    int test2_data = 2;
+
     H5open();
 
     /* Initialize testing framework */
-    TestInit(argv[0], NULL, NULL, NULL, NULL, 0);
-
-    /* Add each test */
-    AddTest("test1", test1(), test1_setup(), test1_cleanup(),
-            &test1_data, sizeof(test1_data), "Runs test 1");
-    AddTest("test2", test2(), test2_setup(), test2_cleanup(),
-            &test2_data, sizeof(test2_data), "Runs test 2");
-
-    /* Parse command line arguments */
-    TestParseCmdLine(argc, argv);
+    TestInit(argv[0], NULL, NULL, NULL, NULL, 0, 0);
 
     /* Display testing information */
     TestInfo(stdout);
 
-    /* Start test timer */
-    TestAlarmOn();
+    /* Add each test */
+    AddTest("test1", test1, test1_setup, test1_cleanup,
+            &test1_data, sizeof(test1_data), 0, "Runs test 1");
+    AddTest("test2", test2, test2_setup, test2_cleanup,
+            &test2_data, sizeof(test2_data), 0, "Runs test 2");
+
+    /* Parse command line arguments */
+    TestParseCmdLine(argc, argv);
 
     /* Run tests */
     PerformTests();
@@ -46,15 +80,18 @@ main(int argc, char **argv)
     if (GetTestSummary())
         TestSummary(stdout);
 
-    /* Turn test timer off */
-    TestAlarmOff();
-
-    num_errs = GetTestNumErrs();
+    /* If test file cleanup is not disabled, cleanup any
+       test files */
+    if (GetTestCleanup())
+        ...;
 
     /* Release test infrastructure */
     TestShutdown();
 
-    if (num_errs > 0)
+    /* Shut down HDF5 */
+    H5close();
+
+    if (GetTestNumErrs() > 0 || GetTestsFailedCount() > 0)
         exit(EXIT_FAILURE);
     else
         exit(EXIT_SUCCESS);
@@ -67,9 +104,46 @@ main(int argc, char **argv)
 \begin{minted}{C}
 #include "testframe.h"
 
+static herr_t
+test1(TestParams_t *params)
+{
+    int *test_data = (int *)params->UserParams;
+
+    if (unsupported_functionality)
+        return SKIP;
+
+    /* Do test */
+    ...
+
+    return SUCCEED;
+
+error:
+    return FAIL;
+}
+
+static herr_t
+test2(TestParams_t *params)
+{
+    int *test_data = (int *)params->UserParams;
+
+    if (unsupported_functionality)
+        return SKIP;
+
+    /* Do test */
+    ...
+
+    return SUCCEED;
+
+error:
+    return FAIL;
+}
+
 int
 main(int argc, char **argv)
 {
+    int test1_data = 1;
+    int test2_data = 2;
+    int num_errs   = 0;
     int mpi_size; /* MPI communicator size */
     int mpi_rank; /* MPI process rank value */
 
@@ -82,22 +156,19 @@ main(int argc, char **argv)
 
     /* Initialize testing framework; pass MPI rank value
        for process ID */
-    TestInit(argv[0], NULL, NULL, NULL, NULL, mpi_rank);
-
-    /* Add each test */
-    AddTest("test1", test1(), test1_setup(), test1_cleanup(),
-            &test1_data, sizeof(test1_data), "Runs test 1");
-    AddTest("test2", test2(), test2_setup(), test2_cleanup(),
-            &test2_data, sizeof(test2_data), "Runs test 2");
-
-    /* Parse command line arguments */
-    TestParseCmdLine(argc, argv);
+    TestInit(argv[0], NULL, NULL, NULL, NULL, 0, mpi_rank);
 
     /* Display testing information */
     TestInfo(stdout);
 
-    /* Start test timer */
-    TestAlarmOn();
+    /* Add each test */
+    AddTest("test1", test1, test1_setup, test1_cleanup,
+            &test1_data, sizeof(test1_data), 0, "Runs test 1");
+    AddTest("test2", test2, test2_setup, test2_cleanup,
+            &test2_data, sizeof(test2_data), 0, "Runs test 2");
+
+    /* Parse command line arguments */
+    TestParseCmdLine(argc, argv);
 
     /* Run tests */
     PerformTests();
@@ -106,16 +177,28 @@ main(int argc, char **argv)
     if (GetTestSummary())
         TestSummary(stdout);
 
-    /* Turn test timer off */
-    TestAlarmOff();
+    /* If test file cleanup is not disabled, cleanup any
+       test files */
+    if (GetTestCleanup())
+        ...;
 
     /* Gather errors from all processes */
+    /* NOTE: this isn't strictly necessary as MPI will
+       handle any process exiting with a non-zero status,
+       but it is good practice. It may also be useful to
+       gather the count of failed tests from all MPI
+       processes with GetTestsFailedCount() and check
+       that as well, as in the serial test program
+       example. */
     num_errs = GetTestNumErrs();
     MPI_Allreduce(MPI_IN_PLACE, &num_errs, 1, MPI_INT,
                   MPI_MAX, MPI_COMM_WORLD);
 
     /* Release test infrastructure */
     TestShutdown();
+
+    /* Shut down HDF5 */
+    H5close();
 
     MPI_Finalize();
 
@@ -129,43 +212,85 @@ main(int argc, char **argv)
 \subsection{\textbf{Example skeleton for a multi-threaded HDF5 test}}
 \label{apdx:multithread_example}
 
+Note that the details of this skeleton program are subject to change as the 'testframe'
+testing framework is adapted to work with multi-threaded tests.
+
 \begin{minted}{C}
 #include "testframe.h"
 
-static void
-test1(const void *params)
+/* Allow 10 seconds of margin for timed-out tests to cleanup */
+#define MARGIN 10
+
+static herr_t
+test1(TestParams_t *params)
 {
     unsigned max_num_threads = GetTestMaxNumThreads();
-    unsigned timeout = *(unsigned *)params;
+    unsigned timeout         = *(unsigned *)params->UserParams;
 
-    /* Calculate amount of work to do */
+    if (unsupported_functionality)
+        return SKIP;
+
+    /* Calculate amount of work to do based on timeout */
     ...
 
-    /* Do work */
+    /* Do test */
     ...
 
-    return;
+    return SUCCEED;
+
+error:
+    return FAIL;
+}
+
+static herr_t
+test2(TestParams_t *params)
+{
+    unsigned max_num_threads = GetTestMaxNumThreads();
+    unsigned timeout         = *(unsigned *)params->UserParams;
+
+    if (unsupported_functionality)
+        return SKIP;
+
+    /* Calculate amount of work to do based on timeout */
+    ...
+
+    /* Do test */
+    ...
+
+    return SUCCEED;
+
+error:
+    return FAIL;
 }
 
 int
 main(int argc, char **argv)
 {
     unsigned runtime;
-    unsigned num_subtests;
-    unsigned subtest_timeout;
+    unsigned num_tests;
+    unsigned test_timeout;
     int      TestExpress;
-    int      num_errs;
 
-    /* Initialize testing framework */
-    TestInit(argv[0], NULL, NULL, NULL, NULL, 0);
+    H5open();
 
+    /* Initialize testing framework, passing H5_MULTITHREAD_TEST
+       flag */
+    TestInit(argv[0], NULL, NULL, NULL, NULL, H5_MULTITHREAD_TEST, 0);
+
+    /* Display testing information */
+    TestInfo(stdout);
+
+    /* Calculate number of tests somehow */
+    num_tests = 2;
+
+    /* Adjust test program runtime based on TestExpress level */
     TestExpress = GetTestExpress();
     if (TestExpress == 0) {
         runtime = 0; /* Run with no timeout (runtime = 0) or pick a
                         reasonable timeout */
     }
     else if (TestExpress == 1) {
-        runtime = 1800; /* 30 minute timeout */
+        runtime = 1200; /* 20 minute timeout */
     }
     else if (TestExpress == 2) {
         runtime = 600; /* 10 minute timeout */
@@ -174,52 +299,41 @@ main(int argc, char **argv)
         runtime = 60; /* 1 minute timeout */
     }
 
-    /* Calculate timeout for each sub-test */
-    subtest_timeout = (runtime - MARGIN) / num_subtests;
+    /* Calculate timeout for each test */
+    test_timeout = (runtime - MARGIN) / num_tests;
 
-    /* Add each test, passing the timeout as a parameter */
-    AddTest("test1", test1(), NULL, test1_cleanup(),
-            &subtest_timeout, sizeof(unsigned), "Runs test 1");
-    AddTest("test2", test2(), NULL, test2_cleanup(),
-            &subtest_timeout, sizeof(unsigned), "Runs test 2");
+    /* Add each test, passing the timeout as a parameter.
+       Test 1 runs on threads created internally by the
+       testing framework, while test 2 is responsible for
+       managing its own threading. */
+    AddTest("test1", test1, NULL, NULL, &test_timeout,
+            sizeof(unsigned), ALLOW_MULTITHREAD, "Runs test 1");
+    AddTest("test2", test2, NULL, NULL, &subtest_timeout,
+            sizeof(unsigned), 0, "Runs test 2");
 
     /* Parse command line arguments, including the maximum number of
        threads to use */
     TestParseCmdLine(argc, argv);
 
-    /* Display testing information */
-    TestInfo(stdout);
-
-    /* Start test timer; assumes refactoring of TestAlarmOn to accept
-       a specified timeout. TestAlarmOn could also be refactored to
-       handle this itself, given its own information about the TestExpress
-       value */
-    TestAlarmOn(runtime);
-
-    /* Run sub-tests, with the test framework being responsible for spawning
-       threads to run each test function. If performance becomes an issue,
-       threads can be spawned once and the entire test can be encapsulated
-       in a single function. Also, the testing framework may need
-       infrastructure to check against the maximum allowed runtime after
-       each sub-test in case a particular sub-test spills over its time
-       budget. */
+    /* Run tests */
     PerformTests();
 
     /* Display test summary, if requested */
     if (GetTestSummary())
         TestSummary(stdout);
 
-    /* Not strictly necessary to turn the alarm off, but the test alarm
-       should generally be left on until right before exiting since even
-       the cleanup step may be prone to hanging */
-    TestAlarmOff();
-
-    num_errs = GetTestNumErrs();
+    /* If test file cleanup is not disabled, cleanup any
+       test files */
+    if (GetTestCleanup())
+        ...;
 
     /* Release test infrastructure */
     TestShutdown();
 
-    if (num_errs > 0)
+    /* Shut down HDF5 */
+    H5close();
+
+    if (GetTestNumErrs() > 0 || GetTestsFailedCount() > 0)
         exit(EXIT_FAILURE);
     else
         exit(EXIT_SUCCESS);

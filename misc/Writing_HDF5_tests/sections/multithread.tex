@@ -15,6 +15,17 @@ changes to the framework should be made to make the process easier for other tes
 to Appendix \ref{apdx:multithread_example} for an example of a skeleton for a multi-threaded test program
 that integrates with the 'testframe' testing framework.
 
+If a multi-threaded test program integrates with the 'testframe' framework, it should be sure to pass
+the value \texttt{H5\_MULTITHREAD\_TEST} for the \texttt{TestFrameworkFlags} parameter when calling
+\nameref{apdx:testframe_testinit}. This ensures that the testing framework can setup any state it needs
+to for running multi-threaded tests. A multi-threaded test program then has two options for running
+a multi-threaded test: by managing threading itself or by allowing the testing framework to manage
+threading. When adding a test to the list of tests with \nameref{apdx:testframe_addtest}, the
+\texttt{TestFlags} parameter can control this behavior. If the value \texttt{ALLOW\_MULTITHREAD} is
+present in the flags specified in this parameter, the testing framework will use a set of threads it
+creates internally to run the test. Otherwise, it is up to the test program to manage threading for
+that particular test. See Appendix \ref{apdx:testframe_performtests} for more details.
+
 \subsection{Allowing for a configurable number of threads}
 
 Any multi-threaded HDF5 test program should allow for specifying a maximum number of threads to be
@@ -46,6 +57,10 @@ Multi-threaded test authors are encouraged to:
 
 \end{enumerate}
 
+When the 'testframe' framework is allowed to run a test using its own internal threads, the framework
+aggregates the pass/fail status of a test after all the threads have been joined. Using this approach
+for a test may help to simplify error handling for test authors.
+
 \subsection{Output from multi-threaded tests}
 
 Similar to parallel HDF5 tests, multi-threaded HDF5 tests will also have issues with interleaved output
@@ -55,7 +70,8 @@ without careful consideration. Multi-threaded tests should:
 
     \item Only print output from a single thread after choosing a "leader". A reasonable strategy would be
           to algorithmically pick a leader based on the "thread ID" that HDF5 chooses for the thread and
-          stores in that thread's specific/local storage.
+          stores in that thread's specific/local storage. Note that the 'testframe' framework also provides
+          a "thread ID" value in the testing parameters passed to a test function.
     \item Use locking primitives or POSIX's \texttt{flockfile()} to prevent interleaving of output. Ideally
           this locking would eventually be integrated into the testing framework and exposed by utility functions to simplify the writing of testing code. Note that, even with this locking, output can become interleaved if it occurs across multiple \texttt{printf()}-like function calls; tests will need to either group all output from a thread into a single lock-unlock cycle (likely at the end
           of the test), or have some synchronization point between "rounds" of output from threads.
@@ -66,7 +82,9 @@ without careful consideration. Multi-threaded tests should:
 \end{itemize}
 
 Note that any output from the 'testframe' testing framework, such as the printing out of test names or information, should not occur in multiple threads simultaneously and so does not needed to be guarded
-against by test programs integrated with this testing framework.
+against by test programs integrated with this testing framework. The framework also provides several
+macros that can be used to print output "correctly" in a multi-threaded test program (where "correctly"
+usually means restricting output to the "main" thread).
 
 \subsection{Organization and differentiation of tests}
 
