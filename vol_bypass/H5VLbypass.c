@@ -3079,6 +3079,8 @@ H5VL_bypass_datatype_close(void *dt, hid_t dxpl_id, void **req)
 static void
 c_file_open_helper(const char *name)
 {
+    pthread_mutex_lock(&mutex_local);
+
     /* Enlarge the size of the file stuff for C and Re-allocate the memory if necessary */
     if (file_stuff_count == file_stuff_size) {
         file_stuff_size *= 2;
@@ -3114,6 +3116,8 @@ c_file_open_helper(const char *name)
 
     /* Increment the number of files being opened with C */
     file_stuff_count++;
+
+    pthread_mutex_unlock(&mutex_local);
 }
 
 /*-------------------------------------------------------------------------
@@ -3500,6 +3504,7 @@ H5VL_bypass_file_close(void *file, hid_t dxpl_id, void **req)
     /* Close the file opened with C.  Remove the file structure from the list when the reference count drops
      * to zero */
     for (i = 0; i < file_stuff_count; i++) {
+        pthread_mutex_lock(&mutex_local);
         if (!strcmp(file_stuff[i].name, file_name) && file_stuff[i].fd) {
             // fprintf(stderr, "%s at %d: file_name = %s, i = %d, file_stuff_count = %d,
             // file_stuff[i].ref_count = %d, file_stuff[i].read_started = %d, num_reads = %d\n", __func__,
@@ -3507,11 +3512,9 @@ H5VL_bypass_file_close(void *file, hid_t dxpl_id, void **req)
             // file_stuff[i].num_reads);
             /* Wait until all thread in the thread pool finish reading the data before closing the C file */
             if (file_stuff[i].read_started) {
-                pthread_mutex_lock(&mutex_local);
                 // while (!file_stuff[i].read_started || file_stuff[i].num_reads)
                 while (file_stuff[i].num_reads)
                     pthread_cond_wait(&(file_stuff[i].close_ready), &mutex_local);
-                pthread_mutex_unlock(&mutex_local);
             }
 
             // fprintf(stderr, "%s at %d: file_name = %s, i = %d, file_stuff_count = %d,
@@ -3532,6 +3535,7 @@ H5VL_bypass_file_close(void *file, hid_t dxpl_id, void **req)
                 remove_file_info_helper(i);
             }
         }
+        pthread_mutex_unlock(&mutex_local);
     }
 
     ret_value = H5VLfile_close(o->under_object, o->under_vol_id, dxpl_id, req);
