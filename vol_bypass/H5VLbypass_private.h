@@ -35,18 +35,21 @@
 #define NUM_LOCAL_THREADS  4
 #define THREAD_STEP        1024
 #define NTHREADS_MAX       32
+#define BYPASS_NAME_SIZE_LONG   1024
+#define BYPASS_TASK_QUEUE_INIT_LEN 128
 #define MIN(a, b)          (((a) < (b)) ? (a) : (b))
 #define GB (1024 * 1024 * 1024)
 #define MB (1024 * 1024)
 
 pthread_mutex_t mutex_local;
 pthread_cond_t  cond_local;
+pthread_cond_t  cond_read_finished;
 pthread_cond_t  continue_local;
 
 int  nthreads_tpool       = NUM_LOCAL_THREADS;
 int  nsteps_tpool         = THREAD_STEP;
 int  info_pointer         = 0;
-int  thread_task_count    = 0;
+int  queue_task_count    = 0;
 bool thread_task_finished = false;                   /* Flag for H5Dread to notify the thread pool that it finished putting tasks in the queue */
 bool thread_loop_finish   = false;
 bool stop_tpool           = false;                   /* Flag to tell the thread pool to terminate, turned on in H5VL_bypass_term */
@@ -69,8 +72,8 @@ static int file_stuff_size = FILE_STUFF_SIZE;
 
 /* Dataset info */
 typedef struct {
-    char dset_name[1024];
-    char file_name[1024];
+    char dset_name[BYPASS_NAME_SIZE_LONG];
+    char file_name[BYPASS_NAME_SIZE_LONG];
     H5D_layout_t layout;
     unsigned ref_count;     /* Reference count    */
     hid_t dcpl_id;
@@ -117,23 +120,30 @@ typedef struct {
     int      fd;
 } info_for_thread_t;
 
+/* Struct containing information about the thread that called H5Dread() */
+typedef struct Bypass_task_author_t {
+    int num_tasks_unfinished;
+    pthread_mutex_t mutex;
+    pthread_cond_t  cond;
+} Bypass_task_author_t;
+
+typedef struct Bypass_task_t {
+    int     file_index; /* Index of the file containing the dset to read from in the file_stuff array */
+    haddr_t addr;       /* Location in filesystem file to read from */
+    size_t  size;
+    void   *vec_buf;    /* User buffer to populate */
+    Bypass_task_author_t *author;
+} Bypass_task_t;
+
 typedef struct {
     int      thread_id;
     int      fd;            /* Remove this field and use file_indices */
     uint32_t step;
-    int      *file_indices;
-    haddr_t  *addrs;
-    size_t   *sizes;
-    void     **vec_bufs;
 
-    int        file_indices_local[LOCAL_VECTOR_LEN];
-    haddr_t    addrs_local[LOCAL_VECTOR_LEN];
-    size_t     sizes_local[LOCAL_VECTOR_LEN];
-    void       *vec_bufs_local[LOCAL_VECTOR_LEN];
+    Bypass_task_t   *tasks;
 
     size_t     vec_arr_nalloc;
     size_t     vec_arr_nused;
-    bool       free_memory;
 } info_for_tpool_t;
 
 static info_t *info_stuff;
