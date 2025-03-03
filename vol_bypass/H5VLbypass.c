@@ -1914,7 +1914,6 @@ start_thread_for_pool(void *args)
 
             task_file_index = local_tasks[i].file_index;
             file_stuff[task_file_index].num_reads++;
-            file_stuff[task_file_index].read_started = true;
         }
 
         // fprintf(stderr, "thread %d: 1. local_count = %d, thread_task_count = %d, info_pointer = %d, addr =
@@ -1973,18 +1972,21 @@ start_thread_for_pool(void *args)
                 goto done;
             }
 
+            /* Read count should still be at least one at this point */
+            if (file_stuff[task_file_index].num_reads == 0) {
+                fprintf(stderr, "invalid number of reads for file %s\n", file_stuff[task_file_index].name);
+                ret_value = (void *)-1;
+                goto done;
+            }
+
             file_stuff[task_file_index].num_reads--;
 
-            /* If the active read count for this file has dropped to zero, close it.
-             * TBD - Certain access patterns may lead to the same file being opened/closed many times.
-             * However, it was necessary to remove the thread_loop_finish check here
-             * in order to prevent a scenario where a busy queue prevents the file from
-             * being released entirely. */
+            /* If the active read count for this file has dropped to zero,
+             * allow any concurrent requests to close that file to proceed */
             if (file_stuff[local_tasks[i].file_index].num_reads == 0) {
                 // fprintf(stderr, "thread %d: file name = %s, signal close_ready\n", thread_id,
                 // file_stuff[file_indices_local[i]].name);
                 /* There are currently no reads active on this file - it may be closed */
-                file_stuff[task_file_index].read_started = false;
                 pthread_cond_signal(&(file_stuff[task_file_index].close_ready));
             }
 
@@ -3107,7 +3109,6 @@ c_file_open_helper(const char *name)
     strcpy(file_stuff[file_stuff_count].name, name);
 
     file_stuff[file_stuff_count].num_reads    = 0;
-    file_stuff[file_stuff_count].read_started = false;
     pthread_cond_init(&(file_stuff[file_stuff_count].close_ready),
                       NULL); /* Initialize the condition variable for file closing */
     /*printf("%s: name = %s, file_stuff_count = %d, file_stuff[%d].name = %s, file_stuff[%d].fp = %d\n",
@@ -3467,7 +3468,6 @@ remove_file_info_helper(unsigned index)
             /* file_stuff[i].vfd_file_handle = file_stuff[i + 1].vfd_file_handle; */
             file_stuff[i].ref_count    = file_stuff[i + 1].ref_count;
             file_stuff[i].num_reads    = file_stuff[i + 1].num_reads;
-            file_stuff[i].read_started = file_stuff[i + 1].read_started;
             file_stuff[i].close_ready  = file_stuff[i + 1].close_ready;
         }
     }
@@ -3506,21 +3506,9 @@ H5VL_bypass_file_close(void *file, hid_t dxpl_id, void **req)
     for (i = 0; i < file_stuff_count; i++) {
         pthread_mutex_lock(&mutex_local);
         if (!strcmp(file_stuff[i].name, file_name) && file_stuff[i].fd) {
-            // fprintf(stderr, "%s at %d: file_name = %s, i = %d, file_stuff_count = %d,
-            // file_stuff[i].ref_count = %d, file_stuff[i].read_started = %d, num_reads = %d\n", __func__,
-            // __LINE__, file_name, i, file_stuff_count, file_stuff[i].ref_count, file_stuff[i].read_started,
-            // file_stuff[i].num_reads);
             /* Wait until all thread in the thread pool finish reading the data before closing the C file */
-            if (file_stuff[i].read_started) {
-                // while (!file_stuff[i].read_started || file_stuff[i].num_reads)
-                while (file_stuff[i].num_reads)
-                    pthread_cond_wait(&(file_stuff[i].close_ready), &mutex_local);
-            }
-
-            // fprintf(stderr, "%s at %d: file_name = %s, i = %d, file_stuff_count = %d,
-            // file_stuff[i].ref_count = %d, file_stuff[i].read_started = %d, num_reads = %d\n", __func__,
-            // __LINE__, file_name, i, file_stuff_count, file_stuff[i].ref_count, file_stuff[i].read_started,
-            // file_stuff[i].num_reads);
+            while (file_stuff[i].num_reads > 0)
+                pthread_cond_wait(&(file_stuff[i].close_ready), &mutex_local);
 
             file_stuff[i].ref_count--;
 

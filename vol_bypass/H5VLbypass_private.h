@@ -61,8 +61,7 @@ typedef struct {
     int  fd;                /* C file descriptor  */ 
     /* void *vfd_file_handle;  Currently not used */
     unsigned ref_count;     /* Reference count    */
-    int  num_reads;         /* Number of reads still left undone */
-    bool read_started;      /* Flag to indicate reads have started */
+    size_t  num_reads;         /* Number of reads still left undone */
     pthread_cond_t close_ready;    /* Condition variable to indicate all reads are finished and the file can be close */ 
 } file_t;
 
