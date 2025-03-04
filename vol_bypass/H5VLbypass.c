@@ -1719,7 +1719,7 @@ done:
 
 /* Figure out the data spaces in file and memory and make sure the selection is valid.
  * Below is the table borrowed from the reference manual entry for H5Dread:
- * 
+ *
  * mem_space_id	file_space_id	Behavior
  *
  * valid ID	valid ID	mem_space_id specifies the memory dataspace and the
@@ -2347,7 +2347,7 @@ process_chunk_cb(const hsize_t *chunk_offsets, unsigned filter_mask,
     assert(cb_info);
 
     /* Reset the file space copy to initial selection/extent */
-    // TBD - Only if hyperslab already?
+    // TBD - This may only be necessary if the selection is a hyperslab
     if (H5Sselect_copy(cb_info->file_space_copy, cb_info->file_space) < 0) {
         fprintf(stderr, "unable to copy file space\n");
         ret_value = H5_ITER_STOP;
@@ -2479,7 +2479,7 @@ static herr_t process_chunks(void *rbuf, void *dset, hid_t dcpl_id, hid_t dxpl_i
         ret_value = -1;
         goto done;
     }
-    
+
     /* Create a temporary dataspace that will have its select/extent modified during each
      * chunk callback */
     if ((chunk_cb_info.file_space_copy = H5Scopy(file_space)) < 0) {
@@ -2513,7 +2513,7 @@ done:
     }
 
     return ret_value;
-}
+} /* end process_chunks() */
 
 
 /*-------------------------------------------------------------------------
@@ -2721,29 +2721,6 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
             thread_loop_finish   = false;
             pthread_mutex_unlock(&mutex_local);
 
-            /* Find out the file name */
-            // get_filename_helper((H5VL_bypass_t *)(dset[j]), file_name, H5I_DATASET,
-            // req); fprintf(stderr, "%s at %d: file_name = %s\n", __func__, __LINE__,
-            // file_name);
-
-            selection_info.my_file_index = -1;
-
-            /* Find the correct data file */
-            for (i = 0; i < file_stuff_count; i++) {
-                if (!strcmp(file_stuff[i].name, file_name)) {
-                    selection_info.my_file_index = i; /* Save this index in the list of FILE_T structures for
-                                                         quick lookup later */
-                    break;
-                }
-            }
-
-            if (selection_info.my_file_index == -1) {
-                printf("In %s of %s at line %d: can't find the file with the name %s\n", __func__, __FILE__,
-                       __LINE__, file_name);
-                ret_value = -1;
-                goto done;
-            }
-
             /* Initialize data selection info */
             strcpy(selection_info.file_name, bypass_obj->file_name);
             if (get_dset_name_helper((H5VL_bypass_t *)(dset[j]), selection_info.dset_name, req) < 0) {
@@ -2754,23 +2731,15 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
 
             selection_info.dtype_size = bypass_dset->dtype_info.size;
 
-            if (H5D_CHUNKED == dset_layout) {
+            if (H5D_CHUNKED == bypass_dset->layout) {
                 /* Iterate through all chunks and map the data selection in each chunk to the memory.
-                * Put the selections into a queue for the thread pool to read the data */ 
-                //process_chunks(buf[j], dset[j], dcpl_id, mem_space_id[j], file_space_id[j], &selection_info, req);
-                process_chunks(buf[j], dset[j], dcpl_id, plist_id, mem_space_id_copy, file_space_id_copy, &selection_info, req);
-
-            } else if (H5D_CONTIGUOUS == dset_layout) {
+                 * Put the selections into a queue for the thread pool to read the data */
+                process_chunks(buf[j], dset[j], bypass_dset->dcpl_id, plist_id, mem_space_id_copy, file_space_id_copy,
+                               &selection_info, req);
+            }
+            else if (H5D_CONTIGUOUS == bypass_dset->layout) {
                 selection_info.file_space_id = file_space_id_copy;
-                selection_info.mem_space_id = mem_space_id_copy;
-
-                if (dset_loc == HADDR_UNDEF) {
-                    fprintf(stderr, "dataset does not have a valid read location\n");
-                    ret_value = -1;
-                    goto done;
-                }
-
-                selection_info.chunk_addr    = dset_loc;
+                selection_info.mem_space_id  = mem_space_id_copy;
 
                 /* Handles the hyperslab selection and read the data */
                 if (process_vectors(buf[j], &selection_info) < 0) {
