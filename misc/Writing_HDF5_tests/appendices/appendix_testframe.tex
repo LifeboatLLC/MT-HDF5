@@ -10,7 +10,8 @@
 
 The following sections give an overview of HDF5's 'testframe' testing framework which is contained
 within the \texttt{test/testframe.h} and \texttt{test/testframe.c} files. Details are only given
-for the types, functions, etc. that appear in the relevant header files.
+for the types, functions, etc. that appear in the relevant header files, while implementation details
+in the relevant \texttt{.c} files are not generally given.
 
 \subsection{Macros}
 
@@ -32,6 +33,22 @@ The maximum number of bytes in a test description string, including the NUL term
 \end{minted}
 
 The default compile-time value for the \texttt{TestAlarmOn()} function.
+
+\begin{minted}{C}
+/* Instruct testing framework to initialize state for a multi-thread
+enabled test */
+#define H5_MULTITHREAD_TEST 0x0000000000000001
+\end{minted}
+
+Flags for the \nameref{apdx:testframe_testinit} function.
+
+\begin{minted}{C}
+/* Allow test to be run in spawned thread(s) based on runtime
+configuration */
+#define ALLOW_MULTITHREAD 0x0000000000000001
+\end{minted}
+
+Flags for the \nameref{apdx:testframe_addtest} function.
 
 \begin{minted}{C}
 /*
@@ -98,30 +115,120 @@ do {
 
 Macro to print a message string \texttt{A} from the process with the process ID of 0, as long as the current test verbosity level setting is greater than \texttt{V}.
 
+\begin{minted}{C}
+#define TESTFRAME_TESTING_2(TestParamsPtr, WHAT)
+#define TESTFRAME_SKIPPED(TestParamsPtr)
+#define TESTFRAME_PUTS_ERROR(TestParamsPtr, s)
+#define TESTFRAME_TEST_ERROR(TestParamsPtr)
+#define TESTFRAME_STACK_ERROR(TestParamsPtr)
+#define TESTFRAME_FAIL_STACK_ERROR(TestParamsPtr)
+#define TESTFRAME_FAIL_PUTS_ERROR(TestParamsPtr, s)
+\end{minted}
+
+Macros similar to those in the 'h5test' framework which can be used to help port a test over to
+the 'testframe' framework. Generally, these macros behave the same as their 'h5test' counterparts.
+However, these macro have been setup to handle output being printed simultaneously from multiple
+processes or threads when tests are running in parallel or multi-threaded mode by restricting the
+output to the "main" process or thread. Since the 'testframe' framework handles the output for the
+pass/fail/skip status of tests, certain macros from the 'h5test' framework don't have counterparts
+here.
+
+For each macro, \texttt{TestParamsPtr} must be a pointer to the \texttt{TestParams\_t} structure
+that is passed to each test function when it is executed.
+
+\begin{minted}{C}
+#define SUBTEST_BEGIN(TestParamsPtr, Descr)
+#define SUBTEST_END(TestParamsPtr)
+\end{minted}
+
+Macros used to denote a sub-test within a test function. Surrounding a sub-test with these macros
+will cause a header string for the sub-test to be printed out indented by two spaces when running
+tests serially. When running tests in multi-threaded mode, the header string will be stored and
+printing it out will be delayed until final test results are received from all threads. At that
+point, some sub-test headers may not be printed, depending on if any threads failed.
+
+For each macro, \texttt{TestParamsPtr} must be a pointer to the \texttt{TestParams\_t} structure
+that is passed to each test function when it is executed. \texttt{Descr} is a description string
+for the sub-test and must currently be a string literal.
+
 \subsection{Enumerations}
 
 None defined
 
 \subsection{Structures}
 
-None defined
+\begin{minted}{C}
+typedef struct TestParams_t {
+    void  *UserParams;
+    size_t UserParamsSize;
+
+    bool IsMtTest;
+    struct {
+        int    ThreadID;
+        size_t ThreadErrCnt;
+        size_t ThreadAmbigCnt;
+        char   ThreadErrMsg[1024];
+
+        void  *ThreadPrivData;
+    } MtTestParams;
+} TestParams_t;
+\end{minted}
+
+\texttt{TestParams\_t} is the common structure for test parameters which gets passed to each test
+function as it is executed. The structure's fields are as follows:
+
+\begin{itemize}
+    \item \texttt{UserParams} - The test parameters that were specified for the test, if any, by the
+          call to \nameref{apdx:testframe_addtest}.
+    \item \texttt{UserParamsSize} - The size of the test parameters buffer specified for the test, if
+          any, by the call to \nameref{apdx:testframe_addtest}.
+    \item \texttt{IsMtTest} - A boolean value indicating whether the test is being run in a
+          multi-threaded manner. If \texttt{IsMtTest} is \texttt{true}, the fields in the
+          \texttt{MtTestParams} structure are valid and can be read from. Otherwise, the test is being
+          run in a serial manner and the fields in the \texttt{MtTestParams} structure are invalid and
+          should not be read from. \textbf{NOTE:} If \texttt{IsMtTest} is \texttt{true}, each thread
+          will have received its own thread-local copy of the original \texttt{TestParams\_t} structure
+          for the test. However, only fields inside the \texttt{MtTestParams} structure should be
+          considered safe for modification by a thread. Other fields outside this structure, such as
+          the \texttt{UserParams} field, will still be shared among threads.
+    \item \texttt{MtTestParams.ThreadID} - An integer value which is unique per thread that is executing
+          a multi-threaded test.
+    \item \texttt{MtTestParams.ThreadErrCnt} - Used to track error counts for a particular thread for
+          later aggregation by the testing framework.
+    \item \texttt{MtTestParams.ThreadAmbigCnt} - Used to track the count of ambiguous situations for a
+          particular thread for later aggregation by the testing framework. Ambiguous situations are
+          those where concurrent operations result in a state without a known, expected result.
+    \item \texttt{MtTestParams.ThreadErrMsg} - A buffer for a thread to store an error message in for
+          later aggregation by the testing framework. The message string should not contain a terminating
+          newline character, as the testing framework will print one out after each thread's error message,
+          if any.
+    \item \texttt{MtTestParams.ThreadPrivData} - A pointer to private data maintained by the testing
+          framework. Should never be interacted with directly.
+\end{itemize}
+
+\begin{minted}{C}
+struct ThreadPrivData_t {
+    const char *subtest_descriptions[TESTFRAME_MAX_NUM_SUBTESTS];
+    size_t      subtest_count;
+};
+\end{minted}
+
+\texttt{ThreadPrivData\_t} is a structure for private data maintained by the testing framework for a
+thread. While accessible due to being in \texttt{testframe.h}, instances of this structure should never
+be interacted with directly. The structure's fields are as follows:
+
+\begin{itemize}
+    \item \texttt{subtest\_descriptions} - An array of pointers to sub-test header string literals that
+          are stored by the testing framework so that output can be coordinated among threads. Once the
+          results for a multi-thread test have been received from all threads, sub-test headers will be
+          printed out up to and including the header for the first sub-test that failed for a thread.
+    \item \texttt{subtest\_count} - The number of sub-tests that were executed for a particular thread.
+          Used to get a minimum number of sub-tests that were executed by all threads.
+\end{itemize}
 
 \subsection{Global variables}
 
-\begin{minted}{C}
-int TestFrameworkProcessID_g = 0;
-\end{minted}
-
-Contains an ID value for the current process which can be set during calls to \texttt{TestInit()}.
-Primarily used to control output from a parallel test so that it only comes from one MPI process,
-but also used for control flow.
-
-\begin{minted}{C}
-int TestVerbosity_g = VERBO_DEF;
-\end{minted}
-
-Contains the current setting for the level of output that tests should print. Defined values range
-from 0 - 9, with higher values implying more verbose output.
+None defined
 
 \subsection{Functions}
 
@@ -131,9 +238,9 @@ from 0 - 9, with higher values implying more verbose output.
 \begin{minted}{C}
 herr_t
 TestInit(const char *ProgName, void (*TestPrivateUsage)(FILE *stream),
-         int (*TestPrivateParser)(int argc, char *argv[]),
+         herr_t (*TestPrivateParser)(int argc, char *argv[]),
          herr_t (*TestSetupFunc)(void), herr_t (*TestCleanupFunc)(void),
-         int TestProcessID);
+         uint64_t TestFrameworkFlags, int TestProcessID);
 \end{minted}
 
 Initializes test program-specific information and infrastructure. \texttt{TestInit()} should be
@@ -159,6 +266,23 @@ the testing framework has been fully initialized. May be \texttt{NULL}.
 \texttt{TestCleanupFunc} is a pointer to a function that can be used to clean up any state after tests
 have finished executing. If provided, this callback function will be called by \texttt{TestShutdown()}
 before the testing framework starts being shut down. May be \texttt{NULL}.
+
+\texttt{TestFrameworkFlags} is a bitfield of flags to control behavior when initializing the testing
+framework. The supported flags are as follows:
+
+\begin{itemize}
+    \item \texttt{H5\_MULTITHREAD\_TEST} - specifies that the test program has one or more multi-thread
+          enabled tests and the testing framework should initialize any state it may need for running
+          those tests. If the library has not been configured with some level of threading support
+          (thread-safe or multi-thread), this flag will have no effect.
+\end{itemize}
+
+If no flags are necessary for a test program, \texttt{TestFrameworkFlags} should be specified as 0.
+
+\texttt{TestProcessID} is an integer value that is used to distinguish between processes when multiple
+are involved in running a test program. This is primarily useful for controlling testing framework output
+printed during execution of a parallel test program. For serial tests, the value 0 should always be passed.
+For parallel tests, the rank value of the MPI process, as obtained by calling \texttt{MPI\_Comm\_rank()}, should be passed. Test framework output is only printed from the process with ID 0.
 
 \subsubsection{\texttt{TestShutdown()}}
 
@@ -203,12 +327,15 @@ library that the test program was linked to, to the given \texttt{FILE} pointer.
 process with rank value 0.
 
 \subsubsection{\texttt{AddTest()}}
+\label{apdx:testframe_addtest}
 
 \begin{minted}{C}
 herr_t
-AddTest(const char *TestName, void (*TestFunc)(const void *),
-        void (*TestSetupFunc)(void *), void (*TestCleanupFunc)(void *),
-        const void *TestData, size_t TestDataSize, const char *TestDescr);
+AddTest(const char *TestName, herr_t (*TestFunc)(TestParams_t *),
+        herr_t (*TestSetupFunc)(TestParams_t *),
+        herr_t (*TestCleanupFunc)(TestParams_t *),
+        const void *TestData, size_t TestDataSize,
+        uint64_t TestFlags, const char *TestDescr);
 \end{minted}
 
 This function adds a test to the list of tests that will be run when the \texttt{PerformTests()}
@@ -219,18 +346,23 @@ including the NUL terminator. If the specified string begins with the character 
 be set to be skipped by default.
 
 \texttt{TestFunc} is a pointer to the function that will be called for the test. The function must
-return no value and accept a single \texttt{const void *} as an argument, which will point to any
-parameters to be passed to the test that are specified in \texttt{TestData}.
+return an \texttt{herr\_t} value and accept a pointer to a \texttt{TestParams\_t} structure as an
+argument, which will contain various parameters for the test, including any parameters to be passed
+to the test that are specified in \texttt{TestData}. The function specified by \texttt{TestFunc}
+should return one of the macro values \texttt{SUCCEED}, \texttt{FAIL} or \texttt{SKIP}, depending
+on whether the test function passed, failed or was skipped, respectively.
 
-\texttt{TestSetupFunc} is an optional pointer to a function that will be called before the test's
-main test function is called. The function must return no value and accept a single \texttt{void *}
-as an argument, which will point to any parameters to be passed to the test that are specified in
-\texttt{TestData}.
+\texttt{TestSetupFunc} is an optional pointer to a function that will be called before the main test
+function is called. This allows tests to perform any pre-test setup necessary. The function must
+return an \texttt{herr\_t} value and accept a pointer to a \texttt{TestParams\_t} structure as an
+argument, which will contain various parameters for the test, including any parameters to be passed
+to the test that are specified in \texttt{TestData}.
 
-\texttt{TestCleanupFunc} is an optional pointer to a function that will be called after the test's
-main test function has finished executing. The function must return no value and accept a single
-\texttt{void *} as an argument, which will point to any parameters to be passed to the test that are
-specified in \texttt{TestData}.
+\texttt{TestCleanupFunc} is an optional pointer to a function that will be called after a test's
+main test function has finished executing. This allows tests to perform any post-test cleanup
+necessary. The function must return an \texttt{herr\_t} value and accept a pointer to a
+\texttt{TestParams\_t} structure as an argument, which will contain various parameters for the test,
+including any parameters to be passed to the test that are specified in \texttt{TestData}.
 
 \texttt{TestData} is an optional pointer to test parameters that will be passed to the test's main
 test function when executed, as well as the test's optional setup and cleanup callbacks. If given,
@@ -243,9 +375,39 @@ function and setup and callback functions during execution. If \texttt{TestData}
 \texttt{TestDataSize} must be a positive value. Otherwise, if \texttt{TestData} is \texttt{NULL},
 \texttt{TestDataSize} must be 0.
 
+\texttt{TestFlags} is a bitfield of flags to control behavior when running a test. The supported
+flags are as follows:
+
+\begin{itemize}
+    \item \texttt{ALLOW\_MULTITHREAD} - specifies that a test should be allowed to run in a
+          multi-threaded manner, as long as the maximum number of threads that can be spawned
+          has been specified as a positive value. When this flag is set for a test, the test's
+          main function (\texttt{TestFunc}), as well as its setup (\texttt{TestSetupFunc}) and
+          cleanup (\texttt{TestCleanupFunc}) functions will be called from multiple threads
+          simultaneously. Therefore, multi-thread-enabled tests should take care to coordinate
+          logic and printed output between threads.
+\end{itemize}
+
+If no flags are necessary for a test, \texttt{TestFlags} should be specified as 0.
+
 \texttt{TestDescr} is a short description string for the test and must be \texttt{MAXTESTDESC} bytes
 or less, including the NUL terminator. The string passed in \texttt{TestDescr} may be an empty string,
 but it is advised that test authors give a description to a test.
+
+\subsubsection{\texttt{AddTestHeaderFunc()}}
+\label{apdx:testframe_addtestheaderfunc}
+
+\begin{minted}{C}
+herr_t
+AddTestHeaderFunc(const char *TestName,
+                  void (*HeaderFunc)(TestParams_t *));
+\end{minted}
+
+This function adds a specified callback function, \texttt{HeaderFunc}, to a test which will run
+before executing the test. This is primarily useful for printing out a header banner before
+a group of tests run. \textbf{NOTE:} This callback function is separate from a test's setup function;
+when running a test in multi-threaded mode, this callback function will only be called by the main
+thread.
 
 \subsubsection{\texttt{TestParseCmdLine()}}
 
@@ -288,6 +450,8 @@ are the current standard options:
           program should be allowed to spawn in addition to the main thread. If a negative value is
           specified, test programs will be allowed to spawn any number of threads. The value 0 indicates
           that no additional threads should be spawned.
+    \item \texttt{-testexpress} / \texttt{-p} - Used to specify the TestExpress level for running tests
+          with. This allows the library's default value to be overridden for manual testing purposes.
 
 \end{itemize}
 
@@ -299,6 +463,7 @@ before any non-standard arguments that would be parsed by an optional argument p
 certain tests.
 
 \subsubsection{\texttt{PerformTests()}}
+\label{apdx:testframe_performtests}
 
 \begin{minted}{C}
 herr_t
@@ -306,10 +471,19 @@ PerformTests(void);
 \end{minted}
 
 Runs all tests added to the list of tests with \texttt{AddTest()} that aren't set to be skipped. For
-each test, the test's setup callback function (if supplied) will be called first, followed by the test's
-primary function and then the test's cleanup callback function (if supplied). Before each test begins,
-a timer is enabled by a call to \texttt{TestAlarmOn()} to prevent the test from running longer than
-desired. A call to \texttt{TestAlarmOff()} disables this timer after each test has finished.
+each test, the test's header callback function (if supplied, see section
+\ref{apdx:testframe_addtestheaderfunc}) will be called first, followed by the test's setup callback
+function (if supplied), then the test's primary function and finally the test's cleanup callback
+function (if supplied). If the test program passed the flag value \texttt{H5\_MULTITHREAD\_TEST} to
+\nameref{apdx:testframe_testinit}, then, for each test, if the flag value \texttt{ALLOW\_MULTITHREAD}
+was specified when adding a test to the list of tests and if a positive value for the maximum number
+of threads allowed was specified with the \texttt{-maxthreads} command-line argument, that test will
+be run in a multi-threaded manner. In this case, the test's three callback functions will be called by multiple threads that the testing framework creates internally; the test's header callback function
+will only be called by the main thread.
+
+Before running of tests begins, a timer is enabled by a call to \texttt{TestAlarmOn()} to prevent the
+test from running longer than desired. A call to \texttt{TestAlarmOff()} disables this timer after
+tests have finished.
 
 \subsubsection{\texttt{TestSummary()}}
 
@@ -325,6 +499,16 @@ number of errors for that test will show as "N/A". \texttt{stream} may be \textt
 
 \textbf{Note:} when a parallel test calls \texttt{TestSummary()}, the output is only printed from the
 MPI process with rank value 0.
+
+\subsubsection{\texttt{GetTestFrameworkProcessID()}}
+
+\begin{minted}{C}
+int
+GetTestFrameworkProcessID(void);
+\end{minted}
+
+This function simply returns the process ID that was specified for the process when calling
+\nameref{apdx:testframe_testinit}.
 
 \subsubsection{\texttt{GetTestVerbosity()}}
 
@@ -502,6 +686,68 @@ If \texttt{max\_num\_threads} is a negative value, test programs will be allowed
 threads, though it is advised that test programs try to limit this to a reasonable number. The value 0
 indicates that no additional threads should be spawned, which is primarily for testing purposes.
 
+\subsubsection{\texttt{GetTestsExecutedCount()}}
+
+\begin{minted}{C}
+size_t
+GetTestsExecutedCount(void);
+\end{minted}
+
+\texttt{GetTestsExecutedCount()} returns the number of tests that were executed while running a test
+program. \textbf{NOTE:} the value returned from this function can only be considered accurate after
+\nameref{apdx:testframe_performtests} has finished executing. Also note that this value may not be
+the same as the number of tests that were added with the \nameref{apdx:testframe_addtest} function, as
+individual tests may have sub-tests which are accounted for to give finer-grained details about testing
+status.
+
+\subsubsection{\texttt{GetTestsPassedCount()}}
+
+\begin{minted}{C}
+size_t
+GetTestsPassedCount(void);
+\end{minted}
+
+\texttt{GetTestsFailedCount()} returns the number of tests that failed while running a test program.
+\textbf{NOTE:} the value returned from this function can only be considered accurate after
+\nameref{apdx:testframe_performtests} has finished executing.
+
+\subsubsection{\texttt{GetTestsFailedCount()}}
+
+\begin{minted}{C}
+size_t
+GetTestsFailedCount(void);
+\end{minted}
+
+\texttt{GetTestsFailedCount()} returns the number of tests that failed while running a test program.
+\textbf{NOTE:} the value returned from this function can only be considered accurate after
+\nameref{apdx:testframe_performtests} has finished executing.
+
+\subsubsection{\texttt{GetTestsSkippedCount()}}
+
+\begin{minted}{C}
+size_t
+GetTestsSkippedCount(void);
+\end{minted}
+
+\texttt{GetTestsSkippedCount()} returns the number of tests that were skipped while running a test
+program. \textbf{NOTE:} the value returned from this function can only be considered accurate
+after \nameref{apdx:testframe_performtests} has finished executing.
+
+\subsubsection{\texttt{IsTestOutputPrinter()}}
+
+\begin{minted}{C}
+bool
+IsTestOutputPrinter(TestParams_t *TestParams);
+\end{minted}
+
+\texttt{IsTestOutputPrinter()} returns whether or not the current process/thread should be allowed
+to print output from the testing framework or from a test. This is primarily useful for controlling
+output from the testing framework or a test when tests are being run in parallel and/or multi-threading
+is involved. By convention, output should be restricted to the "main" thread (here, the thread with an
+assigned ID of 0) on MPI rank 0, unless output really should come from multiple MPI processes or threads
+simultaneously. \texttt{TestParams} is a pointer to the parameters for a test and is primarily used to
+determine the main thread for multi-threaded tests.
+
 \subsubsection{\texttt{TestAlarmOn()}}
 \label{apdx:testframe_testalarmon}
 
@@ -513,7 +759,9 @@ TestAlarmOn(void);
 Enables a timer for the test program using \texttt{alarm(2)}. If \texttt{alarm(2)} support is not available
 (the macro \texttt{H5\_HAVE\_ALARM} is not defined), the function does nothing. The default value passed to \texttt{alarm(2)} is defined by the macro \texttt{H5\_ALARM\_SEC} (currently 1200 seconds). If the
 \texttt{HDF5\_ALARM\_SECONDS} environment variable is defined, its value will be parsed by
-\texttt{strtoul()} and will override the default value.
+\texttt{strtoul()} and will override the default value. If the \texttt{TestExpress} level is set to
+\texttt{H5\_TEST\_EXPRESS\_EXHAUSTIVE}, no timer will be enabled, as it is assumed the intention is for
+the test to be able to run as long as necessary.
 
 \subsubsection{\texttt{TestAlarmOff()}}
 \label{apdx:testframe_testalarmoff}

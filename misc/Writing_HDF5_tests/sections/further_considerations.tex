@@ -22,14 +22,14 @@ this usually means a test program should, at a minimum, be tested against recent
 The \texttt{TextExpress} variable is currently set to a default value of 3 in order to facilitate quicker
 CI testing of HDF5. While this chosen value may be acceptable for testing multi-threaded HDF5 functionality
 for changes in GitHub PRs, this value will be too restrictive for general testing of multi-threaded HDF5.
-If it is desired that multi-threaded HDF5 functionality be tested against changes in GitHub PRs,
-multi-threaded tests could be split into a separate GitHub CI action to minimize their effects by running
-them in parallel alongside other testing. However, this would likely still impose a 30 minute time limit
-as the general consensus seems to be that tests which take longer than this tend to slow down the development
-process when PRs are actively being created. More exhaustive testing will likely need to occur outside of
-GitHub, as actions are limited to 6 hours of runtime unless being executed on a machine not owned by GitHub.
-An effective cadence for exhaustive testing would need to be determined so that developers can be informed
-reasonably quickly when new issues are introduced to multi-threaded HDF5.
+For extensive manual testing of multi-threaded 'testframe' tests, the \texttt{TextExpress} value can be overridden at runtime with the \texttt{-testexpress} command-line argument, or HDF5 can be configured with
+a different default level. If it is desired that multi-threaded HDF5 functionality be tested against changes
+in GitHub PRs, multi-threaded tests could be split into a separate GitHub CI action to minimize their
+effects by running them in parallel alongside other testing. However, this would likely still impose a
+30 minute time limit as the general consensus seems to be that tests which take longer than this tend to
+slow down the development process when PRs are actively being created. More exhaustive testing will likely
+need to occur outside of GitHub, as actions are limited to 6 hours of runtime unless being executed on a machine not owned by GitHub. An effective cadence for exhaustive testing would need to be determined so
+that developers can be informed reasonably quickly when new issues are introduced to multi-threaded HDF5.
 
 \subsubsection{Facilitating debugging of multi-thread issues}
 
@@ -89,5 +89,108 @@ HDF5 currently supports would be needed to determine if this is a workable appro
     \item An interesting related project\footnote{\href{http://www.cs.umd.edu/projects/PL/multithreadedtc/overview.html}{MultithreadedTC}} explores forcing specific thread interleaving, which may be useful in very specific testing circumstances
 
 \end{enumerate}
+
+\subsection{Testing timeouts}
+\label{sec:testing_timeouts}
+
+Currently, HDF5 handles timeouts in tests with immediate process termination, either through the
+build system itself (in the case of CMake builds of the library), through process timers in
+specific tests (in the case of Autotools builds of the library), or through higher level constructs
+(in the case of testing on a specific system). As more threaded and parallel tests are added to HDF5,
+the ability to gracefully handle testing timeouts becomes much more desirable. Ideally, HDF5 test
+programs would be able to handle testing timeouts in such a manner that all sub-tests and cleanup
+can be performed within a given amount of runtime. While no decision on an approach for revising
+the handling of testing timeouts has been made yet, this section details how timeouts are currently
+handled and some alternate approaches that were investigated.
+
+\subsubsection{Timeouts in HPC job queues}
+
+Toward the top in the hierarchy of testing timeout constructs are the job time limits imposed when
+testing HDF5 on an HPC system\footnote{Note that this type of timeout can also apply on other systems in
+general.}. HDF5 is usually tested in "debug" (or similar) job queues on HPC systems. These job queues
+typically have relatively short limits ($\sim$30 minutes) on how long a job can run before it is killed.
+As HDF5 developers usually don't have any control over this limit (outside of using a different job
+queue), it should be considered a hard limit, which is why implementing the ability for tests to
+adjust to the \texttt{TestExpress} functionality level is important.
+
+\subsubsection{Timeouts in CMake builds}
+
+Next in the hierarchy are testing timeouts imposed by the build system, which is currently only
+applicable to CMake builds of HDF5. When HDF5 is built with CMake, testing is typically done with
+CMake's test driver program, \href{https://cmake.org/cmake/help/latest/manual/ctest.1.html}{ctest}.
+Tests that are run in this manner will be subject to a timeout value that can be controlled in
+various ways by HDF5's CMake build logic. When the timeout value expires, the test will, currently,
+be immediately terminated. By default, HDF5 sets a 20 minute timeout for all tests run through ctest.
+While this value can be adjusted in several ways, doing so is uncommon and there does not appear to be
+a useful, programmatic way of retrieving the value. As the ideal goal is to have control over test
+behavior when a timeout occurs, some specific HDF5 tests have been given an infinite timeout from
+the perspective of CMake, allowing the test timeout to be controlled further down in the hierarchy
+\footnote{Note that as of version 3.27, CMake has somewhat improved control over testing timeouts
+with \href{https://cmake.org/cmake/help/latest/prop_test/TIMEOUT_SIGNAL_NAME.html}{TIMEOUT\_SIGNAL\_NAME},
+but HDF5 still only requires version 3.18 of CMake as a minimum and only moves forward as needed}.
+As of the time of writing, this only includes a few multi-threaded tests that may end up running well
+past the default CMake timeout value for a full run. Note that if test program binaries from a CMake
+build of HDF5 are run manually, they will not have a timeout imposed by CMake itself and will rely
+on any timeouts coordinated by the below constructs.
+
+\subsubsection{Timeouts in Autotools builds}
+
+Autotools builds of HDF5 do not impose any timeouts from the build system itself, but rather rely
+on the test programs to use some form of internal process timer to catch timeouts. These are discussed
+in the following subsections.
+
+\subsubsection{'Standard' timers}
+
+The timers interacted with by the \texttt{alarm(2)} and \texttt{setitimer()} / \texttt{getitimer()}
+functions are what this document will refer to as 'standard' timers. These allow for a single active
+timer per process and deliver their timeout notifications via a signal. The portability story for
+these timers is ideal for HDF5, as \texttt{alarm(2)} is standard C (and is currently used as a timer
+by HDF5's tests) and \texttt{setitimer()} / \texttt{getitimer()} are part of POSIX and appear to be
+widely supported. However, there are a few issues with using these types of timers:
+
+\begin{itemize}
+    \item The fact that these timers deliver their timeout notifications via a signal severely limits
+          what can be done in reaction to a test timeout, as many C/POSIX functions are not safe to
+          call from within a signal handler. Further, the signal could be delivered to any thread in
+          a multi-threaded test program and may complicate test timeout coordination among threads.
+    \item The fact that only one active timer is allowed per process presents some difficulties or
+          awkward designs when attempting to have tiered timeouts during testing. The thought here is
+          that it would be ideal for HDF5 tests to have two different timers, one that controls the
+          timeout for the entire allowed runtime of a test program and a second timer that controls
+          the timeout for each sub-test, as some fraction of the entire allowed runtime of a test
+          program.
+\end{itemize}
+
+As a first step, it has been proposed that a solution which uses these timers, a background thread and
+a flag should be investigated. This would likely involve having the background thread wait until the
+timeout is expired, at which point it will set a flag to notify the test program that it is time to
+cleanup. Meanwhile, the test program will need to regularly check this flag in some manner. This solution
+would likely only cover the use case of a timeout for the whole test program at first, but may be able
+to be revised to cover per-subtest timeouts as well.
+
+\subsubsection{POSIX realtime extension timers}
+
+The timers interacted with by the \texttt{timer\_create()}, \texttt{timer\_gettime()},
+\texttt{timer\_settime()}, etc. functions are what this document will refer to as 'POSIX RT' timers.
+These allow for multiple timers per process and have the option of delivering their timeout notifications
+via either a signal or a thread. While an improvement over the 'standard' timers, there are also a few
+issues with using these types of timers:
+
+\begin{itemize}
+    \item Initial research appears to show that these timers are not portable to Mac OS or some (most? all?)
+          of the BSDs, which HDF5 is routinely used on.
+    \item Use of these timers requires linking in \texttt{librt} which may also necessitate bringing in
+          the pthreads library and implicitly loading it at runtime as well, which may not be desirable
+          for several reasons. This wouldn't generally be an issue for multi-thread or thread-safe
+          builds of the library, but could be problematic for regular builds.
+\end{itemize}
+
+\subsubsection{Platform-specific timers}
+
+The timers interacted with by the \texttt{timerfd\_create()} (Linux), \texttt{dispatch\_source\_create()} (Mac OS), \texttt{CreateTimer()} (Windows), etc. functions are what this document will refer to as 'platform-specific timers'. Initial research appears to show that most or all of the major platforms that HDF5 is
+primarily supported on have platform-specific solutions which allow multiple active timers per process
+which can deliver their timeout notifications in an acceptable manner for multi-threaded programs. For HDF5
+test programs to make use of these timers, a framework of wrapper functions around the platform-specific functionality would have to be created. While this approach seems to be ideal for the future, the estimated
+effort of implementing it appears large enough that it has not been proposed at this time.
 
 \end{document}
