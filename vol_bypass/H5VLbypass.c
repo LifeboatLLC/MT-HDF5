@@ -2714,6 +2714,10 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
 
             /* Reset for the next H5Dread */
             pthread_mutex_lock(&mutex_local);
+
+            for (i = 0; i < nthreads_tpool; i++)
+                md_for_thread.thread_is_active[i] = true;
+
             thread_task_finished = false;
             thread_loop_finish   = false;
             pthread_mutex_unlock(&mutex_local);
@@ -2752,13 +2756,6 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
                 goto done;
             }
 
-    
-            /* Signal the thread pool to finish this read. Notify the thread pool that it finished putting tasks in the queue. */
-            pthread_mutex_lock(&mutex_local);
-            thread_task_finished = true;
-            pthread_mutex_unlock(&mutex_local);
-            pthread_cond_broadcast(&cond_local);  /* Why do this signal/broadcast? */
-
             /* Save the info for the C log file */
             {
                 /* Enlarge the size of the info for C and Re-allocate the memory if necessary */
@@ -2784,6 +2781,12 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
         *req = H5VL_bypass_new_obj(*req, under_vol_id);
 
 
+    /* Signal the thread pool to finish this read. Notify the thread pool that it finished putting tasks in the queue. */
+    pthread_mutex_lock(&mutex_local);
+    thread_task_finished = true;
+    pthread_mutex_unlock(&mutex_local);
+    pthread_cond_broadcast(&cond_local);  /* Why do this signal/broadcast? */
+    
     /* Do not return until the thread pool finishes the read */
     /* TBD: Enforcing this will become more complicated once multiple
      * application threads making concurrent H5Dread() calls is supported. */
