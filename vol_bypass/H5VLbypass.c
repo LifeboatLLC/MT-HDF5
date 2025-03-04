@@ -271,9 +271,6 @@ static herr_t get_dtype_info(H5VL_bypass_t *dset_obj, hid_t dxpl_id, void **req)
 /* Populate datatype information from a datatype ID */
 static herr_t get_dtype_info_helper(hid_t type_id, dtype_info_t *type_info_out);
 
-/* Flush the file containing the provided dataset */
-static herr_t flush_containing_file(H5VL_bypass_t *file);
-
 static H5D_space_status_t
 get_dset_space_status(H5VL_bypass_t *dset_obj, hid_t dxpl_id, void **req);
 
@@ -1412,6 +1409,87 @@ done:
     return ret_value;
 }
 
+/* Get the necessary dataset information through the VOL layer */
+static herr_t
+dset_open_helper(H5VL_bypass_t *obj, hid_t dxpl_id, void **req) {
+    herr_t ret_value = 0;
+    H5VL_dataset_get_args_t get_args;
+    H5VL_optional_args_t                opt_args;
+    H5VL_native_dataset_optional_args_t dset_opt_args;
+    Bypass_dataset_t *dset = NULL;
+    haddr_t addr = 0;
+
+    assert(obj->type == H5I_DATASET);
+    dset = &obj->u.dataset;
+
+    /* Initialize values */
+    dset->dcpl_id = H5I_INVALID_HID;
+    dset->space_id = H5I_INVALID_HID;
+    dset->num_filters = 0;
+    dset->layout = H5D_LAYOUT_ERROR;
+
+    /* Retrieve dataset's DCPL, copied from H5Dget_create_plist */
+    get_args.op_type               = H5VL_DATASET_GET_DCPL;
+    get_args.args.get_dcpl.dcpl_id = H5I_INVALID_HID;
+
+    if (H5VL_bypass_dataset_get(obj, &get_args, dxpl_id, req) < 0) {
+        fprintf(stderr, "unable to get opened dataset's DCPL\n");
+        ret_value = -1;
+        goto done;
+    }
+
+    dset->dcpl_id = get_args.args.get_dcpl.dcpl_id;
+
+    /* Retrieve the dataset's datatype info */
+    if (get_dtype_info(obj, dxpl_id, req) < 0) {
+        fprintf(stderr, "unable to get dataset's datatype info\n");
+        ret_value = -1;
+        goto done;
+    }
+
+    /* Figure out the dataset's dataspace */
+    get_args.op_type                 = H5VL_DATASET_GET_SPACE;
+    get_args.args.get_space.space_id = H5I_INVALID_HID;
+
+    /* Retrieve the dataset's dataspace ID */
+    if (H5VL_bypass_dataset_get(obj, &get_args, dxpl_id, req) < 0) {
+        fprintf(stderr, "unable to get opened dataset's dataspace\n");
+        ret_value = -1;
+        goto done;
+    }
+
+    dset->space_id = get_args.args.get_space.space_id;
+
+    if ((dset->num_filters = H5Pget_nfilters(dset->dcpl_id)) < 0) {
+        fprintf(stderr, "unable to get opened dataset's number of filters\n");
+        ret_value = -1;
+        goto done;
+    }
+
+    /* Retrieve layout */
+    if ((dset->layout = H5Pget_layout(dset->dcpl_id)) < 0) {
+        fprintf(stderr, "unable to get dataset's layout\n");
+        ret_value = -1;
+        goto done;
+    }
+
+    if (dset->layout == H5D_LAYOUT_ERROR) {
+        fprintf(stderr, "dataset has an invalid layout\n");
+        ret_value = -1;
+        goto done;
+    }
+
+done:
+    if (ret_value < 0) {
+        H5E_BEGIN_TRY {
+        if (dset->dcpl_id > 0)
+            H5Pclose(dset->dcpl_id);
+        if (dset->space_id > 0)
+            H5Pclose(dset->space_id);
+        } H5E_END_TRY;
+    }
+}
+
 /*-------------------------------------------------------------------------
  * Function:    H5VL_bypass_dataset_create
  *
@@ -2487,6 +2565,7 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
     Bypass_dataset_t *bypass_dset = NULL;
     sel_info_t selection_info;
     int        i, j;
+    bool       any_thread_active = false;
     bool       read_use_native   = false;
     bool       external_link_access = false;
     H5S_sel_type mem_sel_type = H5S_SEL_ERROR;
@@ -2592,45 +2671,6 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
             external_link_access || mem_sel_type == H5S_SEL_POINTS || file_sel_type == H5S_SEL_POINTS
             || dset_space_status != H5D_SPACE_STATUS_ALLOCATED;
 
-        if (!read_use_native) {
-            /* Flush dataset and then query location in file */
-            if (get_dset_location(dset[j], plist_id, req, &selection_info.chunk_addr) < 0) {
-                fprintf(stderr, "failed to get file location of contiguous dataset\n");
-                ret_value = -1;
-                goto done;
-            }
-
-            pthread_mutex_lock(&mutex_local);
-
-            if (flush_containing_file((H5VL_bypass_t *)dset[j]) < 0) {
-                fprintf(stderr, "failed to flush dataset\n");
-                ret_value = -1;
-                goto done;
-            }
-
-            pthread_mutex_unlock(&mutex_local);
-
-            /* TBD - If a contiguous dataset has no data written to it after flush, it has
-            * no real data written - use Native VOL to handle fill value on the read. */
-            if (selection_info.chunk_addr == HADDR_UNDEF && bypass_dset->layout == H5D_CONTIGUOUS)
-                read_use_native = true;
-            
-        }
-
-        if (read_use_native) {
-            /* Populate the array of under objects */
-            under_vol_id = ((H5VL_bypass_t *)(dset[0]))->under_vol_id;
-
-            o_arr[j] = ((H5VL_bypass_t *)(dset[j]))->under_object;
-            assert(under_vol_id == ((H5VL_bypass_t *)(dset[j]))->under_vol_id);
-    
-                //printf("%s: %d, in bypass VOL, count = %lu\n", __func__, __LINE__, count);
-
-            ret_value = H5VLdataset_read(1, &(o_arr[j]), under_vol_id, &(mem_type_id[j]), &(mem_space_id[j]), &(file_space_id[j]), plist_id, &(buf[j]), req);
-        } else { /* Coming into Bypass VOL when no data conversion and filter */
-            //pthread_t th[nthreads_tpool];
-            //info_for_thread_t info_for_thread[nthreads_tpool]; /* Remove it and use the global variable meta_for_thread? */
-
         if (read_use_native) {
 
             /* Populate the array of under objects */
@@ -2657,6 +2697,11 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
             // the global variable meta_for_thread? */
 
             // printf("%s: %d, in bypass VOL\n", __func__, __LINE__);
+            if (get_dset_location(dset[j], plist_id, req, &selection_info.chunk_addr) < 0) {
+                fprintf(stderr, "failed to get file location of contiguous dataset\n");
+                ret_value = -1;
+                goto done;
+            }
 
             /* Decide the dataspaces in memory and file */
             if (check_dspaces_helper(bypass_dset->space_id, file_space_id[j], &file_space_id_copy, mem_space_id[j],
@@ -2708,29 +2753,29 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
             }
 
     
-    	/* Signal the thread pool to finish this read. Notify the thread pool that it finished putting tasks in the queue. */
-	    pthread_mutex_lock(&mutex_local);
-	    thread_task_finished = true;
-	    pthread_mutex_unlock(&mutex_local);
-	    pthread_cond_broadcast(&cond_local);  /* Why do this signal/broadcast? */
+            /* Signal the thread pool to finish this read. Notify the thread pool that it finished putting tasks in the queue. */
+            pthread_mutex_lock(&mutex_local);
+            thread_task_finished = true;
+            pthread_mutex_unlock(&mutex_local);
+            pthread_cond_broadcast(&cond_local);  /* Why do this signal/broadcast? */
 
-	    /* Save the info for the C log file */
-	    {
-            /* Enlarge the size of the info for C and Re-allocate the memory if necessary */
-            if (info_count == info_size) {
-                info_size  *= 2;
-                info_stuff = (info_t *)realloc(info_stuff, info_size * sizeof(info_t));
+            /* Save the info for the C log file */
+            {
+                /* Enlarge the size of the info for C and Re-allocate the memory if necessary */
+                if (info_count == info_size) {
+                    info_size  *= 2;
+                    info_stuff = (info_t *)realloc(info_stuff, info_size * sizeof(info_t));
+                }
+
+                /* Save the info in the structure */
+                info_stuff[info_count].end_of_read = true;
+
+                //printf("%s: %d, info_count = %d, end_of_read = %d\n", __func__, __LINE__, info_count, info_stuff[info_count].end_of_read);
+
+                /* Increment the counter */
+                info_count++;
             }
-
-            /* Save the info in the structure */
-            info_stuff[info_count].end_of_read = true;
-
-            //printf("%s: %d, info_count = %d, end_of_read = %d\n", __func__, __LINE__, info_count, info_stuff[info_count].end_of_read);
-
-            /* Increment the counter */
-            info_count++;
-	    }
-	    }
+        }
 
     }
 
@@ -4883,142 +4928,6 @@ should_dset_use_native(const Bypass_dataset_t* dset, bool *should_use_native) {
     herr_t ret_value = 0;
 
     assert(dset);
-    assert(info_out);
-
-    if ((dset_info = malloc(sizeof(dset_t))) == NULL) {
-        fprintf(stderr, "can't allocate space for dataset info\n");
-        ret_value = -1;
-        goto done;
-    }
-    /* Initialize values */
-    dset_info->dcpl_id = H5I_INVALID_HID;
-    dset_info->dtype_id = H5I_INVALID_HID;
-    dset_info->space_id = H5I_INVALID_HID;
-    dset_info->num_filters = 0;
-    dset_info->dtype_class = H5T_NO_CLASS;
-    dset_info->layout = H5D_LAYOUT_ERROR;
-    dset_info->location = HADDR_UNDEF;
-    memset(dset_info->file_name, 0, 1024);
-
-    /* Retrieve dataset's DCPL */
-    get_args.op_type = H5VL_DATASET_GET_DCPL;
-    get_args.args.get_dcpl.dcpl_id = H5I_INVALID_HID;
-
-    if (H5VL_bypass_dataset_get(dset, &get_args, dxpl_id, req) < 0) {
-        fprintf(stderr, "couldn't get dataset dcpl\n");
-        ret_value = -1;
-        goto done;
-    }
-
-    if (get_args.args.get_dcpl.dcpl_id < 0) {
-        fprintf(stderr, "retrieved invalid dcpl id\n");
-        ret_value = -1;
-        goto done;
-    }
-
-    dset_info->dcpl_id = get_args.args.get_dcpl.dcpl_id;
-
-    /* Retrieve layout */
-    if ((dset_info->layout = H5Pget_layout(dset_info->dcpl_id)) < 0) {
-        fprintf(stderr, "unable to get dataset's layout\n");
-        ret_value = -1;
-        goto done;
-    }
-
-    /* Retrieve the dataset's datatype */
-    get_args.op_type = H5VL_DATASET_GET_TYPE;
-    get_args.args.get_type.type_id = H5I_INVALID_HID;
-
-    if (H5VL_bypass_dataset_get(dset, &get_args, dxpl_id, req) < 0) {
-        fprintf(stderr, "unable to get dataset's datatype\n");
-        ret_value = -1;
-        goto done;
-    }
-
-    if (get_args.args.get_type.type_id < 0) {
-        fprintf(stderr, "retrieved invalid type id\n");
-        ret_value = -1;
-        goto done;
-    }
-
-    dset_info->dtype_id = get_args.args.get_type.type_id;
-
-    /* Retrieve the dataset's dataspace */
-    get_args.op_type = H5VL_DATASET_GET_SPACE;
-    get_args.args.get_space.space_id = H5I_INVALID_HID;
-
-    if (H5VL_bypass_dataset_get(dset, &get_args, dxpl_id, req) < 0) {
-        fprintf(stderr, "unable to get dataset's dataspace\n");
-        ret_value = -1;
-        goto done;
-    }
-
-    if (get_args.args.get_space.space_id < 0) {
-        fprintf(stderr, "retrieved invalid space id\n");
-        ret_value = -1;
-        goto done;
-    }
-
-    dset_info->space_id = get_args.args.get_space.space_id;
-
-    /* Retrieve the dataset's location */
-    dset_opt_args.get_offset.offset = &(dset_info->location);
-    opt_args.op_type = H5VL_NATIVE_DATASET_GET_OFFSET;
-    opt_args.args = &dset_opt_args;
-
-    if (H5VL_bypass_dataset_optional(dset, &opt_args, dxpl_id, req) < 0) {
-        fprintf(stderr, "unable to get dataset's location\n");
-        ret_value = -1;
-        goto done;
-    }
-
-    /* For chunked datasets, this field is unused and will return an invalid value when queried */
-    // TBD - This seems unavoidable for empty datasets. Instead of failing, use
-    // this as a critria for using the Native VOL 
-    /*
-    if (dset_info->location == HADDR_UNDEF && dset_info->layout == H5D_CONTIGUOUS) {
-        fprintf(stderr, "retrieved invalid dataset address\n");
-        ret_value = -1;
-        goto done;
-    }
-    */
-
-    /* Retrieve the dataset's datatype class */
-    if ((dset_info->dtype_class = H5Tget_class(dset_info->dtype_id)) < 0) {
-        fprintf(stderr, "unable to get dataset's datatype class\n");
-        ret_value = -1;
-        goto done;
-    }
-
-    /* Retrieve the dataset's number of filters */
-    if ((dset_info->num_filters = H5Pget_nfilters(dset_info->dcpl_id)) < 0) {
-        fprintf(stderr, "unable to get dataset's number of filters\n");
-        ret_value = -1;
-        goto done;
-    }
-
-    /* Retrieve parent file name */
-    if (get_filename_helper(dset, dset_info->file_name, H5I_DATASET, req) < 0) {
-        fprintf(stderr, "unable to get dataset's parent file name\n");
-        ret_value = -1;
-        goto done;
-    }
-
-done:
-    if (ret_value < 0 && dset_info) {
-        remove_dset_info_helper(dset_info);
-    } else {
-        *info_out = dset_info;
-    }
-
-    return ret_value;
-}
-
-static herr_t
-should_use_native(const dset_t *dset_info, bool *should_use_native) {
-    herr_t ret_value = 0;
-
-    assert(dset_info);
     assert(should_use_native);
 
     if (dset->num_filters > 0) {
@@ -5043,26 +4952,6 @@ should_use_native(const dset_t *dset_info, bool *should_use_native) {
 
     // TBD: Link type?
     *should_use_native = false;
-
-done:
-    return ret_value;
-}
-
-/* Flush the file containing the provided dataset */
-static herr_t
-flush_containing_file(H5VL_bypass_t *dset) {
-    herr_t ret_value = 0;
-    H5VL_file_specific_args_t args;
-
-    args.op_type = H5VL_FILE_FLUSH;
-    args.args.flush.obj_type = H5I_DATASET;
-    args.args.flush.scope = H5F_SCOPE_LOCAL;
-
-    if ((H5VLfile_specific((void*) dset->under_object, dset->under_vol_id, &args, H5P_DEFAULT, NULL) < 0)) {
-        fprintf(stderr, "unable to flush file\n");
-        ret_value = -1;
-        goto done;
-    }
 
 done:
     return ret_value;
@@ -5104,87 +4993,6 @@ done:
     }
 
     return ret_value;
-}
-
-/* Get the necessary dataset information through the VOL layer */
-static herr_t
-dset_open_helper(H5VL_bypass_t *obj, hid_t dxpl_id, void **req) {
-    herr_t ret_value = 0;
-    H5VL_dataset_get_args_t get_args;
-    H5VL_optional_args_t                opt_args;
-    H5VL_native_dataset_optional_args_t dset_opt_args;
-    Bypass_dataset_t *dset = NULL;
-    haddr_t addr = 0;
-
-    assert(obj->type == H5I_DATASET);
-    dset = &obj->u.dataset;
-
-    /* Initialize values */
-    dset->dcpl_id = H5I_INVALID_HID;
-    dset->space_id = H5I_INVALID_HID;
-    dset->num_filters = 0;
-    dset->layout = H5D_LAYOUT_ERROR;
-
-    /* Retrieve dataset's DCPL, copied from H5Dget_create_plist */
-    get_args.op_type               = H5VL_DATASET_GET_DCPL;
-    get_args.args.get_dcpl.dcpl_id = H5I_INVALID_HID;
-
-    if (H5VL_bypass_dataset_get(obj, &get_args, dxpl_id, req) < 0) {
-        fprintf(stderr, "unable to get opened dataset's DCPL\n");
-        ret_value = -1;
-        goto done;
-    }
-
-    dset->dcpl_id = get_args.args.get_dcpl.dcpl_id;
-
-    /* Retrieve the dataset's datatype info */
-    if (get_dtype_info(obj, dxpl_id, req) < 0) {
-        fprintf(stderr, "unable to get dataset's datatype info\n");
-        ret_value = -1;
-        goto done;
-    }
-
-    /* Figure out the dataset's dataspace */
-    get_args.op_type                 = H5VL_DATASET_GET_SPACE;
-    get_args.args.get_space.space_id = H5I_INVALID_HID;
-
-    /* Retrieve the dataset's dataspace ID */
-    if (H5VL_bypass_dataset_get(obj, &get_args, dxpl_id, req) < 0) {
-        fprintf(stderr, "unable to get opened dataset's dataspace\n");
-        ret_value = -1;
-        goto done;
-    }
-
-    dset->space_id = get_args.args.get_space.space_id;
-
-    if ((dset->num_filters = H5Pget_nfilters(dset->dcpl_id)) < 0) {
-        fprintf(stderr, "unable to get opened dataset's number of filters\n");
-        ret_value = -1;
-        goto done;
-    }
-
-    /* Retrieve layout */
-    if ((dset->layout = H5Pget_layout(dset->dcpl_id)) < 0) {
-        fprintf(stderr, "unable to get dataset's layout\n");
-        ret_value = -1;
-        goto done;
-    }
-
-    if (dset->layout == H5D_LAYOUT_ERROR) {
-        fprintf(stderr, "dataset has an invalid layout\n");
-        ret_value = -1;
-        goto done;
-    }
-
-done:
-    if (ret_value < 0) {
-        H5E_BEGIN_TRY {
-        if (dset->dcpl_id > 0)
-            H5Pclose(dset->dcpl_id);
-        if (dset->space_id > 0)
-            H5Pclose(dset->space_id);
-        } H5E_END_TRY;
-    }
 }
 
 static herr_t

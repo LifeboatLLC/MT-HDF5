@@ -69,26 +69,6 @@ static file_t *file_stuff;
 static int file_stuff_count = 0;
 static int file_stuff_size = FILE_STUFF_SIZE;
 
-<<<<<<< HEAD
-/* Dataset info */
-typedef struct {
-<<<<<<< HEAD
-    char dset_name[BYPASS_NAME_SIZE_LONG];
-    char file_name[BYPASS_NAME_SIZE_LONG];
-=======
-    char file_name[1024];
->>>>>>> c9d2673 (Fix multiple opens of same dataset not being recognized)
-    H5D_layout_t layout;
-    hid_t dcpl_id;
-    hid_t dtype_id;
-    hid_t space_id;
-    haddr_t location;
-    int num_filters;
-    H5T_class_t dtype_class;
-} dset_t;
-
-=======
->>>>>>> 1d0fb1c (Rework dataset/datatype handling)
 /* Log info to be written out for the C program */
 typedef struct {
     char    file_name[64];        /* file name to be read or written */
