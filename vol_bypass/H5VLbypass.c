@@ -2565,6 +2565,7 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
     Bypass_dataset_t *bypass_dset = NULL;
     sel_info_t selection_info;
     int        i, j;
+    int        num_ext_files     = 0;
     bool       any_thread_active = false;
     bool       read_use_native   = false;
     bool       external_link_access = false;
@@ -2628,11 +2629,17 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
             }
         }
 
-        /* If the dataset's file is not in table, it must be have been accessed through
-         * an external link */
-        if (selection_info.my_file_index < 0)
+        if ((num_ext_files = H5Pget_external_count(bypass_dset->dcpl_id)) < 0) {
+            fprintf(stderr, "failed to get external file count\n");
+            ret_value = -1;
+            goto done;
+        }
+
+        /* If the dataset's file is not in table, it was accessed through an external link. */
+        if (selection_info.my_file_index < 0 || num_ext_files > 0)
             external_link_access = true;
     
+
         /* Check selection type */
         if (mem_space_id[j] == H5S_ALL) {
             mem_sel_type = H5S_SEL_ALL;
