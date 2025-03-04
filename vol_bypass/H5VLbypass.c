@@ -1356,10 +1356,8 @@ dset_open_helper(void *obj, const char *name, H5VL_bypass_t *dset, hid_t dxpl_id
     herr_t                              ret_value = 0;
     H5VL_dataset_get_args_t             get_args;
     hid_t                               dcpl_id = H5I_INVALID_HID;
-    haddr_t                             addr;
-    H5VL_optional_args_t                opt_args;
-    H5VL_native_dataset_optional_args_t dset_opt_args;
     int                                 num_filters = 0;
+    int                                 num_ext_files = 0;
     H5T_class_t                         dtype_class;
     // H5L_type_t    link_type;
     char file_name[1024];
@@ -1383,7 +1381,6 @@ dset_open_helper(void *obj, const char *name, H5VL_bypass_t *dset, hid_t dxpl_id
     dset_stuff[dset_count].dcpl_id = H5I_INVALID_HID;
     dset_stuff[dset_count].dtype_id = H5I_INVALID_HID;
     dset_stuff[dset_count].space_id = H5I_INVALID_HID;
-    dset_stuff[dset_count].location = HADDR_UNDEF;
     dset_stuff[dset_count].use_native = false;
 
     // ref count?? Where is ref count init
@@ -1438,29 +1435,6 @@ dset_open_helper(void *obj, const char *name, H5VL_bypass_t *dset, hid_t dxpl_id
 
     dset_stuff[dset_count].space_id = get_args.args.get_space.space_id;
 
-    /* Figure out the dataset's location in the file */
-    dset_opt_args.get_offset.offset = &addr;
-    opt_args.op_type                = H5VL_NATIVE_DATASET_GET_OFFSET;
-    opt_args.args                   = &dset_opt_args;
-
-    if (H5VL_bypass_dataset_optional(dset, &opt_args, dxpl_id, req) < 0) {
-        fprintf(stderr, "unable to get dataset's location in file\n");
-        ret_value = -1;
-        goto done;
-    }
-
-    /*
-     * TBD - Right now, this would cause every dataset create to fail,
-     * and every attempt to open an empty dset to fail.
-    if (addr == HADDR_UNDEF) {
-        fprintf(stderr, "dataset's location in file is invalid\n");
-        ret_value = -1;
-        goto done;
-    }
-    */
-
-    dset_stuff[dset_count].location = addr;
-
     /* The HDF5 library adds a '/' in front of the dataset name (full pathname).
      * Make sure the dataset name has it. */
     if (name) {
@@ -1506,18 +1480,22 @@ dset_open_helper(void *obj, const char *name, H5VL_bypass_t *dset, hid_t dxpl_id
         goto done;
     }
 
+    if ((num_ext_files = H5Pget_external_count(dset_stuff[dset_count].dcpl_id)) < 0) {
+        printf("In %s of %s at line %d: H5Pget_external_count failed\n", __func__, __FILE__, __LINE__);
+        ret_value = -1;
+        goto done;
+    }
+
     if ((dtype_class = H5Tget_class(dset_stuff[dset_count].dtype_id)) < 0) {
         fprintf(stderr, "unable to get the datatype class\n");
         ret_value = -1;
         goto done;
     }
 
-    // if (num_filters > 0 || H5D_VIRTUAL == dset_stuff[dset_count].layout ||
-    // H5L_TYPE_EXTERNAL == link_type
-    // ||
-    if (num_filters > 0 || H5D_VIRTUAL == dset_stuff[dset_count].layout || H5T_TIME == dtype_class ||
-        H5T_OPAQUE == dtype_class || H5T_COMPOUND == dtype_class || H5T_REFERENCE == dtype_class ||
-        H5T_VLEN == dtype_class || H5T_ARRAY == dtype_class)
+    if (num_filters > 0 || num_ext_files > 0 ||
+        H5D_VIRTUAL == dset_stuff[dset_count].layout || H5D_COMPACT == dset_stuff[dset_count].layout ||
+        H5T_TIME == dtype_class || H5T_OPAQUE == dtype_class || H5T_COMPOUND == dtype_class ||
+        H5T_REFERENCE == dtype_class || H5T_VLEN == dtype_class || H5T_ARRAY == dtype_class)
         dset_stuff[dset_count].use_native = true;
 
 done:
@@ -2598,6 +2576,9 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
     char       file_name[1024];
     char       dset_name[1024];
     sel_info_t selection_info;
+    H5S_sel_type file_select_type = -1;
+    H5VL_optional_args_t                opt_args;
+    H5VL_native_dataset_optional_args_t dset_opt_args;
     int        i, j;
     bool       any_thread_active = false;
     bool       read_use_native   = false;
@@ -2622,12 +2603,26 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
                 strcpy(file_name, dset_stuff[i].file_name);
                 dcpl_id       = dset_stuff[i].dcpl_id;
                 dset_layout   = dset_stuff[i].layout;
-                dset_loc      = dset_stuff[i].location;
+                //dset_loc      = dset_stuff[i].location;
                 dset_dtype_id = dset_stuff[i].dtype_id;
                 dset_space_id = dset_stuff[i].space_id;
                 dset_use_native    = dset_stuff[i].use_native;
                 dset_found    = true;
             }
+        }
+
+        /* Figure out the dataset's location in the file.  The data location may not be available during dataset creation.
+         * Wait until now to get the location.
+         */
+        dset_opt_args.get_offset.offset = &dset_loc;
+        opt_args.op_type                = H5VL_NATIVE_DATASET_GET_OFFSET;
+        opt_args.args                   = &dset_opt_args;
+
+        if (H5VL_bypass_dataset_optional(dset[j], &opt_args, plist_id, req) < 0) {
+            puts("unable to get dataset's location in file");
+            printf("In %s of %s at line %d: can't get dataset's location in file\n", __func__, __FILE__, __LINE__);
+            ret_value = -1;
+            goto done;
         }
 
         // printf("\n%s: %d, count=%lu, dset_name = %s, file_name = %s, dtype_id =
@@ -2636,9 +2631,26 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
         // dset_dtype_id, H5T_STD_REF_DSETREG, H5T_NATIVE_INT, dcpl_id,
         // H5I_INVALID_HID);
 
-        /* Let the native function handle datatype conversion.  Also check the flag for filters, virtual
-         * dataset and reference datatype */
-        read_use_native = dset_use_native || !dset_found || !H5Tequal(dset_dtype_id, mem_type_id[j]);
+        /* Bypass VOL can only handle hyperslab selection.  If the data selection in file is element,
+         * let the native lib handle the read */
+        if (H5S_ALL != file_space_id[j] && H5S_BLOCK != file_space_id[j] && H5S_PLIST != file_space_id[j]) {
+            if ((file_select_type = H5Sget_select_type(file_space_id[j])) < 0) {
+                printf("In %s of %s at line %d: can't get data selection type in file\n", __func__, __FILE__, __LINE__);
+                ret_value = -1;
+                goto done;
+            }
+        }
+
+        /* Let the native lib handle datatype conversion.  Also check the flag USE_NATIVE for filters,
+         * virtual dataset and reference datatype.  Bypass VOL can only handle hyperslab selection.
+         * If the data selection in file is element or if the data space H5S_BLOCK, let the native lib handle the read.
+         * Bypass VOL can handle H5S_ALL, H5S_NONE, or H5S_SEL_HYPERSLAB. TODO: checking H5S_PLIST returns true
+         * for some unknown reason.
+         */
+        if (dset_use_native || !dset_found || !H5Tequal(dset_dtype_id, mem_type_id[j]) || H5S_SEL_POINTS == file_select_type ||
+            H5S_BLOCK == file_space_id[j] || H5S_PLIST == file_space_id[j] ||
+            H5S_BLOCK == mem_space_id[j] || H5S_PLIST == mem_space_id[j])
+            read_use_native = true;
 
         if (read_use_native) {
 
@@ -3316,10 +3328,10 @@ static void *
 H5VL_bypass_file_create(const char *name, unsigned flags, hid_t fcpl_id, hid_t fapl_id, hid_t dxpl_id,
                         void **req)
 {
-    H5VL_bypass_info_t *info;
-    H5VL_bypass_t      *file;
-    hid_t               under_fapl_id;
-    void               *under;
+    H5VL_bypass_info_t *info = NULL;
+    H5VL_bypass_t      *file = NULL;
+    hid_t               under_fapl_id = H5I_INVALID_HID;
+    void               *under = NULL;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL FILE Create\n");
