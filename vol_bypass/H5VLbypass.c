@@ -2006,14 +2006,8 @@ start_thread_for_pool(void *args)
 
             file_stuff[file_indices_local[i]].num_reads--;
 
-            /* If the active read count for this file has dropped to zero,
-             * allow any concurrent requests to close that file to proceed */
-            if (file_stuff[file_indices_local[i]].num_reads == 0) {
-                // fprintf(stderr, "thread %d: file name = %s, signal close_ready\n", thread_id,
-                // file_stuff[file_indices_local[i]].name);
-                /* There are currently no reads active on this file - it may be closed */
-                pthread_cond_signal(&(file_stuff[file_indices_local[i]].close_ready));
-            }
+            /* Signal any threads waiting to close the file to check num_reads */
+            pthread_cond_signal(&(file_stuff[file_indices_local[i]].close_ready));
 
             if (pthread_mutex_unlock(&mutex_local) != 0) {
                 fprintf(stderr, "failed to unlock mutex\n");
@@ -3337,21 +3331,6 @@ c_file_open_helper(const char *name)
         goto done;
     }
 
-    /* Increment the reference count for this file */
-    file_stuff[file_stuff_count].ref_count++;
-
-    strcpy(file_stuff[file_stuff_count].name, name);
-
-    file_stuff[file_stuff_count].num_reads    = 0;
-    pthread_cond_init(&(file_stuff[file_stuff_count].close_ready),
-                      NULL); /* Initialize the condition variable for file closing */
-    /*printf("%s: name = %s, file_stuff_count = %d, file_stuff[%d].name = %s, file_stuff[%d].fp = %d\n",
-     * __func__, name, file_stuff_count, file_stuff_count, file_stuff[file_stuff_count].name,
-     * file_stuff_count, file_stuff[file_stuff_count].fp);*/
-
-    /* Increment the number of files being opened with C */
-    file_stuff_count++;
-
 done:
     if (ret_value == 0) {
         /* Success */
@@ -3361,7 +3340,6 @@ done:
         strcpy(file_stuff[file_stuff_count].name, name);
 
         file_stuff[file_stuff_count].num_reads    = 0;
-        file_stuff[file_stuff_count].read_started = false;
         pthread_cond_init(&(file_stuff[file_stuff_count].close_ready),
                         NULL); /* Initialize the condition variable for file closing */
         /*printf("%s: name = %s, file_stuff_count = %d, file_stuff[%d].name = %s, file_stuff[%d].fp = %d\n",
@@ -3591,6 +3569,8 @@ H5VL_bypass_file_open(const char *name, unsigned flags, hid_t fapl_id, hid_t dxp
 
     /* If the file has already been opened, only increment the reference count of
      * this file and finish */
+    pthread_mutex_lock(&mutex_local);
+
     for (i = 0; i < file_stuff_count; i++) {
         if (!strcmp(file_stuff[i].name, name) && file_stuff[i].fd) {
             file_stuff[i].ref_count++;
@@ -3598,6 +3578,8 @@ H5VL_bypass_file_open(const char *name, unsigned flags, hid_t fapl_id, hid_t dxp
             goto done;
         }
     }
+
+    pthread_mutex_unlock(&mutex_local);
 
     /* Open the C file and set the fields for the file_t structure */
     if (c_file_open_helper(name) < 0) {
@@ -3822,6 +3804,8 @@ remove_file_info_helper(unsigned index)
 {
     unsigned i;
 
+    pthread_mutex_lock(&mutex_local);
+
     /* Remove the entry by shifting leftward all elements after this entry.
      * But don't do anything if this entry is the only one or is the last one in
      * the array except decrement the number of entries.
@@ -3841,17 +3825,17 @@ remove_file_info_helper(unsigned index)
         file_stuff[file_stuff_count - 1].fd = -1;
         file_stuff[file_stuff_count - 1].ref_count = 0;
         file_stuff[file_stuff_count - 1].num_reads = 0;
-        file_stuff[file_stuff_count - 1].read_started = 0;
     } else {
         /* Just zero out the entry itself */
         memset(file_stuff[index].name, 0, 1024);
         file_stuff[index].fd = -1;
         file_stuff[index].ref_count = 0;
         file_stuff[index].num_reads = 0;
-        file_stuff[index].read_started = 0;
     }
 
     file_stuff_count--;
+
+    pthread_mutex_unlock(&mutex_local);
 }
 
 /*-------------------------------------------------------------------------
