@@ -1485,7 +1485,7 @@ done:
         if (dset->dcpl_id > 0)
             H5Pclose(dset->dcpl_id);
         if (dset->space_id > 0)
-            H5Pclose(dset->space_id);
+            H5Sclose(dset->space_id);
         } H5E_END_TRY;
     }
 }
@@ -4973,7 +4973,7 @@ release_dset_info(Bypass_dataset_t *dset) {
 
     assert(dset);
 
-    if (dset->dcpl_id > 0 && H5Idec_ref(dset->dcpl_id) < 0) {
+    if (dset->dcpl_id > 0 && H5Pclose(dset->dcpl_id) < 0) {
         fprintf(stderr, "unable to decrement ref count of DCPL\n");
         ret_value = -1;
         goto done;
@@ -4981,7 +4981,7 @@ release_dset_info(Bypass_dataset_t *dset) {
 
     dset->dcpl_id = H5I_INVALID_HID;
 
-    if (dset->space_id > 0 && H5Idec_ref(dset->space_id) < 0) {
+    if (dset->space_id > 0 && H5Sclose(dset->space_id) < 0) {
         fprintf(stderr, "unable to decrement ref count of dataspace\n");
         ret_value = -1;
         goto done;
@@ -4996,9 +4996,9 @@ done:
     if (ret_value < 0) {
         H5E_BEGIN_TRY {
             if (dset->dcpl_id > 0)
-                H5Idec_ref(dset->dcpl_id);
+                H5Pclose(dset->dcpl_id);
             if (dset->space_id > 0)
-                H5Idec_ref(dset->space_id);
+                H5Sclose(dset->space_id);
         } H5E_END_TRY;
     }
 
