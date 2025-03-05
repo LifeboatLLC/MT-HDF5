@@ -3512,6 +3512,8 @@ H5VL_bypass_file_open(const char *name, unsigned flags, hid_t fapl_id, hid_t dxp
 
     /* If the file has already been opened, only increment the reference count of
      * this file and finish */
+    pthread_mutex_lock(&mutex_local);
+
     for (i = 0; i < file_stuff_count; i++) {
         if (!strcmp(file_stuff[i].name, name) && file_stuff[i].fd) {
             file_stuff[i].ref_count++;
@@ -3519,6 +3521,8 @@ H5VL_bypass_file_open(const char *name, unsigned flags, hid_t fapl_id, hid_t dxp
             goto done;
         }
     }
+
+    pthread_mutex_unlock(&mutex_local);
 
     /* Open the C file and set the fields for the file_t structure */
     c_file_open_helper(name);
@@ -3715,6 +3719,8 @@ remove_file_info_helper(unsigned index)
 {
     unsigned i;
 
+    pthread_mutex_lock(&mutex_local);
+
     /* Remove the entry by shifting leftward all elements after this entry.
      * But don't do anything if this entry is the only one or is the last one in
      * the array except decrement the number of entries.
@@ -3731,6 +3737,8 @@ remove_file_info_helper(unsigned index)
     }
 
     file_stuff_count--;
+
+    pthread_mutex_unlock(&mutex_local);
 }
 
 /*-------------------------------------------------------------------------
