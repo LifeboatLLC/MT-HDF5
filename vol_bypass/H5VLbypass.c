@@ -279,8 +279,11 @@ get_dset_space_status(H5VL_bypass_t *dset_obj, hid_t dxpl_id, void **req);
 
 static herr_t bypass_queue_destroy(void);
 static herr_t bypass_queue_push(Bypass_task_t *task);
+/* Retrieve a task from the global queue. Task must be released by caller.*/
 static Bypass_task_t *bypass_queue_pop(void);
 static Bypass_task_t * bypass_task_create(int file_index, haddr_t addr, size_t io_len, void *buf);
+static herr_t bypass_task_release(Bypass_task_t *task);
+
 /*******************/
 /* Local variables */
 /*******************/
@@ -1907,7 +1910,7 @@ start_thread_for_pool(void *args)
 
     // fprintf(stderr, "In start_thread_for_pool: %d\n", thread_id);
 
-    if ((tasks = (Bypass_task_t **)malloc(nsteps_tpool * sizeof(Bypass_task_t*))) == NULL) {
+    if ((tasks = (Bypass_task_t **)calloc(nsteps_tpool, sizeof(Bypass_task_t*))) == NULL) {
         fprintf(stderr, "failed to allocate vector buffers\n");
         ret_value = (void*) -1;
         goto done;
@@ -1978,7 +1981,7 @@ start_thread_for_pool(void *args)
             if (read_big_data(file_stuff[tasks[i]->file_index].fd, tasks[i]->vec_buf, tasks[i]->size,
                           tasks[i]->addr) < 0)
             {
-                fprintf(stderr, "read_big_data failed within file %s\n", file_stuff[file_indices_local[i]].name);
+                fprintf(stderr, "read_big_data failed within file %s\n", file_stuff[tasks[i]->file_index].name);
                 /* Return a failure code, but try to complete the rest of the read request.
                  * This is important to properly decrement the reference count/num_reads on the local file object */
                 ret_value = (void *)-1;
@@ -2008,6 +2011,14 @@ start_thread_for_pool(void *args)
                 ret_value = (void*) -1;
                 goto done;
             }
+
+            if (bypass_task_release(tasks[i]) < 0) {
+                fprintf(stderr, "failed to release task\n");
+                ret_value = (void*) -1;
+                goto done;
+            }
+
+            tasks[i] = NULL;
         }
 
         /* If all tasks have been taken on by other threads and this thread's work is complete,
@@ -2048,8 +2059,15 @@ start_thread_for_pool(void *args)
     }
 
 done:
-    if (ret_value == (void*) -1) {
+    /* Attempt to clean up queue memory that we took ownership of */
+    if (ret_value < 0) {
         fprintf(stderr, "thread idx %d in pool failed\n", thread_id);
+        for (i = 0; i < local_count; i++) {
+            if (tasks[i] != NULL) {
+                bypass_task_release(tasks[i]);
+                tasks[i] = NULL;
+            }
+        }
     }
 
     pthread_mutex_lock(&mutex_local);
@@ -5177,6 +5195,8 @@ done:
     return ret_value;
 }
 
+/* Retrieve a task from the global queue.
+ * Task must be released by caller.*/
 static Bypass_task_t *
 bypass_queue_pop(void) {
     Bypass_task_t *ret_value = NULL;
@@ -5238,6 +5258,15 @@ bypass_task_create(int file_index, haddr_t addr, size_t size, void *buf) {
 
     /* Will be populated after this task is inserted into queue */
     ret_value->next = NULL;
+done:
+    return ret_value;
+}
+
+static herr_t
+bypass_task_release(Bypass_task_t *task) {
+    herr_t ret_value = 0;
+
+    free(task);
 done:
     return ret_value;
 }
