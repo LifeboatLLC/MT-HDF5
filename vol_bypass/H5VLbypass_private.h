@@ -54,21 +54,6 @@ bool all_tasks_enqueued = false;                   /* Flag for H5Dread to notify
 bool stop_tpool           = false;                   /* Flag to tell the thread pool to terminate, turned on in H5VL_bypass_term */
 pthread_t th[NTHREADS_MAX];
 
-/* File info */
-typedef struct {
-    char name[1024];
-    int  fd;                /* C file descriptor  */ 
-    /* void *vfd_file_handle;  Currently not used */
-    unsigned ref_count;     /* Reference count    */
-    int  num_reads;         /* Number of reads still left undone */
-    bool read_started;      /* Flag to indicate reads have started */
-    pthread_cond_t close_ready;    /* Condition variable to indicate all reads are finished and the file can be close */ 
-} file_t;
-
-static file_t *file_stuff;
-static int file_stuff_count = 0;
-static int file_stuff_size = FILE_STUFF_SIZE;
-
 /* Log info to be written out for the C program */
 typedef struct {
     char    file_name[64];        /* file name to be read or written */
@@ -82,44 +67,87 @@ typedef struct {
 } info_t;
 
 typedef struct {
-    size_t  counter;
-
-    char    file_name[BYPASS_NAME_SIZE_LONG];
-    char    dset_name[BYPASS_NAME_SIZE_LONG];
-
-    int     my_file_index;        /* The index of the FILE_T structure for this file */ 
-    hid_t   file_space_id;
-    hid_t   mem_space_id;
-    haddr_t chunk_addr;
-
-    int     dtype_size;
-
-    bool    memory_allocated;
-} sel_info_t;
-
-typedef struct {
     int      thread_id;
     int      fd;
 } info_for_thread_t;
+
+typedef struct dtype_info_t {
+    H5T_class_t class;
+    size_t size;
+    H5T_sign_t sign; /* Signed vs. unsigned */
+    H5T_order_t order; /* Bit order */
+} dtype_info_t;
+
+typedef struct Bypass_file_t {
+    char name[BYPASS_NAME_SIZE_LONG];
+    int  fd;                /* C file descriptor  */
+    /* void *vfd_file_handle;  Currently not used */
+    unsigned ref_count;     /* Reference count    */
+    int  num_reads;         /* Number of reads still left undone */
+    bool read_started;      /* Flag to indicate reads have started */
+    pthread_cond_t close_ready;    /* Condition variable to indicate all reads are finished and the file can be close */
+} Bypass_file_t;
+
+/* Forward declaration of the bypass VOL connector's object */
+struct H5VL_bypass_t;
+
+typedef struct Bypass_dataset_t {
+    hid_t dcpl_id;
+    hid_t space_id;
+    H5D_layout_t layout;
+    int num_filters;
+    dtype_info_t dtype_info;
+    struct H5VL_bypass_t *file;  /* Use the forward-declared type */
+} Bypass_dataset_t;
+
+/* The bypass VOL connector's object */
+typedef struct H5VL_bypass_t {
+    hid_t under_vol_id; /* ID for underlying VOL connector */
+    void *under_object; /* Underlying VOL connector's object */
+    H5I_type_t type; /* Type of this object. */
+    char file_name[1024]; // TODO: Move to file object. Any obj within a file will have a file ptr.
+
+    union {
+        /* Only dataset objects are needed for now */
+        Bypass_dataset_t dataset;
+        Bypass_file_t file;
+    } u;
+} H5VL_bypass_t;
 
 typedef struct {
     int      thread_id;
     int      fd;            /* Remove this field and use file_indices */
     uint32_t step;
-    int      *file_indices;
     haddr_t  *addrs;
     size_t   *sizes;
     void     **vec_bufs;
+    H5VL_bypass_t **files;
 
-    int        file_indices_local[LOCAL_VECTOR_LEN];
     haddr_t    addrs_local[LOCAL_VECTOR_LEN];
     size_t     sizes_local[LOCAL_VECTOR_LEN];
     void       *vec_bufs_local[LOCAL_VECTOR_LEN];
+    H5VL_bypass_t *files_local[LOCAL_VECTOR_LEN];
 
     size_t     vec_arr_nalloc;
     size_t     vec_arr_nused;
     bool       free_memory;
 } info_for_tpool_t;
+
+typedef struct {
+    size_t  counter;
+
+    char    file_name[64];
+    char    dset_name[64];
+
+    hid_t   file_space_id;
+    hid_t   mem_space_id;
+    haddr_t chunk_addr;
+
+    H5VL_bypass_t *file; // TODO: Replace this and names above with dset ptr
+    int     dtype_size;
+
+    bool    memory_allocated;
+} sel_info_t;
 
 static info_t *info_stuff;
 static int info_count = 0;
