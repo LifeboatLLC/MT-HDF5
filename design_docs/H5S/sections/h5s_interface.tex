@@ -1,0 +1,90 @@
+\documentclass[../HDF5_RFC.tex]{subfiles}
+ 
+\begin{document}
+
+\section{The H5S interface}
+\label{h5s_interface}
+
+HDF5's H5S interface contains functions for manipulating HDF5 dataspace objects.
+These objects consist of two main components, the extent, or dimensionality, of
+the dataspace object and a selection on the data elements of the dataspace within
+that extent.
+
+\subsection{Dataspace object extents}
+
+There are currently three different types of extents that a dataspace object may
+have: 'scalar', 'simple' and 'null'.
+
+\subsubsection{'Scalar' extent}
+
+A dataspace with a scalar extent is comprised of a single data element and is
+considered to be dimensionless.
+
+\subsubsection{'Simple' extent}
+
+A dataspace with a simple extent is comprised of up to 32 orthogonal, evenly spaced
+dimensions of data elements, with each dimension currently being able to contain up
+to a \texttt{hsize\_t} (currently defined as \texttt{uint64\_t}) number of data
+elements. Each dimension must be specified with an initial number of data elements
+and a maximum number of data elements, which could be greater than or equal to
+the initial number of elements, or \texttt{H5S\_UNLIMITED} to allow for the possibility
+of that dimension growing larger than its initial size.
+
+\subsubsection{'Null' extent}
+
+A dataspace with a null extent contains no data elements and is considered to be
+dimensionless.
+
+\subsection{Dataspace object selections}
+
+A selection can be made on the elements in the extent of a dataspace object to specify
+which of those elements should participate in operations that the dataspace object
+is used for. There are currently four different types of selections that can be made
+on a dataspace object: 'all', 'none', 'point' and 'hyperslab'. Each type of selection
+is implemented in a separate file in HDF5's source code by using a system of callbacks
+that code in the H5S interface utilizes.
+
+\subsubsection{'All' selection}
+
+This selection type is set on a dataspace object with the \nameref{apdx:h5s_func_h5sselect_all}
+function and signifies that all elements in the dataspace object's extent are selected
+for operations involving dataspaces. This is the default selection within a newly-created
+dataspace object.
+
+\subsubsection{'None' selection}
+
+This selection type is set on a dataspace object with the \nameref{apdx:h5s_func_h5sselect_none}
+function and signifies that none of the elements in the dataspace object's extent are
+selected for operations involving dataspaces.
+
+\subsubsection{'Hyperslab' selection}
+
+This selection type is set on a dataspace object with the \nameref{apdx:h5s_func_h5sselect_hyperslab}
+function and allows selecting of a region of elements in the dataspace according to
+four array parameters: \texttt{start}, \texttt{stride}, \texttt{count} and \texttt{block}.
+Each of these arrays must have the same size (in terms of array elements) as the
+dimensionality of the dataspace object.
+
+The \texttt{start} array contains the offset, in each dimension, of the region of
+elements to select.
+
+The \texttt{stride} array contains the number of elements to move, in each dimension,
+from the offset specified in \texttt{start} when selecting elements. For example, a
+\texttt{stride} value of 1 moves to the next element in that dimension, while a
+\texttt{stride} value of 2 moves to every other element in that dimension.
+
+The \texttt{count} array contains the number of blocks (specified in the \texttt{block}
+array) to select in the dataspace, in each dimension.
+
+The \texttt{block} array specifies the size of the blocks of elements being selected,
+in each dimension. For example, a block size of 1 selects blocks of single elements in
+that dimension, while a block size of 2 selects blocks of two elements in that dimension.
+
+\subsubsection{'Point' selection}
+
+This selection type is set on a dataspace object with the \nameref{apdx:h5s_func_h5sselect_elements}
+function and is used to select individual data elements in the dataspace object's extent.
+Point selections are currently implemented using a simple linked list structure (see
+\ref{apdx:h5s_struct_h5s_pnt_list_t}).
+
+\end{document}

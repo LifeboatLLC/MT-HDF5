@@ -1,0 +1,287 @@
+\documentclass[../HDF5_RFC.tex]{subfiles}
+ 
+\begin{document}
+
+% Start each appendix on a new page
+\newpage
+
+\section{Appendix: H5S interface data structures}
+\label{apdx:h5s_data_structures}
+
+The following sections give an overview of the data structures in the H5S interface
+and outline any concurrency issues that will have to be dealt with for each structure.
+
+\subsection{\texttt{H5S\_t}}
+\label{apdx:h5s_struct_h5s_t}
+
+\begin{minted}{C}
+struct H5S_t {
+    H5S_extent_t extent; /* Dataspace extent (must stay first) */
+    H5S_select_t select; /* Dataspace selection */
+};
+\end{minted}
+
+\texttt{H5S\_t} is the main structure representing a dataspace object. As the structure
+simply contains two other structures which are the focus of concurrency issues in H5S
+and which are on the larger side (80 bytes and 288 bytes, respectively), initial effort
+will explore pushing thread-safety down into those structures rather than here, unless
+another approach proves better.
+
+\subsection{\texttt{H5S\_extent\_t}}
+\label{apdx:h5s_struct_h5s_extent_t}
+
+\begin{minted}{C}
+struct H5S_extent_t {
+    H5O_shared_t sh_loc; /* Shared message info (must be first) */
+
+    H5S_class_t type;    /* Type of extent */
+    unsigned    version; /* Version of object header message to
+                            encode this object with */
+    hsize_t     nelem;   /* Number of elements in extent */
+
+    unsigned rank; /* Number of dimensions */
+    hsize_t *size; /* Current size of the dimensions */
+    hsize_t *max;  /* Maximum size of the dimensions */
+};
+\end{minted}
+
+\texttt{H5S\_extent\_t} is the data structure for the extent of a dataspace object.
+
+The \texttt{sh\_loc} field can be shared among dataspace object header messages,
+meaning that an investigation of HDF5's object header sharing mechanism is likely
+needed to understand the effect of concurrency here.
+
+The \texttt{version} field is set at dataspace object creation time and is only
+ever modified by the \texttt{H5S\_set\_version()} function, which is only called
+on copies of existing dataspaces in \texttt{H5A\_\_create()} and
+\texttt{H5D\_\_init\_space()}.
+
+All remaining fields are vulnerable to concurrency issues if the extent of a dataspace
+is modified concurrently.
+
+\subsection{\texttt{H5S\_select\_t}}
+\label{apdx:h5s_struct_h5s_select_t}
+
+\begin{minted}{C}
+typedef struct {
+    const H5S_select_class_t *type; /* Pointer to selection's class info */
+
+    hbool_t  offset_changed;       /* Indicate that the offset for the
+                                      selection has been changed */
+    hssize_t offset[H5S_MAX_RANK]; /* Offset within the extent */
+
+    hsize_t num_elem; /* Number of elements in selection */
+
+    union {
+        H5S_pnt_list_t  *pnt_lst; /* Info about list of selected points
+                                     (order is important) */
+        H5S_hyper_sel_t *hslab;   /* Info about hyperslab selection */
+    } sel_info;
+} H5S_select_t;
+\end{minted}
+
+\texttt{H5S\_select\_t} is the data structure for the selection within a dataspace
+object.
+
+The \texttt{type} field always points to one of the 'class' structures \texttt{H5S\_sel\_all},
+\texttt{H5S\_sel\_none}, \texttt{H5S\_sel\_hyper} or \texttt{H5S\_select\_class\_t}, which
+should be unchanging. However, this pointer can change at any time as the type of selection
+set within a dataspace object changes.
+
+The \texttt{offset} and \texttt{offset\_changed} fields are primarily updated by
+the \nameref{apdx:h5s_func_h5soffset_simple} function, though they are also reset to 0
+and \texttt{false}, respectively, by the internal \texttt{H5S\_set\_extent\_simple()}
+function.
+
+The \texttt{num\_elem} field is updated any time that the selection in a dataspace
+changes.
+
+The \texttt{sel\_info} field contains the selection information for a dataspace
+object which could end up being shared between dataspaces in the situations described
+in \ref{h5s_state_sharing}. This field is only valid when the selection in the dataspace
+is either a point or hyperslab selection and is updated if changing between the two,
+or if the selection in the dataspace is being released.
+
+\subsection{\texttt{H5S\_hyper\_sel\_t}}
+\label{apdx:h5s_struct_h5s_hyper_sel_t}
+
+\begin{minted}{C}
+typedef struct {
+    H5S_diminfo_valid_t diminfo_valid; /* Whether the dataset has valid
+                                          diminfo */
+
+    H5S_hyper_diminfo_t diminfo;            /* Dimension info form of
+                                               hyperslab selection */
+    int                 unlim_dim;          /* Dimension where selection
+                                               is unlimited, or -1 if none */
+    hsize_t             num_elem_non_unlim; /* # of elements in a "slice"
+                                               excluding the unlimited
+                                               dimension */
+    H5S_hyper_span_info_t *span_lst;        /* List of hyperslab span
+                                               information of all
+                                               dimensions */
+} H5S_hyper_sel_t;
+\end{minted}
+
+\texttt{H5S\_hyper\_sel\_t} is the data structure that maintains information about a
+hyperslab selection within a dataspace object. Each of the fields in this structure
+can be modified as a hyperslab selection is set on a dataspace or an existing hyperslab
+selection in the dataspace is refined.
+
+\subsection{\texttt{H5S\_hyper\_span\_info\_t}}
+\label{apdx:h5s_struct_h5s_hyper_span_info_t}
+
+\begin{minted}{C}
+struct H5S_hyper_span_info_t {
+    unsigned count; /* Ref. count of number of spans which share this span */
+
+    /* The following two fields define the bounding box of this set of spans
+     *  and all lower dimensions, relative to the offset.
+     */
+    /* (NOTE: The bounds arrays are _relative_ to the depth of the span_info
+     *          node in the span tree, so the top node in a 5-D span tree will
+     *          use indices 0-4 in the arrays to store it's bounds information,
+     *          but the next level down in the span tree will use indices 0-3.
+     *          So, each level in the span tree will have the 0th index in the
+     *          arrays correspond to the bounds in "this" dimension, even if
+     *          it's not the highest level in the span tree.
+     */
+    hsize_t *low_bounds;  /* The smallest element selected in each dimension */
+    hsize_t *high_bounds; /* The largest element selected in each dimension */
+
+    /* "Operation info" fields */
+    /* (Used during copies, 'adjust', 'nelem', and 'rebuild' operations) */
+    /* Currently the maximum number of simultaneous operations is 2 */
+    H5S_hyper_op_info_t op_info[2];
+
+    struct H5S_hyper_span_t *head; /* Pointer to the first span of list of
+                                      spans in the current dimension */
+    struct H5S_hyper_span_t *tail; /* Pointer to the last span of list of
+                                      spans in the current dimension */
+    hsize_t                  bounds[]; /* Array for storing low & high bounds */
+                                       /* (NOTE: This uses the C99 "flexible
+                                          array member" feature) */
+};
+\end{minted}
+
+\texttt{H5S\_hyper\_span\_info\_t} is the data structure for representing the span tree
+information for a hyperslab selection.
+
+\subsection{\texttt{H5S\_pnt\_list\_t}}
+\label{apdx:h5s_struct_h5s_pnt_list_t}
+
+\begin{minted}{C}
+struct H5S_pnt_list_t {
+    /* The following two fields defines the bounding box of the whole
+       set of points, relative to the offset */
+    hsize_t low_bounds[H5S_MAX_RANK];  /* The smallest element selected
+                                          in each dimension */
+    hsize_t high_bounds[H5S_MAX_RANK]; /* The largest element selected
+                                          in each dimension */
+
+    H5S_pnt_node_t *head; /* Pointer to head of point list */
+    H5S_pnt_node_t *tail; /* Pointer to tail of point list */
+
+    hsize_t last_idx; /* Index of the point after the last returned from
+                         H5S__get_select_elem_pointlist() */
+    H5S_pnt_node_t *last_idx_pnt; /* Point after the last returned from
+                                   * H5S__get_select_elem_pointlist().
+                                   * If we ever add a way to remove points
+                                   * or add points in the middle of
+                                   * the pointlist we will need to invalidate
+                                   * these fields. */
+};
+\end{minted}
+
+\texttt{H5S\_pnt\_list\_t} is the data structure that maintains information about a point
+selection within a dataspace object.
+
+The \texttt{head} and \texttt{tail} fields keep track of the head and tail of the linked
+list of currently selected points. If concurrent selection of points within a dataspace
+is allowed, this linked list structure should be able to be converted into a lock-free
+linked list to keep close to the original design. However, keep in mind that performance
+problems have previously been reported for HDF5's current linked list implementation of
+point selections, so a different data structure may be warranted.
+
+See \ref{h5s_concurrency_point} for a discussion on concurrency issues with the
+\texttt{last\_idx} and \texttt{last\_idx\_pnt} fields.
+
+The \texttt{low\_bounds} and \texttt{high\_bounds} fields are used to keep track of a bounding
+box around the currently selected points in a dataspace and present an issue for concurrent
+modification of point selections. If the list of points selected in a dataspace object is
+concurrently modified, there needs to be some form of coordination for updating the bounding
+box once all points have been selected. These fields are currently updated on a point-by-point
+basis as each individual point is selected, which could potentially be done atomically on a
+point-by-point basis, but may be prohibitively expensive to do so.
+
+\subsection{\texttt{H5S\_pnt\_node\_t}}
+\label{apdx:h5s_struct_h5s_pnt_node_t}
+
+\begin{minted}{C}
+struct H5S_pnt_node_t {
+    struct H5S_pnt_node_t *next;  /* Pointer to next point in list */
+    hsize_t                pnt[]; /* Selected point */
+                                  /* (NOTE: This uses the C99 "flexible
+                                     array member" feature) */
+};
+\end{minted}
+
+\texttt{H5S\_pnt\_node\_t} is the data structure for a single point selected within a dataspace
+object's extent. Provided that a lock-free linked list is used for the main \texttt{H5S\_pnt\_list\_t}
+structure, adapting usage of this structure for concurrency should be relatively straightforward.
+Otherwise, further design discussion will be needed.
+
+\subsection{\texttt{H5S\_sel\_iter\_t}}
+\label{apdx:h5s_struct_h5s_sel_iter_t}
+
+\begin{minted}{C}
+typedef struct H5S_sel_iter_t {
+    /* Selection class */
+    const struct H5S_sel_iter_class_t *type; /* Selection iteration
+                                                class info */
+
+    /* Information common to all iterators */
+    unsigned rank;                  /* Rank of dataspace the selection
+                                       iterator is operating on */
+    hsize_t  dims[H5S_MAX_RANK];    /* Dimensions of dataspace the selection
+                                       is operating on */
+    hssize_t sel_off[H5S_MAX_RANK]; /* Selection offset in dataspace */
+    hsize_t  elmt_left;             /* Number of elements left to iterate
+                                       over */
+    size_t   elmt_size;             /* Size of elements to iterate over */
+    unsigned flags;                 /* Flags controlling iterator behavior */
+
+    /* Information specific to each type of iterator */
+    union {
+        H5S_point_iter_t pnt; /* Point selection iteration information */
+        H5S_hyper_iter_t hyp; /* New Hyperslab selection iteration
+                                 information */
+        H5S_all_iter_t   all; /* "All" selection iteration information */
+    } u;
+} H5S_sel_iter_t;
+\end{minted}
+
+\texttt{H5S\_sel\_iter\_t} is the data structure used for dataspace selection iterator objects.
+
+The \texttt{type} field always points to one of the 'class' structures \texttt{H5S\_sel\_all},
+\texttt{H5S\_sel\_none}, \texttt{H5S\_sel\_hyper} or \texttt{H5S\_select\_class\_t}, which
+should be unchanging. However, this pointer can change at any time as the dataspace object
+set for a selection iterator changes via \nameref{apdx:h5s_func_h5ssel_iter_reset}.
+
+The \texttt{rank}, \texttt{dims}, \texttt{sel\_off}, \texttt{elmt\_size} and \texttt{flags}
+fields are generally unchanging after selection iterator creation. However, a concurrent call
+to \nameref{apdx:h5s_func_h5ssel_iter_reset} could modify these if an iterator object is shared
+between threads.
+
+The \texttt{elmt\_left} field is updated during each call to \nameref{apdx:h5s_func_h5ssel_iter_get_seq_list}
+on an iterator object. If multiple threads are calling that function on the same iterator object,
+this field will be a point of contention. However, whether or not there is a reasonable use case
+for multiple threads to share the same iterator object remains to be seen.
+
+Each of the fields in the \texttt{u} union contain information that is updated during each call to
+\nameref{apdx:h5s_func_h5ssel_iter_get_seq_list} on an iterator object. If multiple threads are
+calling that function on the same iterator object, this information will be a point of contention.
+However,  whether or not there is a reasonable use case for multiple threads to share the same
+iterator object remains to be seen.
+
+\end{document}
