@@ -2676,7 +2676,8 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
 
         read_use_native = dset_use_native || !types_equal || 
             external_link_access || mem_sel_type == H5S_SEL_POINTS || file_sel_type == H5S_SEL_POINTS
-            || dset_space_status != H5D_SPACE_STATUS_ALLOCATED;
+            || dset_space_status != H5D_SPACE_STATUS_ALLOCATED || mem_space_id[j] == H5S_BLOCK
+            || file_space_id[j] == H5S_BLOCK || mem_space_id[j] == H5S_PLIST || file_space_id[j] == H5S_PLIST;
 
         if (read_use_native) {
 
