@@ -2052,6 +2052,10 @@ done:
         fprintf(stderr, "thread idx %d in pool failed\n", thread_id);
     }
 
+    pthread_mutex_lock(&mutex_local);
+    md_for_thread.thread_is_active[thread_id] = false;
+    pthread_mutex_unlock(&mutex_local);
+
     free(tasks);
 
     return ret_value;
