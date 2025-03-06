@@ -60,34 +60,6 @@ extern int errno;
 /* Typedefs */
 /************/
 
-typedef struct dtype_info_t {
-    H5T_class_t class;
-    size_t size;
-    H5T_sign_t sign; /* Signed vs. unsigned */
-    H5T_order_t order; /* Bit order */
-} dtype_info_t;
-
-typedef struct Bypass_dataset_t {
-    hid_t dcpl_id;
-    hid_t space_id;
-    H5D_layout_t layout;
-    int num_filters;
-    dtype_info_t dtype_info;
-} Bypass_dataset_t;
-
-/* The bypass VOL connector's object */
-typedef struct H5VL_bypass_t {
-    hid_t under_vol_id; /* ID for underlying VOL connector */
-    void *under_object; /* Underlying VOL connector's object */
-    H5I_type_t type; /* Type of this object. */
-    char file_name[1024];
-
-    union {
-        /* Only dataset objects are needed for now */
-        Bypass_dataset_t dataset;
-    } u;
-} H5VL_bypass_t;
-
 /* The bypass VOL wrapper context */
 typedef struct H5VL_bypass_wrap_ctx_t {
     hid_t under_vol_id;   /* VOL ID for under VOL */
@@ -255,6 +227,9 @@ static herr_t dset_open_helper(H5VL_bypass_t *obj, hid_t dxpl_id, void **req);
 
 /* Release the structures associated with the dataset object */
 static herr_t release_dset_info(Bypass_dataset_t *dset);
+
+/* Release the structures associated with the file object */
+static herr_t release_file_info(Bypass_file_t *file);
 
 /* Retrieve the in-file location of the dataset, if any */
 static herr_t get_dset_location(H5VL_bypass_t *dset_obj, hid_t dxpl_id, void **req, haddr_t *location);
@@ -483,11 +458,29 @@ H5VL_bypass_free_obj(H5VL_bypass_t *obj)
         goto done;
     }
 
-    if (obj->type == H5I_DATASET) {
-        if (release_dset_info(&obj->u.dataset) < 0) {
-            fprintf(stderr, "failed to release dataset-specific bypass object\n");
-            ret_value = -1;
-            goto done;
+    switch(obj->type) {
+        case (H5I_DATASET): {
+            if (release_dset_info(&obj->u.dataset) < 0) {
+                fprintf(stderr, "failed to release dataset-specific bypass object\n");
+                ret_value = -1;
+                goto done;
+            }
+
+            break;
+        }
+
+        case (H5I_FILE): {
+            if (release_file_info(&obj->u.file) < 0) {
+                fprintf(stderr, "failed to release file-specific bypass object\n");
+                ret_value = -1;
+                goto done;
+            }
+
+            break;
+        }
+
+        default: {
+            break;
         }
     }
 
@@ -553,7 +546,6 @@ H5VL_bypass_init(hid_t vipl_id)
     (void)vipl_id;
 
     /* Memory allocation for some information structures */
-    file_stuff = (file_t *)calloc(file_stuff_size, sizeof(file_t));
     info_stuff = (info_t *)calloc(info_size, sizeof(info_t));
 
     /* Retrieve the number of threads for the thread pool from the user's input */
@@ -586,7 +578,7 @@ H5VL_bypass_init(hid_t vipl_id)
 
     /* Initialize the information strcuture for threads to use.  Do it before
      * starting threads */
-    md_for_thread.file_indices   = md_for_thread.file_indices_local;
+    md_for_thread.files          = md_for_thread.files_local;
     md_for_thread.addrs          = md_for_thread.addrs_local;
     md_for_thread.sizes          = md_for_thread.sizes_local;
     md_for_thread.vec_bufs       = md_for_thread.vec_bufs_local;
@@ -702,8 +694,6 @@ H5VL_bypass_term(void)
 
     fclose(log_fp);
 
-    if (file_stuff)
-        free(file_stuff);
     if (info_stuff)
         free(info_stuff);
     if (info_for_thread)
@@ -713,8 +703,8 @@ H5VL_bypass_term(void)
 
     /* Wait until all threads finish before releasing resources */
     if (md_for_thread.free_memory) {
-        if (md_for_thread.file_indices)
-            free(md_for_thread.file_indices);
+        if (md_for_thread.files)
+            free(md_for_thread.files);
         if (md_for_thread.addrs)
             free(md_for_thread.addrs);
         if (md_for_thread.sizes)
@@ -1527,10 +1517,13 @@ H5VL_bypass_dataset_create(void *obj, const H5VL_loc_params_t *loc_params, const
 
     dset->type = H5I_DATASET;
     
-    if (get_filename_helper(dset, dset->file_name, H5I_DATASET, req) < 0) {
-        fprintf(stderr, "failed to get filename\n");
-        goto error;
-    }
+    // TODO: Move name to file sub-object
+    strcpy(dset->file_name, o->file_name);
+
+    assert(o->type == H5I_FILE);
+    assert(o->u.file.ref_count > 0);
+    o->u.file.ref_count++;
+    dset->u.dataset.file = o;
 
     if (dset_open_helper(dset, dxpl_id, req) < 0) {
         fprintf(stderr, "failed to get dataset info\n");
@@ -1598,6 +1591,14 @@ H5VL_bypass_dataset_open(void *obj, const H5VL_loc_params_t *loc_params, const c
         fprintf(stderr, "failed to get filename\n");
         goto error;
     }
+
+    // TODO - Move name to file sub-object
+    strcpy(dset->file_name, o->file_name);
+
+    assert(o->type == H5I_FILE);
+    assert(o->u.file.ref_count > 0);
+    o->u.file.ref_count++;
+    dset->u.dataset.file = o;
 
     if (dset_open_helper(dset, dxpl_id, req) < 0) {
         fprintf(stderr, "failed to get dataset info\n");
@@ -1884,21 +1885,15 @@ start_thread_for_pool(void *args)
     // int thread_id = ((info_for_thread_t *)args)->thread_id;
     // int fd = ((info_for_thread_t *)args)->fd;
     void    *ret_value = (void*) 0;
-    int     *file_indices_local = NULL;
     haddr_t *addrs_local = NULL;
     size_t  *sizes_local = NULL;
     void   **vec_bufs_local = NULL;
+    H5VL_bypass_t **files_local = NULL;
     int      local_count = 0;
     int      i;
 
     // fprintf(stderr, "In start_thread_for_pool: %d\n", thread_id);
 
-    if ((file_indices_local = (int *)malloc(nsteps_tpool * sizeof(int))) == NULL) {
-        fprintf(stderr, "failed to allocate file indices\n");
-        ret_value = (void*) -1;
-        goto done;
-    }
-    
     if ((addrs_local = (haddr_t *)malloc(nsteps_tpool * sizeof(haddr_t))) == NULL) {
         fprintf(stderr, "failed to allocate addresses\n");
         ret_value = (void*) -1;
@@ -1916,6 +1911,13 @@ start_thread_for_pool(void *args)
         ret_value = (void*) -1;
         goto done;
     }
+
+    if ((files_local = (H5VL_bypass_t **)malloc(nsteps_tpool * sizeof(H5VL_bypass_t *))) == NULL) {
+        fprintf(stderr, "failed to allocate file pointers\n");
+        ret_value = (void*) -1;
+        goto done;
+    }
+
     /* Rename thread_loop_finish to a more appropriate name */
     while (!thread_loop_finish || !stop_tpool) {
         if (pthread_mutex_lock(&mutex_local) != 0) {
@@ -1941,8 +1943,8 @@ start_thread_for_pool(void *args)
          * value */
         local_count = MIN(thread_task_count, nsteps_tpool);
 
-        for (i = 0; i < local_count; i++) {
-            file_indices_local[i] = md_for_thread.file_indices[info_pointer];
+        for (i = 0; i < local_count; i++) {;
+            files_local[i]        = md_for_thread.files[info_pointer];
             addrs_local[i]        = md_for_thread.addrs[info_pointer];
             sizes_local[i]        = md_for_thread.sizes[info_pointer];
             vec_bufs_local[i]     = md_for_thread.vec_bufs[info_pointer];
@@ -1950,8 +1952,8 @@ start_thread_for_pool(void *args)
             info_pointer++;
             thread_task_count--;
 
-            file_stuff[file_indices_local[i]].num_reads++;
-            file_stuff[file_indices_local[i]].read_started = true;
+            files_local[i]->u.file.num_reads++;
+            files_local[i]->u.file.read_started = true;
         }
 
         // fprintf(stderr, "thread %d: 1. local_count = %d, thread_task_count = %d,
@@ -1973,11 +1975,11 @@ start_thread_for_pool(void *args)
 
         // fprintf(stderr, "before reading data\n");
         for (i = 0; i < local_count; i++) {
-            // fprintf(stderr, "thread_id = %d, i = %d: file_indices_local = %d, vec_bufs_local = %p,
-            // sizes_local = %ld, addrs_local = %llu\n", thread_id, i, file_indices_local[i],
+            // fprintf(stderr, "thread_id = %d, i = %d: files_local = %d, vec_bufs_local = %p,
+            // sizes_local = %ld, addrs_local = %llu\n", thread_id, i, files_local[i],
             // vec_bufs_local[i], sizes_local[i], addrs_local[i]);
 
-            if (read_big_data(file_stuff[file_indices_local[i]].fd, vec_bufs_local[i], sizes_local[i],
+            if (read_big_data(files_local[i]->u.file.fd, vec_bufs_local[i], sizes_local[i],
                           addrs_local[i]) < 0)
             {
                 fprintf(stderr, "read_big_data failed\n");
@@ -1991,17 +1993,17 @@ start_thread_for_pool(void *args)
                 goto done;
             }
 
-            file_stuff[file_indices_local[i]].num_reads--;
+            files_local[i]->u.file.num_reads--;
 
             /* When there is no task left in the queue and all the reads finish for
              * the current file, signal the main process that this file can be closed.
              */
-            if (thread_loop_finish && (file_stuff[file_indices_local[i]].num_reads == 0)) {
+            if (thread_loop_finish && (files_local[i]->u.file.num_reads == 0)) {
                 // fprintf(stderr, "thread %d: file name = %s, signal close_ready\n", thread_id,
-                // file_stuff[file_indices_local[i]].name);
+                // files_local[i]->name);
                 /* There are currently no reads active on this file - it may be closed */
-                file_stuff[file_indices_local[i]].read_started = false;
-                pthread_cond_signal(&(file_stuff[file_indices_local[i]].close_ready));
+                files_local[i]->u.file.read_started = false;
+                pthread_cond_signal(&(files_local[i]->u.file.close_ready));
             }
 
             if (pthread_mutex_unlock(&mutex_local) != 0) {
@@ -2032,26 +2034,15 @@ start_thread_for_pool(void *args)
             return (void*) -1;
         }
 
-        /* If all task in the queue are finished and all the data read are finished, notify that
-         * the corresponding file can be closed.
-         */
-        /* pthread_mutex_lock(&mutex_local);
-        if (thread_loop_finish && (file_stuff[file_indices_local[0]].num_reads ==
-    0)) { fprintf(stderr, "thread %d: before broadcast\n", thread_id);
-                pthread_cond_broadcast(&file_stuff[file_indices_local[0]].close_ready);
-        }
-        pthread_mutex_unlock(&mutex_local); */
-
-        // pthread_mutex_unlock(&mutex_local);
         // fprintf(stderr, "after reading data\n");
     }
 
 done:
 
-    free(file_indices_local);
     free(addrs_local);
     free(sizes_local);
     free(vec_bufs_local);
+    free(files_local);
 
     return ret_value;
 } /* end start_thread_for_pool() */
@@ -2178,7 +2169,7 @@ process_vectors(void *rbuf, sel_info_t *selection_info)
             if (md_for_thread.addrs == md_for_thread.addrs_local) {
                 /* Allocate dynamic arrays.  Need to free them later */
                 if (NULL ==
-                    (md_for_thread.file_indices = malloc(sizeof(md_for_thread.file_indices_local) * 2)))
+                    (md_for_thread.files = malloc(sizeof(md_for_thread.files) * 2)))
                 {
                     fprintf(stderr, "memory allocation failed for file ids list\n");
                     ret_value = -1;
@@ -2207,8 +2198,8 @@ process_vectors(void *rbuf, sel_info_t *selection_info)
                 }
 
                 /* Copy the existing data */
-                (void)memcpy(md_for_thread.file_indices, md_for_thread.file_indices_local,
-                             sizeof(md_for_thread.file_indices_local));
+                (void)memcpy(md_for_thread.files, md_for_thread.files,
+                             sizeof(md_for_thread.files_local));
                 (void)memcpy(md_for_thread.addrs, md_for_thread.addrs_local,
                              sizeof(md_for_thread.addrs_local));
                 (void)memcpy(md_for_thread.sizes, md_for_thread.sizes_local,
@@ -2220,16 +2211,16 @@ process_vectors(void *rbuf, sel_info_t *selection_info)
                 void *tmp_ptr;
 
                 /* Reallocate arrays */
-                if (NULL == (tmp_ptr = realloc(md_for_thread.file_indices,
+                if (NULL == (tmp_ptr = realloc(md_for_thread.files,
                                                md_for_thread.vec_arr_nalloc *
-                                                   sizeof(*(md_for_thread.file_indices)) * 2)))
+                                                   sizeof(*(md_for_thread.files)) * 2)))
                 {
                     fprintf(stderr, "memory reallocation failed for file ids list\n");
                     ret_value = -1;
                     goto done;
                 }
 
-                md_for_thread.file_indices = tmp_ptr;
+                md_for_thread.files = tmp_ptr;
                 if (NULL == (tmp_ptr = realloc(md_for_thread.addrs, md_for_thread.vec_arr_nalloc *
                                                                         sizeof(*(md_for_thread.addrs)) * 2)))
                 {
@@ -2267,7 +2258,7 @@ process_vectors(void *rbuf, sel_info_t *selection_info)
         }
 
         /* Add this segment to vector read list */
-        md_for_thread.file_indices[md_for_thread.vec_arr_nused] = selection_info->my_file_index;
+        md_for_thread.files[md_for_thread.vec_arr_nused] = selection_info->file;
         md_for_thread.addrs[md_for_thread.vec_arr_nused] =
             selection_info->chunk_addr + file_off[file_seq_i]; /* Add the base offset of the dataset to the
                                                                   address */
@@ -2616,27 +2607,16 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
             goto done;
         }
 
+        selection_info.file = bypass_dset->file;
+
         // fprintf(stderr, "%s at %d: file_name = %s\n", __func__, __LINE__, file_name);
-
-        /* Find the correct data file, if any */
-        selection_info.my_file_index = -1;
-        
-        for (i = 0; i < file_stuff_count; i++) {
-            if (!strcmp(file_stuff[i].name, bypass_obj->file_name)) {
-                selection_info.my_file_index =
-                    i; /* Save this index in the list of FILE_T structures for quick lookup later */
-                break;
-            }
-        }
-
         if ((num_ext_files = H5Pget_external_count(bypass_dset->dcpl_id)) < 0) {
             fprintf(stderr, "failed to get external file count\n");
             ret_value = -1;
             goto done;
         }
 
-        /* If the dataset's file is not in table, it was accessed through an external link. */
-        if (selection_info.my_file_index < 0 || num_ext_files > 0)
+        if (num_ext_files > 0)
             external_link_access = true;
     
 
@@ -3258,23 +3238,16 @@ H5VL_bypass_datatype_close(void *dt, hid_t dxpl_id, void **req)
 } /* end H5VL_bypass_datatype_close() */
 
 static herr_t
-c_file_open_helper(const char *name)
+c_file_open_helper(H5VL_bypass_t *obj, const char *name)
 {
     herr_t ret_value = 0;
+    Bypass_file_t *file = NULL;
 
-    /* Enlarge the size of the file stuff for C and Re-allocate the memory if necessary */
-    if (file_stuff_count == file_stuff_size) {
-        file_stuff_size *= 2;
-        if ((file_stuff = (file_t *)realloc(file_stuff, file_stuff_size * sizeof(file_t))) == NULL)
-        {
-            fprintf(stderr, "failed to allocate more memory for file info table\n");
-            ret_value = -1;
-            goto done;
-        }
-    }
+    assert(obj);
+    assert(obj->type == H5I_FILE);
+    assert(name);
 
-    /* Open the file in C for IO without HDF5 */
-    strcpy(file_stuff[file_stuff_count].name, name);
+    file = &obj->u.file;
 
     // get_vfd_handle_helper(file,
     // &(file_stuff[file_stuff_count].vfd_file_handle), req);
@@ -3286,29 +3259,25 @@ c_file_open_helper(const char *name)
     if (!file_stuff[file_stuff_count].vfd_file_handle)
         puts("failed to get VFD file handle"); */
 
-    if ((file_stuff[file_stuff_count].fd = open(name, O_RDONLY)) < 0) {
+    /* Open the file in C for IO without HDF5 */
+    if ((file->fd = open(name, O_RDONLY)) < 0) {
         fprintf(stderr, "failed to open file descriptor: %s\n", strerror(errno));
         ret_value = -1;
         goto done;
     }
 
-    /* Increment the reference count for this file */
-    file_stuff[file_stuff_count].ref_count++;
+    /* Initialize the reference count for this file */
+    file->ref_count = 1;
 
-    strcpy(file_stuff[file_stuff_count].name, name);
+    strcpy(file->name, name);
 
-    file_stuff[file_stuff_count].num_reads    = 0;
-    file_stuff[file_stuff_count].read_started = false;
-    pthread_cond_init(&(file_stuff[file_stuff_count].close_ready),
-                      NULL); /* Initialize the condition variable for file closing */
-    /*printf("%s: name = %s, file_stuff_count = %d, file_stuff[%d].name = %s, file_stuff[%d].fp = %d\n",
-     * __func__, name, file_stuff_count, file_stuff_count, file_stuff[file_stuff_count].name,
-     * file_stuff_count, file_stuff[file_stuff_count].fp);*/
-
-    /* Increment the number of files being opened with C */
-    file_stuff_count++;
+    file->num_reads    = 0;
+    file->read_started = false;
+    /* Initialize the condition variable for file closing */
+    pthread_cond_init(&(file->close_ready), NULL);
 
 done:
+
     return ret_value;
 }
 
@@ -3368,6 +3337,8 @@ H5VL_bypass_file_create(const char *name, unsigned flags, hid_t fcpl_id, hid_t f
         goto error;
     }
 
+    strcpy(file->file_name, name);
+
     /* Check for async request */
     if (req && *req)
         if ((*req = H5VL_bypass_new_obj(*req, info->under_vol_id)) < 0) {
@@ -3390,9 +3361,11 @@ H5VL_bypass_file_create(const char *name, unsigned flags, hid_t fcpl_id, hid_t f
     }
     
     info = NULL;
-    
-    /* Open the C file and set the fields for the file_t structure */
-    if (c_file_open_helper(name) < 0) {
+
+
+    file->type = H5I_FILE;
+
+    if (c_file_open_helper(file, name) < 0) {
         fprintf(stderr, "error while opening c file\n");
         goto error;
     }
@@ -3485,21 +3458,19 @@ H5VL_bypass_file_open(const char *name, unsigned flags, hid_t fapl_id, hid_t dxp
     /* Release copy of our VOL info */
     H5VL_bypass_info_free(info);
 
-    /* If the file has already been opened, only increment the reference count of
-     * this file and finish */
-    for (i = 0; i < file_stuff_count; i++) {
-        if (!strcmp(file_stuff[i].name, name) && file_stuff[i].fd) {
-            file_stuff[i].ref_count++;
+    strcpy(file->file_name, name);
+    file->type = H5I_FILE;
 
-            goto done;
-        }
+    if (c_file_open_helper(file, name) < 0) {
+        fprintf(stderr, "error while opening c file\n");
+        goto error;
     }
-
-    /* Open the C file and set the fields for the file_t structure */
-    c_file_open_helper(name);
 
 done:
     return (void *)file;
+
+error:
+    return NULL;
 } /* end H5VL_bypass_file_open() */
 
 /*-------------------------------------------------------------------------
@@ -3685,30 +3656,6 @@ H5VL_bypass_file_optional(void *file, H5VL_optional_args_t *args, hid_t dxpl_id,
     return ret_value;
 } /* end H5VL_bypass_file_optional() */
 
-static void
-remove_file_info_helper(unsigned index)
-{
-    unsigned i;
-
-    /* Remove the entry by shifting leftward all elements after this entry.
-     * But don't do anything if this entry is the only one or is the last one in
-     * the array except decrement the number of entries.
-     */
-    if (file_stuff_count > 1 && index != file_stuff_count - 1) {
-        for (i = index; i < file_stuff_count - 1; i++) {
-            strcpy(file_stuff[i].name, file_stuff[i + 1].name);
-            file_stuff[i].fd = file_stuff[i + 1].fd;
-            /* file_stuff[i].vfd_file_handle = file_stuff[i + 1].vfd_file_handle; */
-            file_stuff[i].ref_count    = file_stuff[i + 1].ref_count;
-            file_stuff[i].num_reads    = file_stuff[i + 1].num_reads;
-            file_stuff[i].read_started = file_stuff[i + 1].read_started;
-            file_stuff[i].close_ready  = file_stuff[i + 1].close_ready;
-        }
-    }
-
-    file_stuff_count--;
-}
-
 /*-------------------------------------------------------------------------
  * Function:    H5VL_bypass_file_close
  *
@@ -3723,73 +3670,44 @@ static herr_t
 H5VL_bypass_file_close(void *file, hid_t dxpl_id, void **req)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)file;
-    char           file_name[1024];
     herr_t         ret_value;
     int            i;
+    bool           locked = false;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL FILE Close\n");
 #endif
+    assert(o->type == H5I_FILE);
+    assert(o->u.file.ref_count > 0);
 
-    /* Find the name of this file */
-    get_filename_helper((H5VL_bypass_t *)file, file_name, H5I_FILE, req);
-    // fprintf(stderr, "%s at %d: file_name = %s\n", __func__, __LINE__,
-    // file_name);
+    /* Release our wrapper, if underlying file was closed */
+    pthread_mutex_lock(&mutex_local);
+    locked = true;
+    o->u.file.ref_count--;
 
-    /* Close the file opened with C.  Remove the file structure from the list when
-     * the reference count drops to zero */
-    for (i = 0; i < file_stuff_count; i++) {
-        if (!strcmp(file_stuff[i].name, file_name) && file_stuff[i].fd) {
-            // fprintf(stderr, "%s at %d: file_name = %s, i = %d, file_stuff_count =
-            // %d, file_stuff[i].ref_count = %d, file_stuff[i].read_started = %d,
-            // num_reads = %d\n", __func__,
-            // __LINE__, file_name, i, file_stuff_count, file_stuff[i].ref_count,
-            // file_stuff[i].read_started, file_stuff[i].num_reads);
-            /* Wait until all thread in the thread pool finish reading the data before
-             * closing the C file */
-            if (file_stuff[i].read_started) {
-                pthread_mutex_lock(&mutex_local);
-                // while (!file_stuff[i].read_started || file_stuff[i].num_reads)
-                while (file_stuff[i].num_reads)
-                    pthread_cond_wait(&(file_stuff[i].close_ready), &mutex_local);
-                pthread_mutex_unlock(&mutex_local);
-            }
+    if (o->u.file.ref_count == 0) {
+        /* Pass close request to underlying VOL connector */
+        if ((ret_value = H5VLfile_close(o->under_object, o->under_vol_id, dxpl_id, req)) < 0) {
+            fprintf(stderr, "Failed to close file in underlying VOL connectors\n");
+            goto done;
+        }
 
-            // fprintf(stderr, "%s at %d: file_name = %s, i = %d, file_stuff_count =
-            // %d, file_stuff[i].ref_count = %d, file_stuff[i].read_started = %d,
-            // num_reads = %d\n", __func__,
-            // __LINE__, file_name, i, file_stuff_count, file_stuff[i].ref_count,
-            // file_stuff[i].read_started, file_stuff[i].num_reads);
+        /* Check for async request */
+        if (req && *req)
+            *req = H5VL_bypass_new_obj(*req, o->under_vol_id);
 
-            file_stuff[i].ref_count--;
 
-            /* When the reference count drops to zero, close the file */
-            if (!file_stuff[i].ref_count) {
-                close(file_stuff[i].fd);
-                file_stuff[i].fd = -1;
-                // H5FDclose(file_stuff[i].vfd_file_handle);
-                pthread_cond_destroy(&(file_stuff[i].close_ready));
-
-                /* Remove this file info structure from the list */
-                remove_file_info_helper(i);
-            }
+        if (H5VL_bypass_free_obj(o) < 0) {
+            fprintf(stderr, "Unable to free file object on close\n");
+            ret_value = -1;
+            goto done;
         }
     }
 
-    if ((ret_value = H5VLfile_close(o->under_object, o->under_vol_id, dxpl_id, req)) < 0) {
-        fprintf(stderr, "Failed to close file in underlying VOL connectors\n");
-        goto done;
-    }
-
-    /* Check for async request */
-    if (req && *req)
-        *req = H5VL_bypass_new_obj(*req, o->under_vol_id);
-
-    /* Release our wrapper, if underlying file was closed */
-    if (ret_value >= 0)
-        H5VL_bypass_free_obj(o);
-
 done:
+    if (locked)
+        pthread_mutex_unlock(&mutex_local);
+
     return ret_value;
 } /* end H5VL_bypass_file_close() */
 
@@ -4973,6 +4891,13 @@ release_dset_info(Bypass_dataset_t *dset) {
 
     assert(dset);
 
+    /* Decrement the ref count of the corresponding Bypass VOL file object */
+    if (H5VL_bypass_file_close((void*) dset->file, H5P_DEFAULT, NULL) < 0) {
+        fprintf(stderr, "Failed to close parent file object\n");
+        ret_value = -1;
+        goto done;
+    }
+
     if (dset->dcpl_id > 0 && H5Pclose(dset->dcpl_id) < 0) {
         fprintf(stderr, "unable to decrement ref count of DCPL\n");
         ret_value = -1;
@@ -5141,6 +5066,36 @@ get_dset_space_status(H5VL_bypass_t *dset_obj, hid_t dxpl_id, void **req) {
         goto done;
     }
 
+done:
+    return ret_value;
+}
+
+static herr_t
+release_file_info(Bypass_file_t *file) {
+    herr_t ret_value = 0;
+
+    assert(file);
+    /* Wait until all thread in the thread pool finish reading the data before
+        * closing the C file */
+    pthread_mutex_lock(&mutex_local);
+
+    if (file->read_started) {
+        while (file->num_reads)
+            pthread_cond_wait(&(file->close_ready), &mutex_local);
+        pthread_mutex_unlock(&mutex_local);
+    }
+    pthread_mutex_unlock(&mutex_local);
+
+    /* Clean up the file object */
+    if (close(file->fd) < 0) {
+        fprintf(stderr, "failed to close file descriptor: %s\n", strerror(errno));
+        ret_value = -1;
+        goto done;
+    }
+
+    file->fd = -1;
+    // H5FDclose(bp_file->vfd_file_handle);
+    pthread_cond_destroy(&(file->close_ready));
 done:
     return ret_value;
 }
