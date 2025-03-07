@@ -35,12 +35,14 @@
 #define NUM_LOCAL_THREADS  4
 #define THREAD_STEP        1024
 #define NTHREADS_MAX       32
+#define BYPASS_NAME_SIZE_LONG   1024
 #define MIN(a, b)          (((a) < (b)) ? (a) : (b))
 #define GB (1024 * 1024 * 1024)
 #define MB (1024 * 1024)
 
 pthread_mutex_t mutex_local;
 pthread_cond_t  cond_local;
+pthread_cond_t  cond_read_finished;
 pthread_cond_t  continue_local;
 
 int  nthreads_tpool       = NUM_LOCAL_THREADS;
@@ -66,23 +68,6 @@ typedef struct {
 static file_t *file_stuff;
 static int file_stuff_count = 0;
 static int file_stuff_size = FILE_STUFF_SIZE;
-
-/* Dataset info */
-typedef struct {
-    char dset_name[1024];
-    char file_name[1024];
-    H5D_layout_t layout;
-    unsigned ref_count;     /* Reference count    */
-    hid_t dcpl_id;
-    hid_t dtype_id;
-    hid_t space_id;
-    haddr_t location;
-    hbool_t use_native;    /* flag for skipping bypass VOL and use the native functions */
-} dset_t;
-
-static dset_t *dset_stuff;
-static int dset_count = 0;
-static int dset_info_size = DSET_INFO_SIZE;
 
 /* Log info to be written out for the C program */
 typedef struct {
@@ -134,6 +119,8 @@ typedef struct {
     size_t     vec_arr_nalloc;
     size_t     vec_arr_nused;
     bool       free_memory;
+
+    bool       *thread_is_active; /* Array of active status for each tpool thread */
 } info_for_tpool_t;
 
 static info_t *info_stuff;

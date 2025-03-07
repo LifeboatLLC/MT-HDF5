@@ -27,19 +27,18 @@
  *
  */
 
-
 /* Header files needed */
 /* Do NOT include private HDF5 files here! */
 #include <assert.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 #include <sys/types.h>
 #include <sys/uio.h>
-#include <errno.h>
-#include <fcntl.h>
+#include <unistd.h>
 
 /* Public HDF5 headers */
 #include "hdf5.h"
@@ -61,16 +60,38 @@ extern int errno;
 /* Typedefs */
 /************/
 
+typedef struct dtype_info_t {
+    H5T_class_t class;
+    size_t size;
+    H5T_sign_t sign; /* Signed vs. unsigned */
+    H5T_order_t order; /* Bit order */
+} dtype_info_t;
+
+typedef struct Bypass_dataset_t {
+    hid_t dcpl_id;
+    hid_t space_id;
+    H5D_layout_t layout;
+    int num_filters;
+    dtype_info_t dtype_info;
+} Bypass_dataset_t;
+
 /* The bypass VOL connector's object */
 typedef struct H5VL_bypass_t {
-    hid_t  under_vol_id;        /* ID for underlying VOL connector */
-    void   *under_object;       /* Underlying VOL connector's object */
+    hid_t under_vol_id; /* ID for underlying VOL connector */
+    void *under_object; /* Underlying VOL connector's object */
+    H5I_type_t type; /* Type of this object. */
+    char file_name[1024];
+
+    union {
+        /* Only dataset objects are needed for now */
+        Bypass_dataset_t dataset;
+    } u;
 } H5VL_bypass_t;
 
 /* The bypass VOL wrapper context */
 typedef struct H5VL_bypass_wrap_ctx_t {
-    hid_t under_vol_id;         /* VOL ID for under VOL */
-    void *under_wrap_ctx;       /* Object wrapping context for under VOL */
+    hid_t under_vol_id;   /* VOL ID for under VOL */
+    void *under_wrap_ctx; /* Object wrapping context for under VOL */
 } H5VL_bypass_wrap_ctx_t;
 
 /********************* */
@@ -78,94 +99,126 @@ typedef struct H5VL_bypass_wrap_ctx_t {
 /********************* */
 
 /* Helper routines */
-static H5VL_bypass_t *H5VL_bypass_new_obj(void *under_obj,
-    hid_t under_vol_id);
-static herr_t H5VL_bypass_free_obj(H5VL_bypass_t *obj);
+static H5VL_bypass_t *H5VL_bypass_new_obj(void *under_obj, hid_t under_vol_id);
+static herr_t         H5VL_bypass_free_obj(H5VL_bypass_t *obj);
 
 /* "Management" callbacks */
 static herr_t H5VL_bypass_init(hid_t vipl_id);
 static herr_t H5VL_bypass_term(void);
 
 /* VOL info callbacks */
-static void *H5VL_bypass_info_copy(const void *info);
+static void  *H5VL_bypass_info_copy(const void *info);
 static herr_t H5VL_bypass_info_cmp(int *cmp_value, const void *info1, const void *info2);
 static herr_t H5VL_bypass_info_free(void *info);
 static herr_t H5VL_bypass_info_to_str(const void *info, char **str);
 static herr_t H5VL_bypass_str_to_info(const char *str, void **info);
 
 /* VOL object wrap / retrieval callbacks */
-static void *H5VL_bypass_get_object(const void *obj);
+static void  *H5VL_bypass_get_object(const void *obj);
 static herr_t H5VL_bypass_get_wrap_ctx(const void *obj, void **wrap_ctx);
-static void *H5VL_bypass_wrap_object(void *obj, H5I_type_t obj_type,
-    void *wrap_ctx);
-static void *H5VL_bypass_unwrap_object(void *obj);
+static void  *H5VL_bypass_wrap_object(void *obj, H5I_type_t obj_type, void *wrap_ctx);
+static void  *H5VL_bypass_unwrap_object(void *obj);
 static herr_t H5VL_bypass_free_wrap_ctx(void *obj);
 
 /* Attribute callbacks */
-static void *H5VL_bypass_attr_create(void *obj, const H5VL_loc_params_t *loc_params, const char *name, hid_t type_id, hid_t space_id, hid_t acpl_id, hid_t aapl_id, hid_t dxpl_id, void **req);
-static void *H5VL_bypass_attr_open(void *obj, const H5VL_loc_params_t *loc_params, const char *name, hid_t aapl_id, hid_t dxpl_id, void **req);
+static void  *H5VL_bypass_attr_create(void *obj, const H5VL_loc_params_t *loc_params, const char *name,
+                                      hid_t type_id, hid_t space_id, hid_t acpl_id, hid_t aapl_id,
+                                      hid_t dxpl_id, void **req);
+static void  *H5VL_bypass_attr_open(void *obj, const H5VL_loc_params_t *loc_params, const char *name,
+                                    hid_t aapl_id, hid_t dxpl_id, void **req);
 static herr_t H5VL_bypass_attr_read(void *attr, hid_t mem_type_id, void *buf, hid_t dxpl_id, void **req);
-static herr_t H5VL_bypass_attr_write(void *attr, hid_t mem_type_id, const void *buf, hid_t dxpl_id, void **req);
+static herr_t H5VL_bypass_attr_write(void *attr, hid_t mem_type_id, const void *buf, hid_t dxpl_id,
+                                     void **req);
 static herr_t H5VL_bypass_attr_get(void *obj, H5VL_attr_get_args_t *args, hid_t dxpl_id, void **req);
-static herr_t H5VL_bypass_attr_specific(void *obj, const H5VL_loc_params_t *loc_params, H5VL_attr_specific_args_t *args, hid_t dxpl_id, void **req);
+static herr_t H5VL_bypass_attr_specific(void *obj, const H5VL_loc_params_t *loc_params,
+                                        H5VL_attr_specific_args_t *args, hid_t dxpl_id, void **req);
 static herr_t H5VL_bypass_attr_optional(void *obj, H5VL_optional_args_t *args, hid_t dxpl_id, void **req);
 static herr_t H5VL_bypass_attr_close(void *attr, hid_t dxpl_id, void **req);
 
 /* Dataset callbacks */
-static void *H5VL_bypass_dataset_create(void *obj, const H5VL_loc_params_t *loc_params, const char *name, hid_t lcpl_id, hid_t type_id, hid_t space_id, hid_t dcpl_id, hid_t dapl_id, hid_t dxpl_id, void **req);
-static void *H5VL_bypass_dataset_open(void *obj, const H5VL_loc_params_t *loc_params, const char *name, hid_t dapl_id, hid_t dxpl_id, void **req);
-static herr_t H5VL_bypass_dataset_read(size_t count, void *dset[],
-        hid_t mem_type_id[], hid_t mem_space_id[], hid_t file_space_id[],
-        hid_t plist_id, void *buf[], void **req);
-static herr_t H5VL_bypass_dataset_write(size_t count, void *dset[],
-        hid_t mem_type_id[], hid_t mem_space_id[], hid_t file_space_id[],
-        hid_t plist_id, const void *buf[], void **req);
+static void  *H5VL_bypass_dataset_create(void *obj, const H5VL_loc_params_t *loc_params, const char *name,
+                                         hid_t lcpl_id, hid_t type_id, hid_t space_id, hid_t dcpl_id,
+                                         hid_t dapl_id, hid_t dxpl_id, void **req);
+static void  *H5VL_bypass_dataset_open(void *obj, const H5VL_loc_params_t *loc_params, const char *name,
+                                       hid_t dapl_id, hid_t dxpl_id, void **req);
+static herr_t H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t mem_space_id[],
+                                       hid_t file_space_id[], hid_t plist_id, void *buf[], void **req);
+static herr_t H5VL_bypass_dataset_write(size_t count, void *dset[], hid_t mem_type_id[], hid_t mem_space_id[],
+                                        hid_t file_space_id[], hid_t plist_id, const void *buf[], void **req);
 static herr_t H5VL_bypass_dataset_get(void *dset, H5VL_dataset_get_args_t *args, hid_t dxpl_id, void **req);
-static herr_t H5VL_bypass_dataset_specific(void *obj, H5VL_dataset_specific_args_t *args, hid_t dxpl_id, void **req);
+static herr_t H5VL_bypass_dataset_specific(void *obj, H5VL_dataset_specific_args_t *args, hid_t dxpl_id,
+                                           void **req);
 static herr_t H5VL_bypass_dataset_optional(void *obj, H5VL_optional_args_t *args, hid_t dxpl_id, void **req);
 static herr_t H5VL_bypass_dataset_close(void *dset, hid_t dxpl_id, void **req);
 
 /* Datatype callbacks */
-static void *H5VL_bypass_datatype_commit(void *obj, const H5VL_loc_params_t *loc_params, const char *name, hid_t type_id, hid_t lcpl_id, hid_t tcpl_id, hid_t tapl_id, hid_t dxpl_id, void **req);
-static void *H5VL_bypass_datatype_open(void *obj, const H5VL_loc_params_t *loc_params, const char *name, hid_t tapl_id, hid_t dxpl_id, void **req);
+static void  *H5VL_bypass_datatype_commit(void *obj, const H5VL_loc_params_t *loc_params, const char *name,
+                                          hid_t type_id, hid_t lcpl_id, hid_t tcpl_id, hid_t tapl_id,
+                                          hid_t dxpl_id, void **req);
+static void  *H5VL_bypass_datatype_open(void *obj, const H5VL_loc_params_t *loc_params, const char *name,
+                                        hid_t tapl_id, hid_t dxpl_id, void **req);
 static herr_t H5VL_bypass_datatype_get(void *dt, H5VL_datatype_get_args_t *args, hid_t dxpl_id, void **req);
-static herr_t H5VL_bypass_datatype_specific(void *obj, H5VL_datatype_specific_args_t *args, hid_t dxpl_id, void **req);
+static herr_t H5VL_bypass_datatype_specific(void *obj, H5VL_datatype_specific_args_t *args, hid_t dxpl_id,
+                                            void **req);
 static herr_t H5VL_bypass_datatype_optional(void *obj, H5VL_optional_args_t *args, hid_t dxpl_id, void **req);
 static herr_t H5VL_bypass_datatype_close(void *dt, hid_t dxpl_id, void **req);
 
 /* File callbacks */
-static void *H5VL_bypass_file_create(const char *name, unsigned flags, hid_t fcpl_id, hid_t fapl_id, hid_t dxpl_id, void **req);
-static void *H5VL_bypass_file_open(const char *name, unsigned flags, hid_t fapl_id, hid_t dxpl_id, void **req);
+static void  *H5VL_bypass_file_create(const char *name, unsigned flags, hid_t fcpl_id, hid_t fapl_id,
+                                      hid_t dxpl_id, void **req);
+static void  *H5VL_bypass_file_open(const char *name, unsigned flags, hid_t fapl_id, hid_t dxpl_id,
+                                    void **req);
 static herr_t H5VL_bypass_file_get(void *file, H5VL_file_get_args_t *args, hid_t dxpl_id, void **req);
-static herr_t H5VL_bypass_file_specific(void *file, H5VL_file_specific_args_t *args, hid_t dxpl_id, void **req);
+static herr_t H5VL_bypass_file_specific(void *file, H5VL_file_specific_args_t *args, hid_t dxpl_id,
+                                        void **req);
 static herr_t H5VL_bypass_file_optional(void *file, H5VL_optional_args_t *args, hid_t dxpl_id, void **req);
 static herr_t H5VL_bypass_file_close(void *file, hid_t dxpl_id, void **req);
 
 /* Group callbacks */
-static void *H5VL_bypass_group_create(void *obj, const H5VL_loc_params_t *loc_params, const char *name, hid_t lcpl_id, hid_t gcpl_id, hid_t gapl_id, hid_t dxpl_id, void **req);
-static void *H5VL_bypass_group_open(void *obj, const H5VL_loc_params_t *loc_params, const char *name, hid_t gapl_id, hid_t dxpl_id, void **req);
+static void  *H5VL_bypass_group_create(void *obj, const H5VL_loc_params_t *loc_params, const char *name,
+                                       hid_t lcpl_id, hid_t gcpl_id, hid_t gapl_id, hid_t dxpl_id, void **req);
+static void  *H5VL_bypass_group_open(void *obj, const H5VL_loc_params_t *loc_params, const char *name,
+                                     hid_t gapl_id, hid_t dxpl_id, void **req);
 static herr_t H5VL_bypass_group_get(void *obj, H5VL_group_get_args_t *args, hid_t dxpl_id, void **req);
-static herr_t H5VL_bypass_group_specific(void *obj, H5VL_group_specific_args_t *args, hid_t dxpl_id, void **req);
+static herr_t H5VL_bypass_group_specific(void *obj, H5VL_group_specific_args_t *args, hid_t dxpl_id,
+                                         void **req);
 static herr_t H5VL_bypass_group_optional(void *obj, H5VL_optional_args_t *args, hid_t dxpl_id, void **req);
 static herr_t H5VL_bypass_group_close(void *grp, hid_t dxpl_id, void **req);
 
 /* Link callbacks */
-static herr_t H5VL_bypass_link_create(H5VL_link_create_args_t *args, void *obj, const H5VL_loc_params_t *loc_params, hid_t lcpl_id, hid_t lapl_id, hid_t dxpl_id, void **req);
-static herr_t H5VL_bypass_link_copy(void *src_obj, const H5VL_loc_params_t *loc_params1, void *dst_obj, const H5VL_loc_params_t *loc_params2, hid_t lcpl_id, hid_t lapl_id, hid_t dxpl_id, void **req);
-static herr_t H5VL_bypass_link_move(void *src_obj, const H5VL_loc_params_t *loc_params1, void *dst_obj, const H5VL_loc_params_t *loc_params2, hid_t lcpl_id, hid_t lapl_id, hid_t dxpl_id, void **req);
-static herr_t H5VL_bypass_link_get(void *obj, const H5VL_loc_params_t *loc_params, H5VL_link_get_args_t *args, hid_t dxpl_id, void **req);
-static herr_t H5VL_bypass_link_specific(void *obj, const H5VL_loc_params_t *loc_params, H5VL_link_specific_args_t *args, hid_t dxpl_id, void **req);
-static herr_t H5VL_bypass_link_optional(void *obj, const H5VL_loc_params_t *loc_params, H5VL_optional_args_t *args, hid_t dxpl_id, void **req);
+static herr_t H5VL_bypass_link_create(H5VL_link_create_args_t *args, void *obj,
+                                      const H5VL_loc_params_t *loc_params, hid_t lcpl_id, hid_t lapl_id,
+                                      hid_t dxpl_id, void **req);
+static herr_t H5VL_bypass_link_copy(void *src_obj, const H5VL_loc_params_t *loc_params1, void *dst_obj,
+                                    const H5VL_loc_params_t *loc_params2, hid_t lcpl_id, hid_t lapl_id,
+                                    hid_t dxpl_id, void **req);
+static herr_t H5VL_bypass_link_move(void *src_obj, const H5VL_loc_params_t *loc_params1, void *dst_obj,
+                                    const H5VL_loc_params_t *loc_params2, hid_t lcpl_id, hid_t lapl_id,
+                                    hid_t dxpl_id, void **req);
+static herr_t H5VL_bypass_link_get(void *obj, const H5VL_loc_params_t *loc_params, H5VL_link_get_args_t *args,
+                                   hid_t dxpl_id, void **req);
+static herr_t H5VL_bypass_link_specific(void *obj, const H5VL_loc_params_t *loc_params,
+                                        H5VL_link_specific_args_t *args, hid_t dxpl_id, void **req);
+static herr_t H5VL_bypass_link_optional(void *obj, const H5VL_loc_params_t *loc_params,
+                                        H5VL_optional_args_t *args, hid_t dxpl_id, void **req);
 
 /* Object callbacks */
-static void *H5VL_bypass_object_open(void *obj, const H5VL_loc_params_t *loc_params, H5I_type_t *opened_type, hid_t dxpl_id, void **req);
-static herr_t H5VL_bypass_object_copy(void *src_obj, const H5VL_loc_params_t *src_loc_params, const char *src_name, void *dst_obj, const H5VL_loc_params_t *dst_loc_params, const char *dst_name, hid_t ocpypl_id, hid_t lcpl_id, hid_t dxpl_id, void **req);
-static herr_t H5VL_bypass_object_get(void *obj, const H5VL_loc_params_t *loc_params, H5VL_object_get_args_t *args, hid_t dxpl_id, void **req);
-static herr_t H5VL_bypass_object_specific(void *obj, const H5VL_loc_params_t *loc_params, H5VL_object_specific_args_t *args, hid_t dxpl_id, void **req);
-static herr_t H5VL_bypass_object_optional(void *obj, const H5VL_loc_params_t *loc_params, H5VL_optional_args_t *args, hid_t dxpl_id, void **req);
+static void  *H5VL_bypass_object_open(void *obj, const H5VL_loc_params_t *loc_params, H5I_type_t *opened_type,
+                                      hid_t dxpl_id, void **req);
+static herr_t H5VL_bypass_object_copy(void *src_obj, const H5VL_loc_params_t *src_loc_params,
+                                      const char *src_name, void *dst_obj,
+                                      const H5VL_loc_params_t *dst_loc_params, const char *dst_name,
+                                      hid_t ocpypl_id, hid_t lcpl_id, hid_t dxpl_id, void **req);
+static herr_t H5VL_bypass_object_get(void *obj, const H5VL_loc_params_t *loc_params,
+                                     H5VL_object_get_args_t *args, hid_t dxpl_id, void **req);
+static herr_t H5VL_bypass_object_specific(void *obj, const H5VL_loc_params_t *loc_params,
+                                          H5VL_object_specific_args_t *args, hid_t dxpl_id, void **req);
+static herr_t H5VL_bypass_object_optional(void *obj, const H5VL_loc_params_t *loc_params,
+                                          H5VL_optional_args_t *args, hid_t dxpl_id, void **req);
 
 /* Container/connector introspection callbacks */
-static herr_t H5VL_bypass_introspect_get_conn_cls(void *obj, H5VL_get_conn_lvl_t lvl, const H5VL_class_t **conn_cls);
+static herr_t H5VL_bypass_introspect_get_conn_cls(void *obj, H5VL_get_conn_lvl_t lvl,
+                                                  const H5VL_class_t **conn_cls);
 static herr_t H5VL_bypass_introspect_get_cap_flags(const void *info, uint64_t *cap_flags);
 static herr_t H5VL_bypass_introspect_opt_query(void *obj, H5VL_subclass_t cls, int op_type, uint64_t *flags);
 
@@ -184,12 +237,42 @@ static herr_t H5VL_bypass_blob_specific(void *obj, void *blob_id, H5VL_blob_spec
 static herr_t H5VL_bypass_blob_optional(void *obj, void *blob_id, H5VL_optional_args_t *args);
 
 /* Token callbacks */
-static herr_t H5VL_bypass_token_cmp(void *obj, const H5O_token_t *token1, const H5O_token_t *token2, int *cmp_value);
-static herr_t H5VL_bypass_token_to_str(void *obj, H5I_type_t obj_type, const H5O_token_t *token, char **token_str);
-static herr_t H5VL_bypass_token_from_str(void *obj, H5I_type_t obj_type, const char *token_str, H5O_token_t *token);
+static herr_t H5VL_bypass_token_cmp(void *obj, const H5O_token_t *token1, const H5O_token_t *token2,
+                                    int *cmp_value);
+static herr_t H5VL_bypass_token_to_str(void *obj, H5I_type_t obj_type, const H5O_token_t *token,
+                                       char **token_str);
+static herr_t H5VL_bypass_token_from_str(void *obj, H5I_type_t obj_type, const char *token_str,
+                                         H5O_token_t *token);
 
 /* Generic optional callback */
 static herr_t H5VL_bypass_optional(void *obj, H5VL_optional_args_t *args, hid_t dxpl_id, void **req);
+
+/* Check if any threads are still performing or waiting for tasks */
+herr_t is_any_thread_active(bool *out);
+
+/* Populate the dataset structure on the bypass object */
+static herr_t dset_open_helper(H5VL_bypass_t *obj, hid_t dxpl_id, void **req);
+
+/* Release the structures associated with the dataset object */
+static herr_t release_dset_info(Bypass_dataset_t *dset);
+
+/* Retrieve the in-file location of the dataset, if any */
+static herr_t get_dset_location(H5VL_bypass_t *dset_obj, hid_t dxpl_id, void **req, haddr_t *location);
+
+/* Check if any property of the dataset (type, layout, etc.) should force use of Native VOL */
+static herr_t should_dset_use_native(const Bypass_dataset_t *dset, bool *should_use_native);
+
+/* Compare two datatype instances for equivalence*/
+static bool bypass_types_equal(dtype_info_t *type_info1, dtype_info_t *type_info2);
+
+/* Retrieve and store datatype information on a dataset object */
+static herr_t get_dtype_info(H5VL_bypass_t *dset_obj, hid_t dxpl_id, void **req);
+
+/* Populate datatype information from a datatype ID */
+static herr_t get_dtype_info_helper(hid_t type_id, dtype_info_t *type_info_out);
+
+static H5D_space_status_t
+get_dset_space_status(H5VL_bypass_t *dset_obj, hid_t dxpl_id, void **req);
 
 /*******************/
 /* Local variables */
@@ -197,112 +280,125 @@ static herr_t H5VL_bypass_optional(void *obj, H5VL_optional_args_t *args, hid_t 
 
 /* Bypass VOL connector class struct */
 static const H5VL_class_t H5VL_bypass_g = {
-    H5VL_VERSION,                                       /* VOL class struct version */
-    (H5VL_class_value_t)H5VL_BYPASS_VALUE,              /* value        */
-    H5VL_BYPASS_NAME,                                   /* name         */
-    H5VL_BYPASS_VERSION,                                /* connector version */
-    0,                                                  /* capability flags */
-    H5VL_bypass_init,                                   /* initialize   */
-    H5VL_bypass_term,                                   /* terminate    */
-    {                                           /* info_cls */
-        sizeof(H5VL_bypass_info_t),                     /* size    */
-        H5VL_bypass_info_copy,                          /* copy    */
-        H5VL_bypass_info_cmp,                           /* compare */
-        H5VL_bypass_info_free,                          /* free    */
-        H5VL_bypass_info_to_str,                        /* to_str  */
-        H5VL_bypass_str_to_info                         /* from_str */
+    H5VL_VERSION,                          /* VOL class struct version */
+    (H5VL_class_value_t)H5VL_BYPASS_VALUE, /* value        */
+    H5VL_BYPASS_NAME,                      /* name         */
+    H5VL_BYPASS_VERSION,                   /* connector version */
+    0,                                     /* capability flags */
+    H5VL_bypass_init,                      /* initialize   */
+    H5VL_bypass_term,                      /* terminate    */
+    {
+        /* info_cls */
+        sizeof(H5VL_bypass_info_t), /* size    */
+        H5VL_bypass_info_copy,      /* copy    */
+        H5VL_bypass_info_cmp,       /* compare */
+        H5VL_bypass_info_free,      /* free    */
+        H5VL_bypass_info_to_str,    /* to_str  */
+        H5VL_bypass_str_to_info     /* from_str */
     },
-    {                                           /* wrap_cls */
-        H5VL_bypass_get_object,                         /* get_object   */
-        H5VL_bypass_get_wrap_ctx,                       /* get_wrap_ctx */
-        H5VL_bypass_wrap_object,                        /* wrap_object  */
-        H5VL_bypass_unwrap_object,                      /* unwrap_object */
-        H5VL_bypass_free_wrap_ctx                       /* free_wrap_ctx */
+    {
+        /* wrap_cls */
+        H5VL_bypass_get_object,    /* get_object   */
+        H5VL_bypass_get_wrap_ctx,  /* get_wrap_ctx */
+        H5VL_bypass_wrap_object,   /* wrap_object  */
+        H5VL_bypass_unwrap_object, /* unwrap_object */
+        H5VL_bypass_free_wrap_ctx  /* free_wrap_ctx */
     },
-    {                                           /* attribute_cls */
-        H5VL_bypass_attr_create,                        /* create */
-        H5VL_bypass_attr_open,                          /* open */
-        H5VL_bypass_attr_read,                          /* read */
-        H5VL_bypass_attr_write,                         /* write */
-        H5VL_bypass_attr_get,                           /* get */
-        H5VL_bypass_attr_specific,                      /* specific */
-        H5VL_bypass_attr_optional,                      /* optional */
-        H5VL_bypass_attr_close                          /* close */
+    {
+        /* attribute_cls */
+        H5VL_bypass_attr_create,   /* create */
+        H5VL_bypass_attr_open,     /* open */
+        H5VL_bypass_attr_read,     /* read */
+        H5VL_bypass_attr_write,    /* write */
+        H5VL_bypass_attr_get,      /* get */
+        H5VL_bypass_attr_specific, /* specific */
+        H5VL_bypass_attr_optional, /* optional */
+        H5VL_bypass_attr_close     /* close */
     },
-    {                                           /* dataset_cls */
-        H5VL_bypass_dataset_create,                     /* create */
-        H5VL_bypass_dataset_open,                       /* open */
-        H5VL_bypass_dataset_read,                       /* read */
-        H5VL_bypass_dataset_write,                      /* write */
-        H5VL_bypass_dataset_get,                        /* get */
-        H5VL_bypass_dataset_specific,                   /* specific */
-        H5VL_bypass_dataset_optional,                   /* optional */
-        H5VL_bypass_dataset_close                       /* close */
+    {
+        /* dataset_cls */
+        H5VL_bypass_dataset_create,   /* create */
+        H5VL_bypass_dataset_open,     /* open */
+        H5VL_bypass_dataset_read,     /* read */
+        H5VL_bypass_dataset_write,    /* write */
+        H5VL_bypass_dataset_get,      /* get */
+        H5VL_bypass_dataset_specific, /* specific */
+        H5VL_bypass_dataset_optional, /* optional */
+        H5VL_bypass_dataset_close     /* close */
     },
-    {                                           /* datatype_cls */
-        H5VL_bypass_datatype_commit,                    /* commit */
-        H5VL_bypass_datatype_open,                      /* open */
-        H5VL_bypass_datatype_get,                       /* get_size */
-        H5VL_bypass_datatype_specific,                  /* specific */
-        H5VL_bypass_datatype_optional,                  /* optional */
-        H5VL_bypass_datatype_close                      /* close */
+    {
+        /* datatype_cls */
+        H5VL_bypass_datatype_commit,   /* commit */
+        H5VL_bypass_datatype_open,     /* open */
+        H5VL_bypass_datatype_get,      /* get_size */
+        H5VL_bypass_datatype_specific, /* specific */
+        H5VL_bypass_datatype_optional, /* optional */
+        H5VL_bypass_datatype_close     /* close */
     },
-    {                                           /* file_cls */
-        H5VL_bypass_file_create,                        /* create */
-        H5VL_bypass_file_open,                          /* open */
-        H5VL_bypass_file_get,                           /* get */
-        H5VL_bypass_file_specific,                      /* specific */
-        H5VL_bypass_file_optional,                      /* optional */
-        H5VL_bypass_file_close                          /* close */
+    {
+        /* file_cls */
+        H5VL_bypass_file_create,   /* create */
+        H5VL_bypass_file_open,     /* open */
+        H5VL_bypass_file_get,      /* get */
+        H5VL_bypass_file_specific, /* specific */
+        H5VL_bypass_file_optional, /* optional */
+        H5VL_bypass_file_close     /* close */
     },
-    {                                           /* group_cls */
-        H5VL_bypass_group_create,                       /* create */
-        H5VL_bypass_group_open,                         /* open */
-        H5VL_bypass_group_get,                          /* get */
-        H5VL_bypass_group_specific,                     /* specific */
-        H5VL_bypass_group_optional,                     /* optional */
-        H5VL_bypass_group_close                         /* close */
+    {
+        /* group_cls */
+        H5VL_bypass_group_create,   /* create */
+        H5VL_bypass_group_open,     /* open */
+        H5VL_bypass_group_get,      /* get */
+        H5VL_bypass_group_specific, /* specific */
+        H5VL_bypass_group_optional, /* optional */
+        H5VL_bypass_group_close     /* close */
     },
-    {                                           /* link_cls */
-        H5VL_bypass_link_create,                        /* create */
-        H5VL_bypass_link_copy,                          /* copy */
-        H5VL_bypass_link_move,                          /* move */
-        H5VL_bypass_link_get,                           /* get */
-        H5VL_bypass_link_specific,                      /* specific */
-        H5VL_bypass_link_optional                       /* optional */
+    {
+        /* link_cls */
+        H5VL_bypass_link_create,   /* create */
+        H5VL_bypass_link_copy,     /* copy */
+        H5VL_bypass_link_move,     /* move */
+        H5VL_bypass_link_get,      /* get */
+        H5VL_bypass_link_specific, /* specific */
+        H5VL_bypass_link_optional  /* optional */
     },
-    {                                           /* object_cls */
-        H5VL_bypass_object_open,                        /* open */
-        H5VL_bypass_object_copy,                        /* copy */
-        H5VL_bypass_object_get,                         /* get */
-        H5VL_bypass_object_specific,                    /* specific */
-        H5VL_bypass_object_optional                     /* optional */
+    {
+        /* object_cls */
+        H5VL_bypass_object_open,     /* open */
+        H5VL_bypass_object_copy,     /* copy */
+        H5VL_bypass_object_get,      /* get */
+        H5VL_bypass_object_specific, /* specific */
+        H5VL_bypass_object_optional  /* optional */
     },
-    {                                           /* introspect_cls */
-        H5VL_bypass_introspect_get_conn_cls,            /* get_conn_cls */
-        H5VL_bypass_introspect_get_cap_flags,           /* get_cap_flags */
-        H5VL_bypass_introspect_opt_query,               /* opt_query */
+    {
+        /* introspect_cls */
+        H5VL_bypass_introspect_get_conn_cls,  /* get_conn_cls */
+        H5VL_bypass_introspect_get_cap_flags, /* get_cap_flags */
+        H5VL_bypass_introspect_opt_query,     /* opt_query */
     },
-    {                                           /* request_cls */
-        H5VL_bypass_request_wait,                       /* wait */
-        H5VL_bypass_request_notify,                     /* notify */
-        H5VL_bypass_request_cancel,                     /* cancel */
-        H5VL_bypass_request_specific,                   /* specific */
-        H5VL_bypass_request_optional,                   /* optional */
-        H5VL_bypass_request_free                        /* free */
+    {
+        /* request_cls */
+        H5VL_bypass_request_wait,     /* wait */
+        H5VL_bypass_request_notify,   /* notify */
+        H5VL_bypass_request_cancel,   /* cancel */
+        H5VL_bypass_request_specific, /* specific */
+        H5VL_bypass_request_optional, /* optional */
+        H5VL_bypass_request_free      /* free */
     },
-    {                                           /* blob_cls */
-        H5VL_bypass_blob_put,                           /* put */
-        H5VL_bypass_blob_get,                           /* get */
-        H5VL_bypass_blob_specific,                      /* specific */
-        H5VL_bypass_blob_optional                       /* optional */
+    {
+        /* blob_cls */
+        H5VL_bypass_blob_put,      /* put */
+        H5VL_bypass_blob_get,      /* get */
+        H5VL_bypass_blob_specific, /* specific */
+        H5VL_bypass_blob_optional  /* optional */
     },
-    {                                           /* token_cls */
-        H5VL_bypass_token_cmp,                          /* cmp */
-        H5VL_bypass_token_to_str,                       /* to_str */
-        H5VL_bypass_token_from_str                      /* from_str */
+    {
+        /* token_cls */
+        H5VL_bypass_token_cmp,     /* cmp */
+        H5VL_bypass_token_to_str,  /* to_str */
+        H5VL_bypass_token_from_str /* from_str */
     },
-    H5VL_bypass_optional                                /* optional */
+    H5VL_bypass_optional /* optional */
 };
 
 /* The connector identification number, initialized at runtime */
@@ -313,12 +409,19 @@ static hid_t H5VL_BYPASS_g = H5I_INVALID_HID;
  *      for a shared library that contains a VOL connector to be detected
  *      and loaded at runtime.
  */
-H5PL_type_t H5PLget_plugin_type(void) {return H5PL_TYPE_VOL;}
-const void *H5PLget_plugin_info(void) {return &H5VL_bypass_g;}
+H5PL_type_t
+H5PLget_plugin_type(void)
+{
+    return H5PL_TYPE_VOL;
+}
+const void *
+H5PLget_plugin_info(void)
+{
+    return &H5VL_bypass_g;
+}
 
-static void* start_thread_for_pool(void* args);
+static void *start_thread_for_pool(void *args);
 
-
 /*-------------------------------------------------------------------------
  * Function:    H5VL_bypass_new_obj
  *
@@ -337,15 +440,17 @@ H5VL_bypass_new_obj(void *under_obj, hid_t under_vol_id)
 {
     H5VL_bypass_t *new_obj;
 
-    new_obj = (H5VL_bypass_t *)calloc(1, sizeof(H5VL_bypass_t));
+    new_obj               = (H5VL_bypass_t *)calloc(1, sizeof(H5VL_bypass_t));
     new_obj->under_object = under_obj;
     new_obj->under_vol_id = under_vol_id;
+    new_obj->type = H5I_BADID;
+    new_obj->file_name[0] = '\0';
+
     H5Iinc_ref(new_obj->under_vol_id);
 
     return new_obj;
 } /* end H5VL_bypass_obj() */
 
-
 /*-------------------------------------------------------------------------
  * Function:    H5VL_bypass_free_obj
  *
@@ -366,19 +471,34 @@ static herr_t
 H5VL_bypass_free_obj(H5VL_bypass_t *obj)
 {
     hid_t err_id;
+    herr_t ret_value = 0;
+
+    assert(obj);
 
     err_id = H5Eget_current_stack();
 
-    H5Idec_ref(obj->under_vol_id);
+    if (H5Idec_ref(obj->under_vol_id) < 0) {
+        fprintf(stderr, "failed to decrement reference count on underlying VOL connector\n");
+        ret_value = -1;
+        goto done;
+    }
+
+    if (obj->type == H5I_DATASET) {
+        if (release_dset_info(&obj->u.dataset) < 0) {
+            fprintf(stderr, "failed to release dataset-specific bypass object\n");
+            ret_value = -1;
+            goto done;
+        }
+    }
 
     H5Eset_current_stack(err_id);
 
+done:
     free(obj);
 
-    return 0;
+    return ret_value;
 } /* end H5VL_bypass_free_obj() */
 
-
 /*-------------------------------------------------------------------------
  * Function:    H5VL_bypass_register
  *
@@ -397,13 +517,12 @@ hid_t
 H5VL_bypass_register(void)
 {
     /* Singleton register the bypass VOL connector ID */
-    if(H5VL_BYPASS_g < 0)
+    if (H5VL_BYPASS_g < 0)
         H5VL_BYPASS_g = H5VLregister_connector(&H5VL_bypass_g, H5P_DEFAULT);
 
     return H5VL_BYPASS_g;
 } /* end H5VL_bypass_register() */
 
-
 /*-------------------------------------------------------------------------
  * Function:    H5VL_bypass_init
  *
@@ -421,7 +540,9 @@ H5VL_bypass_init(hid_t vipl_id)
 {
     char *nthreads_str = NULL;
     char *nsteps_str   = NULL;
-    //info_for_thread_t info_for_thread[nthreads_tpool]; /* Remove it and use the global variable meta_for_thread? */
+    pthread_mutexattr_t attr;
+    // info_for_thread_t info_for_thread[nthreads_tpool]; /* Remove it and use the global variable
+    // meta_for_thread? */
     int i;
 
 #ifdef ENABLE_BYPASS_LOGGING
@@ -433,14 +554,13 @@ H5VL_bypass_init(hid_t vipl_id)
 
     /* Memory allocation for some information structures */
     file_stuff = (file_t *)calloc(file_stuff_size, sizeof(file_t));
-    dset_stuff = (dset_t *)calloc(dset_info_size, sizeof(dset_t));
     info_stuff = (info_t *)calloc(info_size, sizeof(info_t));
 
     /* Retrieve the number of threads for the thread pool from the user's input */
     nthreads_str = getenv("BYPASS_VOL_NTHREADS");
 
     if (nthreads_str)
-        nthreads_tpool = atoi(nthreads_str); 
+        nthreads_tpool = atoi(nthreads_str);
 
     /* The minimal number of threads is 1 while the maximal is 32 */
     if (nthreads_tpool < 1)
@@ -451,46 +571,59 @@ H5VL_bypass_init(hid_t vipl_id)
     /* Retrieve the number of steps for the thread pool from the user's input.
      * The thread pool accumulates the number of steps (jobs) in the queue before
      * signalling the threads to process them.
-     */ 
+     */
     nsteps_str = getenv("BYPASS_VOL_NSTEPS");
 
     if (nsteps_str)
         nsteps_tpool = atoi(nsteps_str);
 
-    /* The smallest step is 1 */   
+    /* The smallest step is 1 */
     if (nsteps_tpool < 1)
         nsteps_tpool = 1;
-  
-//printf("%s at line %d: nthreads_tpool = %d, nsteps_tpool = %d\n", __func__, __LINE__, nthreads_tpool, nsteps_tpool);
 
-    /* Initialize the information strcuture for threads to use.  Do it before starting threads */
-    md_for_thread.file_indices = md_for_thread.file_indices_local;
-    md_for_thread.addrs = md_for_thread.addrs_local;
-    md_for_thread.sizes = md_for_thread.sizes_local;
-    md_for_thread.vec_bufs = md_for_thread.vec_bufs_local;
+    // printf("%s at line %d: nthreads_tpool = %d, nsteps_tpool = %d\n", __func__,
+    // __LINE__, nthreads_tpool, nsteps_tpool);
+
+    /* Initialize the information strcuture for threads to use.  Do it before
+     * starting threads */
+    md_for_thread.file_indices   = md_for_thread.file_indices_local;
+    md_for_thread.addrs          = md_for_thread.addrs_local;
+    md_for_thread.sizes          = md_for_thread.sizes_local;
+    md_for_thread.vec_bufs       = md_for_thread.vec_bufs_local;
     md_for_thread.vec_arr_nalloc = LOCAL_VECTOR_LEN;
     md_for_thread.vec_arr_nused  = 0;
-    md_for_thread.free_memory = false;
+    md_for_thread.free_memory    = false;
 
+    /* Initialize thread active status to true */
+    md_for_thread.thread_is_active = calloc(nthreads_tpool, sizeof(bool));
+
+    for (i = 0; i < nthreads_tpool; i++)
+        md_for_thread.thread_is_active[i] = true;
 
     info_for_thread = malloc(nthreads_tpool * sizeof(info_for_thread_t));
 
-    pthread_mutex_init(&mutex_local, NULL);
+    pthread_mutexattr_init(&attr);
+    pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
+    pthread_mutex_init(&mutex_local, &attr);
+
     pthread_cond_init(&cond_local, NULL);
     pthread_cond_init(&continue_local, NULL);
+    pthread_cond_init(&cond_read_finished, NULL);
 
     /* Start threads for the thread pool to process the data */
     for (i = 0; i < nthreads_tpool; i++) {
-	info_for_thread[i].thread_id = i; /* Remove info_for_thread and pass in the thread_id directly to pthread_create */
+        info_for_thread[i].thread_id = i; /* Remove info_for_thread and pass in the
+                                             thread_id directly to pthread_create */
 
-	if (pthread_create(&th[i], NULL, &start_thread_for_pool, &info_for_thread[i]) != 0)
-	    fprintf(stderr, "failed to create thread %d\n", i);
+        if (pthread_create(&th[i], NULL, &start_thread_for_pool, &info_for_thread[i]) != 0)
+            fprintf(stderr, "failed to create thread %d\n", i);
     }
+
+    pthread_mutexattr_destroy(&attr);
 
     return 0;
 } /* end H5VL_bypass_init() */
 
-
 /*---------------------------------------------------------------------------
  * Function:    H5VL_bypass_term
  *
@@ -508,7 +641,8 @@ static herr_t
 H5VL_bypass_term(void)
 {
     FILE *log_fp;
-    int i;
+    int   i;
+    void  *thread_ret = NULL;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL TERM\n");
@@ -519,20 +653,26 @@ H5VL_bypass_term(void)
 
     stop_tpool = true;
 
-    /* If H5Dread isn't even called in the application, the thread pool is waiting for this condition variable.
-     * This broadcast tells the thread pool to stop waiting.  Turning on the 'thread_task_finished' variable stops
-     * the while loop for pthread_cond_wait in thread pool. */ 
+    /* If H5Dread isn't even called in the application, the thread pool is waiting
+     * for this condition variable. This broadcast tells the thread pool to stop
+     * waiting.  Turning on the 'thread_task_finished' variable stops the while
+     * loop for pthread_cond_wait in thread pool. */
     thread_task_finished = true;
 
     pthread_cond_broadcast(&cond_local);
 
     for (i = 0; i < nthreads_tpool; i++) {
-	if (pthread_join(th[i], NULL) != 0)
-	    fprintf(stderr, "failed to join thread %d\n", i);
+        if (pthread_join(th[i], &thread_ret) != 0)
+            fprintf(stderr, "failed to join thread %d\n", i);
+        
+        if (thread_ret != (void*) 0) {
+            fprintf(stderr, "thread %d failed\n", i);
+        }
     }
 
     pthread_mutex_destroy(&mutex_local);
     pthread_cond_destroy(&cond_local);
+    pthread_cond_destroy(&cond_read_finished);
     pthread_cond_destroy(&continue_local);
 
     /* Open the log file and output the following info:
@@ -546,8 +686,9 @@ H5VL_bypass_term(void)
     log_fp = fopen("info.log", "w");
 
     for (i = 0; i < info_count; i++) {
-        /* The END_OF_READ flag is used for multiple H5Dread calls.  It indicates the end of one call with
-         * the special symbols of '###\n' in the log file. */
+        /* The END_OF_READ flag is used for multiple H5Dread calls.  It indicates
+         * the end of one call with the special symbols of '###\n' in the log file.
+         */
         if (!info_stuff[i].end_of_read)
             fprintf(log_fp, "%s %s %" PRIuHADDR " %" PRIuHADDR " %" PRIuHADDR " %" PRIuHADDR"\n",
                     info_stuff[i].file_name, info_stuff[i].dset_name,
@@ -556,38 +697,36 @@ H5VL_bypass_term(void)
         else
             fprintf(log_fp, "###\n");
 
-	//printf("%s: %d, i = %d, end_of_read = %d\n", __func__, __LINE__, i, info_stuff[i].end_of_read);
+        // printf("%s: %d, i = %d, end_of_read = %d\n", __func__, __LINE__, i,
+        // info_stuff[i].end_of_read);
     }
 
     fclose(log_fp);
-
-    //printf("%s: %d, dset_count = %d, dset_stuff[0].space_id = %lld\n", __func__, __LINE__, dset_count, dset_stuff[0].space_id);
 
     if (file_stuff)
         free(file_stuff);
     if (info_stuff)
         free(info_stuff);
-    if (dset_stuff)
-        free(dset_stuff);
     if (info_for_thread)
         free(info_for_thread);
+    if (md_for_thread.thread_is_active)
+        free(md_for_thread.thread_is_active);
 
     /* Wait until all threads finish before releasing resources */
     if (md_for_thread.free_memory) {
-	if (md_for_thread.file_indices)
-	    free(md_for_thread.file_indices);
-	if (md_for_thread.addrs)
-	    free(md_for_thread.addrs);
-	if (md_for_thread.sizes)
-	    free(md_for_thread.sizes);
-	if (md_for_thread.vec_bufs)
-	    free(md_for_thread.vec_bufs);
+        if (md_for_thread.file_indices)
+            free(md_for_thread.file_indices);
+        if (md_for_thread.addrs)
+            free(md_for_thread.addrs);
+        if (md_for_thread.sizes)
+            free(md_for_thread.sizes);
+        if (md_for_thread.vec_bufs)
+            free(md_for_thread.vec_bufs);
     }
 
     return 0;
 } /* end H5VL_bypass_term() */
 
-
 /*---------------------------------------------------------------------------
  * Function:    H5VL_bypass_info_copy
  *
@@ -602,7 +741,7 @@ static void *
 H5VL_bypass_info_copy(const void *_info)
 {
     const H5VL_bypass_info_t *info = (const H5VL_bypass_info_t *)_info;
-    H5VL_bypass_info_t *new_info;
+    H5VL_bypass_info_t       *new_info;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL INFO Copy\n");
@@ -614,13 +753,12 @@ H5VL_bypass_info_copy(const void *_info)
     /* Increment reference count on underlying VOL ID, and copy the VOL info */
     new_info->under_vol_id = info->under_vol_id;
     H5Iinc_ref(new_info->under_vol_id);
-    if(info->under_vol_info)
+    if (info->under_vol_info)
         H5VLcopy_connector_info(new_info->under_vol_id, &(new_info->under_vol_info), info->under_vol_info);
 
     return new_info;
 } /* end H5VL_bypass_info_copy() */
 
-
 /*---------------------------------------------------------------------------
  * Function:    H5VL_bypass_info_cmp
  *
@@ -651,18 +789,17 @@ H5VL_bypass_info_cmp(int *cmp_value, const void *_info1, const void *_info2)
 
     /* Compare under VOL connector classes */
     H5VLcmp_connector_cls(cmp_value, info1->under_vol_id, info2->under_vol_id);
-    if(*cmp_value != 0)
+    if (*cmp_value != 0)
         return 0;
 
     /* Compare under VOL connector info objects */
     H5VLcmp_connector_info(cmp_value, info1->under_vol_id, info1->under_vol_info, info2->under_vol_info);
-    if(*cmp_value != 0)
+    if (*cmp_value != 0)
         return 0;
 
     return 0;
 } /* end H5VL_bypass_info_cmp() */
 
-
 /*---------------------------------------------------------------------------
  * Function:    H5VL_bypass_info_free
  *
@@ -680,7 +817,7 @@ static herr_t
 H5VL_bypass_info_free(void *_info)
 {
     H5VL_bypass_info_t *info = (H5VL_bypass_info_t *)_info;
-    hid_t err_id;
+    hid_t               err_id;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL INFO Free\n");
@@ -689,7 +826,7 @@ H5VL_bypass_info_free(void *_info)
     err_id = H5Eget_current_stack();
 
     /* Release underlying VOL ID and info */
-    if(info->under_vol_info)
+    if (info->under_vol_info)
         H5VLfree_connector_info(info->under_vol_id, info->under_vol_info);
     H5Idec_ref(info->under_vol_id);
 
@@ -701,7 +838,6 @@ H5VL_bypass_info_free(void *_info)
     return 0;
 } /* end H5VL_bypass_info_free() */
 
-
 /*---------------------------------------------------------------------------
  * Function:    H5VL_bypass_info_to_str
  *
@@ -715,10 +851,10 @@ H5VL_bypass_info_free(void *_info)
 static herr_t
 H5VL_bypass_info_to_str(const void *_info, char **str)
 {
-    const H5VL_bypass_info_t *info = (const H5VL_bypass_info_t *)_info;
-    H5VL_class_value_t under_value = (H5VL_class_value_t)-1;
-    char *under_vol_string = NULL;
-    size_t under_vol_str_len = 0;
+    const H5VL_bypass_info_t *info              = (const H5VL_bypass_info_t *)_info;
+    H5VL_class_value_t        under_value       = (H5VL_class_value_t)-1;
+    char                     *under_vol_string  = NULL;
+    size_t                    under_vol_str_len = 0;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL INFO To String\n");
@@ -729,7 +865,7 @@ H5VL_bypass_info_to_str(const void *_info, char **str)
     H5VLconnector_info_to_str(info->under_vol_info, info->under_vol_id, &under_vol_string);
 
     /* Determine length of underlying VOL info string */
-    if(under_vol_string)
+    if (under_vol_string)
         under_vol_str_len = strlen(under_vol_string);
 
     /* Allocate space for our info */
@@ -738,19 +874,19 @@ H5VL_bypass_info_to_str(const void *_info, char **str)
 
     /* Encode our info
      * Normally we'd use snprintf() here for a little extra safety, but that
-     * call had problems on Windows until recently. So, to be as platform-independent
-     * as we can, we're using sprintf() instead.
+     * call had problems on Windows until recently. So, to be as
+     * platform-independent as we can, we're using sprintf() instead.
      */
-    sprintf(*str, "under_vol=%u;under_info={%s}", (unsigned)under_value, (under_vol_string ? under_vol_string : ""));
+    sprintf(*str, "under_vol=%u;under_info={%s}", (unsigned)under_value,
+            (under_vol_string ? under_vol_string : ""));
 
     /* Release under VOL info string, if there is one */
-    if(under_vol_string)
+    if (under_vol_string)
         H5free_memory(under_vol_string);
 
     return 0;
 } /* end H5VL_bypass_info_to_str() */
 
-
 /*---------------------------------------------------------------------------
  * Function:    H5VL_bypass_str_to_info
  *
@@ -765,10 +901,10 @@ static herr_t
 H5VL_bypass_str_to_info(const char *str, void **_info)
 {
     H5VL_bypass_info_t *info;
-    unsigned under_vol_value;
-    const char *under_vol_info_start, *under_vol_info_end;
-    hid_t under_vol_id;
-    void *under_vol_info = NULL;
+    unsigned            under_vol_value;
+    const char         *under_vol_info_start, *under_vol_info_end;
+    hid_t               under_vol_id;
+    void               *under_vol_info = NULL;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL INFO String To Info\n");
@@ -776,15 +912,16 @@ H5VL_bypass_str_to_info(const char *str, void **_info)
 
     /* Retrieve the underlying VOL connector value and info */
     sscanf(str, "under_vol=%u;", &under_vol_value);
-    under_vol_id = H5VLregister_connector_by_value((H5VL_class_value_t)under_vol_value, H5P_DEFAULT);
+    under_vol_id         = H5VLregister_connector_by_value((H5VL_class_value_t)under_vol_value, H5P_DEFAULT);
     under_vol_info_start = strchr(str, '{');
-    under_vol_info_end = strrchr(str, '}');
+    under_vol_info_end   = strrchr(str, '}');
     assert(under_vol_info_end > under_vol_info_start);
-    if(under_vol_info_end != (under_vol_info_start + 1)) {
+    if (under_vol_info_end != (under_vol_info_start + 1)) {
         char *under_vol_info_str;
 
         under_vol_info_str = (char *)malloc((size_t)(under_vol_info_end - under_vol_info_start));
-        memcpy(under_vol_info_str, under_vol_info_start + 1, (size_t)((under_vol_info_end - under_vol_info_start) - 1));
+        memcpy(under_vol_info_str, under_vol_info_start + 1,
+               (size_t)((under_vol_info_end - under_vol_info_start) - 1));
         *(under_vol_info_str + (under_vol_info_end - under_vol_info_start)) = '\0';
 
         H5VLconnector_str_to_info(under_vol_info_str, under_vol_id, &under_vol_info);
@@ -793,8 +930,8 @@ H5VL_bypass_str_to_info(const char *str, void **_info)
     } /* end else */
 
     /* Allocate new bypass VOL connector info and set its fields */
-    info = (H5VL_bypass_info_t *)calloc(1, sizeof(H5VL_bypass_info_t));
-    info->under_vol_id = under_vol_id;
+    info                 = (H5VL_bypass_info_t *)calloc(1, sizeof(H5VL_bypass_info_t));
+    info->under_vol_id   = under_vol_id;
     info->under_vol_info = under_vol_info;
 
     /* Set return value */
@@ -803,7 +940,6 @@ H5VL_bypass_str_to_info(const char *str, void **_info)
     return 0;
 } /* end H5VL_bypass_str_to_info() */
 
-
 /*---------------------------------------------------------------------------
  * Function:    H5VL_bypass_get_object
  *
@@ -826,7 +962,6 @@ H5VL_bypass_get_object(const void *obj)
     return H5VLget_object(o->under_object, o->under_vol_id);
 } /* end H5VL_bypass_get_object() */
 
-
 /*---------------------------------------------------------------------------
  * Function:    H5VL_bypass_get_wrap_ctx
  *
@@ -840,7 +975,7 @@ H5VL_bypass_get_object(const void *obj)
 static herr_t
 H5VL_bypass_get_wrap_ctx(const void *obj, void **wrap_ctx)
 {
-    const H5VL_bypass_t *o = (const H5VL_bypass_t *)obj;
+    const H5VL_bypass_t    *o = (const H5VL_bypass_t *)obj;
     H5VL_bypass_wrap_ctx_t *new_wrap_ctx;
 
 #ifdef ENABLE_BYPASS_LOGGING
@@ -861,7 +996,6 @@ H5VL_bypass_get_wrap_ctx(const void *obj, void **wrap_ctx)
     return 0;
 } /* end H5VL_bypass_get_wrap_ctx() */
 
-
 /*---------------------------------------------------------------------------
  * Function:    H5VL_bypass_wrap_object
  *
@@ -876,8 +1010,8 @@ static void *
 H5VL_bypass_wrap_object(void *obj, H5I_type_t obj_type, void *_wrap_ctx)
 {
     H5VL_bypass_wrap_ctx_t *wrap_ctx = (H5VL_bypass_wrap_ctx_t *)_wrap_ctx;
-    H5VL_bypass_t *new_obj;
-    void *under;
+    H5VL_bypass_t          *new_obj;
+    void                   *under;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL WRAP Object\n");
@@ -885,7 +1019,7 @@ H5VL_bypass_wrap_object(void *obj, H5I_type_t obj_type, void *_wrap_ctx)
 
     /* Wrap the object with the underlying VOL */
     under = H5VLwrap_object(obj, obj_type, wrap_ctx->under_vol_id, wrap_ctx->under_wrap_ctx);
-    if(under)
+    if (under)
         new_obj = H5VL_bypass_new_obj(under, wrap_ctx->under_vol_id);
     else
         new_obj = NULL;
@@ -893,7 +1027,6 @@ H5VL_bypass_wrap_object(void *obj, H5I_type_t obj_type, void *_wrap_ctx)
     return new_obj;
 } /* end H5VL_bypass_wrap_object() */
 
-
 /*---------------------------------------------------------------------------
  * Function:    H5VL_bypass_unwrap_object
  *
@@ -909,7 +1042,7 @@ static void *
 H5VL_bypass_unwrap_object(void *obj)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
-    void *under;
+    void          *under;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL UNWRAP Object\n");
@@ -918,13 +1051,12 @@ H5VL_bypass_unwrap_object(void *obj)
     /* Unrap the object with the underlying VOL */
     under = H5VLunwrap_object(o->under_object, o->under_vol_id);
 
-    if(under)
+    if (under)
         H5VL_bypass_free_obj(o);
 
     return under;
 } /* end H5VL_bypass_unwrap_object() */
 
-
 /*---------------------------------------------------------------------------
  * Function:    H5VL_bypass_free_wrap_ctx
  *
@@ -942,7 +1074,7 @@ static herr_t
 H5VL_bypass_free_wrap_ctx(void *_wrap_ctx)
 {
     H5VL_bypass_wrap_ctx_t *wrap_ctx = (H5VL_bypass_wrap_ctx_t *)_wrap_ctx;
-    hid_t err_id;
+    hid_t                   err_id;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL WRAP CTX Free\n");
@@ -951,7 +1083,7 @@ H5VL_bypass_free_wrap_ctx(void *_wrap_ctx)
     err_id = H5Eget_current_stack();
 
     /* Release underlying VOL ID and wrap context */
-    if(wrap_ctx->under_wrap_ctx)
+    if (wrap_ctx->under_wrap_ctx)
         H5VLfree_wrap_ctx(wrap_ctx->under_wrap_ctx, wrap_ctx->under_vol_id);
     H5Idec_ref(wrap_ctx->under_vol_id);
 
@@ -963,7 +1095,6 @@ H5VL_bypass_free_wrap_ctx(void *_wrap_ctx)
     return 0;
 } /* end H5VL_bypass_free_wrap_ctx() */
 
-
 /*-------------------------------------------------------------------------
  * Function:    H5VL_bypass_attr_create
  *
@@ -975,33 +1106,32 @@ H5VL_bypass_free_wrap_ctx(void *_wrap_ctx)
  *-------------------------------------------------------------------------
  */
 static void *
-H5VL_bypass_attr_create(void *obj, const H5VL_loc_params_t *loc_params,
-    const char *name, hid_t type_id, hid_t space_id, hid_t acpl_id,
-    hid_t aapl_id, hid_t dxpl_id, void **req)
+H5VL_bypass_attr_create(void *obj, const H5VL_loc_params_t *loc_params, const char *name, hid_t type_id,
+                        hid_t space_id, hid_t acpl_id, hid_t aapl_id, hid_t dxpl_id, void **req)
 {
     H5VL_bypass_t *attr;
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
-    void *under;
+    void          *under;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL ATTRIBUTE Create\n");
 #endif
 
-    under = H5VLattr_create(o->under_object, loc_params, o->under_vol_id, name, type_id, space_id, acpl_id, aapl_id, dxpl_id, req);
-    if(under) {
+    under = H5VLattr_create(o->under_object, loc_params, o->under_vol_id, name, type_id, space_id, acpl_id,
+                            aapl_id, dxpl_id, req);
+    if (under) {
         attr = H5VL_bypass_new_obj(under, o->under_vol_id);
 
         /* Check for async request */
-        if(req && *req)
+        if (req && *req)
             *req = H5VL_bypass_new_obj(*req, o->under_vol_id);
     } /* end if */
     else
         attr = NULL;
 
-    return (void*)attr;
+    return (void *)attr;
 } /* end H5VL_bypass_attr_create() */
 
-
 /*-------------------------------------------------------------------------
  * Function:    H5VL_bypass_attr_open
  *
@@ -1013,23 +1143,23 @@ H5VL_bypass_attr_create(void *obj, const H5VL_loc_params_t *loc_params,
  *-------------------------------------------------------------------------
  */
 static void *
-H5VL_bypass_attr_open(void *obj, const H5VL_loc_params_t *loc_params,
-    const char *name, hid_t aapl_id, hid_t dxpl_id, void **req)
+H5VL_bypass_attr_open(void *obj, const H5VL_loc_params_t *loc_params, const char *name, hid_t aapl_id,
+                      hid_t dxpl_id, void **req)
 {
     H5VL_bypass_t *attr;
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
-    void *under;
+    void          *under;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL ATTRIBUTE Open\n");
 #endif
 
     under = H5VLattr_open(o->under_object, loc_params, o->under_vol_id, name, aapl_id, dxpl_id, req);
-    if(under) {
+    if (under) {
         attr = H5VL_bypass_new_obj(under, o->under_vol_id);
 
         /* Check for async request */
-        if(req && *req)
+        if (req && *req)
             *req = H5VL_bypass_new_obj(*req, o->under_vol_id);
     } /* end if */
     else
@@ -1038,7 +1168,6 @@ H5VL_bypass_attr_open(void *obj, const H5VL_loc_params_t *loc_params,
     return (void *)attr;
 } /* end H5VL_bypass_attr_open() */
 
-
 /*-------------------------------------------------------------------------
  * Function:    H5VL_bypass_attr_read
  *
@@ -1050,11 +1179,10 @@ H5VL_bypass_attr_open(void *obj, const H5VL_loc_params_t *loc_params,
  *-------------------------------------------------------------------------
  */
 static herr_t
-H5VL_bypass_attr_read(void *attr, hid_t mem_type_id, void *buf,
-    hid_t dxpl_id, void **req)
+H5VL_bypass_attr_read(void *attr, hid_t mem_type_id, void *buf, hid_t dxpl_id, void **req)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)attr;
-    herr_t ret_value;
+    herr_t         ret_value;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL ATTRIBUTE Read\n");
@@ -1063,13 +1191,12 @@ H5VL_bypass_attr_read(void *attr, hid_t mem_type_id, void *buf,
     ret_value = H5VLattr_read(o->under_object, o->under_vol_id, mem_type_id, buf, dxpl_id, req);
 
     /* Check for async request */
-    if(req && *req)
+    if (req && *req)
         *req = H5VL_bypass_new_obj(*req, o->under_vol_id);
 
     return ret_value;
 } /* end H5VL_bypass_attr_read() */
 
-
 /*-------------------------------------------------------------------------
  * Function:    H5VL_bypass_attr_write
  *
@@ -1081,11 +1208,10 @@ H5VL_bypass_attr_read(void *attr, hid_t mem_type_id, void *buf,
  *-------------------------------------------------------------------------
  */
 static herr_t
-H5VL_bypass_attr_write(void *attr, hid_t mem_type_id, const void *buf,
-    hid_t dxpl_id, void **req)
+H5VL_bypass_attr_write(void *attr, hid_t mem_type_id, const void *buf, hid_t dxpl_id, void **req)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)attr;
-    herr_t ret_value;
+    herr_t         ret_value;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL ATTRIBUTE Write\n");
@@ -1094,13 +1220,12 @@ H5VL_bypass_attr_write(void *attr, hid_t mem_type_id, const void *buf,
     ret_value = H5VLattr_write(o->under_object, o->under_vol_id, mem_type_id, buf, dxpl_id, req);
 
     /* Check for async request */
-    if(req && *req)
+    if (req && *req)
         *req = H5VL_bypass_new_obj(*req, o->under_vol_id);
 
     return ret_value;
 } /* end H5VL_bypass_attr_write() */
 
-
 /*-------------------------------------------------------------------------
  * Function:    H5VL_bypass_attr_get
  *
@@ -1112,11 +1237,10 @@ H5VL_bypass_attr_write(void *attr, hid_t mem_type_id, const void *buf,
  *-------------------------------------------------------------------------
  */
 static herr_t
-H5VL_bypass_attr_get(void *obj, H5VL_attr_get_args_t *args, hid_t dxpl_id,
-    void **req)
+H5VL_bypass_attr_get(void *obj, H5VL_attr_get_args_t *args, hid_t dxpl_id, void **req)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
-    herr_t ret_value;
+    herr_t         ret_value;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL ATTRIBUTE Get\n");
@@ -1125,13 +1249,12 @@ H5VL_bypass_attr_get(void *obj, H5VL_attr_get_args_t *args, hid_t dxpl_id,
     ret_value = H5VLattr_get(o->under_object, o->under_vol_id, args, dxpl_id, req);
 
     /* Check for async request */
-    if(req && *req)
+    if (req && *req)
         *req = H5VL_bypass_new_obj(*req, o->under_vol_id);
 
     return ret_value;
 } /* end H5VL_bypass_attr_get() */
 
-
 /*-------------------------------------------------------------------------
  * Function:    H5VL_bypass_attr_specific
  *
@@ -1143,11 +1266,11 @@ H5VL_bypass_attr_get(void *obj, H5VL_attr_get_args_t *args, hid_t dxpl_id,
  *-------------------------------------------------------------------------
  */
 static herr_t
-H5VL_bypass_attr_specific(void *obj, const H5VL_loc_params_t *loc_params,
-    H5VL_attr_specific_args_t *args, hid_t dxpl_id, void **req)
+H5VL_bypass_attr_specific(void *obj, const H5VL_loc_params_t *loc_params, H5VL_attr_specific_args_t *args,
+                          hid_t dxpl_id, void **req)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
-    herr_t ret_value;
+    herr_t         ret_value;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL ATTRIBUTE Specific\n");
@@ -1156,13 +1279,12 @@ H5VL_bypass_attr_specific(void *obj, const H5VL_loc_params_t *loc_params,
     ret_value = H5VLattr_specific(o->under_object, loc_params, o->under_vol_id, args, dxpl_id, req);
 
     /* Check for async request */
-    if(req && *req)
+    if (req && *req)
         *req = H5VL_bypass_new_obj(*req, o->under_vol_id);
 
     return ret_value;
 } /* end H5VL_bypass_attr_specific() */
 
-
 /*-------------------------------------------------------------------------
  * Function:    H5VL_bypass_attr_optional
  *
@@ -1174,11 +1296,10 @@ H5VL_bypass_attr_specific(void *obj, const H5VL_loc_params_t *loc_params,
  *-------------------------------------------------------------------------
  */
 static herr_t
-H5VL_bypass_attr_optional(void *obj, H5VL_optional_args_t *args,
-    hid_t dxpl_id, void **req)
+H5VL_bypass_attr_optional(void *obj, H5VL_optional_args_t *args, hid_t dxpl_id, void **req)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
-    herr_t ret_value;
+    herr_t         ret_value;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL ATTRIBUTE Optional\n");
@@ -1187,13 +1308,12 @@ H5VL_bypass_attr_optional(void *obj, H5VL_optional_args_t *args,
     ret_value = H5VLattr_optional(o->under_object, o->under_vol_id, args, dxpl_id, req);
 
     /* Check for async request */
-    if(req && *req)
+    if (req && *req)
         *req = H5VL_bypass_new_obj(*req, o->under_vol_id);
 
     return ret_value;
 } /* end H5VL_bypass_attr_optional() */
 
-
 /*-------------------------------------------------------------------------
  * Function:    H5VL_bypass_attr_close
  *
@@ -1208,7 +1328,7 @@ static herr_t
 H5VL_bypass_attr_close(void *attr, hid_t dxpl_id, void **req)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)attr;
-    herr_t ret_value;
+    herr_t         ret_value;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL ATTRIBUTE Close\n");
@@ -1217,31 +1337,32 @@ H5VL_bypass_attr_close(void *attr, hid_t dxpl_id, void **req)
     ret_value = H5VLattr_close(o->under_object, o->under_vol_id, dxpl_id, req);
 
     /* Check for async request */
-    if(req && *req)
+    if (req && *req)
         *req = H5VL_bypass_new_obj(*req, o->under_vol_id);
 
     /* Release our wrapper, if underlying attribute was closed */
-    if(ret_value >= 0)
+    if (ret_value >= 0)
         H5VL_bypass_free_obj(o);
 
     return ret_value;
 } /* end H5VL_bypass_attr_close() */
 
-/* Retrieve the name of the file to which an object belong.  The OBJ_TYPE should be the 
- * type of OBJ.  Valid types include H5I_FILE, H5I_GROUP, H5I_DATATYPE, H5I_DATASET, or
- * H5I_ATTR.  This function basically copies what H5Fget_name does. 
+/* Retrieve the name of the file to which an object belong.  The OBJ_TYPE should
+ * be the type of OBJ.  Valid types include H5I_FILE, H5I_GROUP, H5I_DATATYPE,
+ * H5I_DATASET, or H5I_ATTR.  This function basically copies what H5Fget_name
+ * does.
  */
 static ssize_t
 get_filename_helper(H5VL_bypass_t *obj, char *file_name, H5I_type_t obj_type, void **req)
 {
     H5VL_file_get_args_t args;
-    size_t name_len = 0;  /* Length of file name */
-    ssize_t ret_value = -1;
+    size_t               name_len  = 0; /* Length of file name */
+    ssize_t              ret_value = -1;
 
-    args.op_type       = H5VL_FILE_GET_NAME;
-    args.args.get_name.type = obj_type;
-    args.args.get_name.buf_size = 1024;
-    args.args.get_name.buf  = file_name;
+    args.op_type                     = H5VL_FILE_GET_NAME;
+    args.args.get_name.type          = obj_type;
+    args.args.get_name.buf_size      = BYPASS_NAME_SIZE_LONG;
+    args.args.get_name.buf           = file_name;
     args.args.get_name.file_name_len = &name_len;
 
     if (H5VL_bypass_file_get(obj, &args, H5P_DEFAULT, req) < 0) {
@@ -1259,23 +1380,24 @@ done:
 static H5L_type_t
 get_linkinfo_helper(void *obj, const char *name, void **req)
 {
-    H5VL_loc_params_t    loc_params;          /* Location parameters for object access */
-    H5VL_link_get_args_t vol_cb_args;         /* Arguments to VOL callback */
+    H5VL_loc_params_t    loc_params;  /* Location parameters for object access */
+    H5VL_link_get_args_t vol_cb_args; /* Arguments to VOL callback */
     H5L_info2_t          linfo;
     H5L_type_t           ret_value = H5L_TYPE_ERROR;
 
     /* Set up location struct */
     loc_params.type                         = H5VL_OBJECT_BY_NAME;
-    loc_params.obj_type                     = H5I_FILE; //H5I_get_type(loc_id);
+    loc_params.obj_type                     = H5I_FILE; // H5I_get_type(loc_id);
     loc_params.loc_data.loc_by_name.name    = name;
     loc_params.loc_data.loc_by_name.lapl_id = H5P_DEFAULT;
 
     /* Set up VOL callback arguments */
-    vol_cb_args.op_type             = H5VL_LINK_GET_INFO; 
+    vol_cb_args.op_type             = H5VL_LINK_GET_INFO;
     vol_cb_args.args.get_info.linfo = &linfo;
-     
+
     /* Get the link information */
-    // H5VL_bypass_link_get(void *obj, const H5VL_loc_params_t *loc_params, H5VL_link_get_args_t *args, hid_t dxpl_id, void **req);
+    // H5VL_bypass_link_get(void *obj, const H5VL_loc_params_t *loc_params,
+    // H5VL_link_get_args_t *args, hid_t dxpl_id, void **req);
     if (H5VL_bypass_link_get(obj, &loc_params, &vol_cb_args, H5P_DATASET_XFER_DEFAULT, req) < 0) {
         printf("In %s of %s at line %d: H5VL_bypass_get_link failed\n", __func__, __FILE__, __LINE__);
         ret_value = -1;
@@ -1288,111 +1410,86 @@ done:
     return ret_value;
 }
 
-static void
-dset_open_helper(void *obj, const char *name, H5VL_bypass_t *dset, hid_t dxpl_id, void **req)
-{
+/* Get the necessary dataset information through the VOL layer */
+static herr_t
+dset_open_helper(H5VL_bypass_t *obj, hid_t dxpl_id, void **req) {
+    herr_t ret_value = 0;
     H5VL_dataset_get_args_t get_args;
-    hid_t dcpl_id = H5I_INVALID_HID;
-    haddr_t addr;
-    H5VL_optional_args_t                opt_args;
-    H5VL_native_dataset_optional_args_t dset_opt_args;
-    int num_filters = 0;
-    H5T_class_t dtype_class;
-    //H5L_type_t    link_type;
-    char file_name[1024];
+    Bypass_dataset_t *dset = NULL;
 
-    /* Enlarge the size of the structure for dataset info and Re-allocate the memory */
-    if (dset_count == dset_info_size) {
-	dset_info_size  *= 2;
-	dset_stuff = (dset_t *)realloc(dset_stuff, dset_info_size * sizeof(dset_t));
-    }
+    assert(obj->type == H5I_DATASET);
+    dset = &obj->u.dataset;
+
+    /* Initialize values */
+    dset->dcpl_id = H5I_INVALID_HID;
+    dset->space_id = H5I_INVALID_HID;
+    dset->num_filters = 0;
+    dset->layout = H5D_LAYOUT_ERROR;
 
     /* Retrieve dataset's DCPL, copied from H5Dget_create_plist */
     get_args.op_type               = H5VL_DATASET_GET_DCPL;
     get_args.args.get_dcpl.dcpl_id = H5I_INVALID_HID;
 
-    if (H5VL_bypass_dataset_get(dset, &get_args, dxpl_id, req) < 0)
-	puts("unable to get dataset DCPL");
+    if (H5VL_bypass_dataset_get(obj, &get_args, dxpl_id, req) < 0) {
+        fprintf(stderr, "unable to get opened dataset's DCPL\n");
+        ret_value = -1;
+        goto done;
+    }
 
-    dset_stuff[dset_count].dcpl_id = dcpl_id = get_args.args.get_dcpl.dcpl_id;
+    dset->dcpl_id = get_args.args.get_dcpl.dcpl_id;
 
-    /* Figure out the dataset's layout */
-    dset_stuff[dset_count].layout = H5Pget_layout(dcpl_id);
-
-    /* Retrieve the dataset's datatype */
-    get_args.op_type               = H5VL_DATASET_GET_TYPE;
-    get_args.args.get_type.type_id = H5I_INVALID_HID;
-
-    if (H5VL_bypass_dataset_get(dset, &get_args, dxpl_id, req) < 0)
-	puts("unable to get dataset's datatype");
-
-    dset_stuff[dset_count].dtype_id = get_args.args.get_type.type_id;
-
-//printf("\n%s: %d, count=%d, dset_info_size=%d, layout=%d, location=%llu, name=%s, dtype_id = %llu, H5T_STD_REF_DSETREG = %llu, H5T_NATIVE_INT = %llu, dcpl_id = %llu\n", __func__, __LINE__, dset_count, dset_info_size, dset_stuff[dset_count].layout, addr, name, dset_stuff[dset_count].dtype_id, H5T_STD_REF_DSETREG, H5T_NATIVE_INT, dcpl_id);
+    /* Retrieve the dataset's datatype info */
+    if (get_dtype_info(obj, dxpl_id, req) < 0) {
+        fprintf(stderr, "unable to get dataset's datatype info\n");
+        ret_value = -1;
+        goto done;
+    }
 
     /* Figure out the dataset's dataspace */
     get_args.op_type                 = H5VL_DATASET_GET_SPACE;
     get_args.args.get_space.space_id = H5I_INVALID_HID;
 
     /* Retrieve the dataset's dataspace ID */
-    if (H5VL_bypass_dataset_get(dset, &get_args, dxpl_id, req) < 0)
-	puts("unable to get dataset's dataspace");
-
-    dset_stuff[dset_count].space_id = get_args.args.get_space.space_id;
-
-    /* Figure out the dataset's location in the file */
-    dset_opt_args.get_offset.offset = &addr;
-    opt_args.op_type                = H5VL_NATIVE_DATASET_GET_OFFSET;
-    opt_args.args                   = &dset_opt_args;
-
-    if (H5VL_bypass_dataset_optional(dset, &opt_args, dxpl_id, req) < 0)
-	puts("unable to get dataset's location in file");
-
-    dset_stuff[dset_count].location = addr;
-
-    /* The HDF5 library adds a '/' in front of the dataset name (full pathname).
-     * Make sure the dataset name has it. */
-    if (name) {
-	if (name[0] != '/')
-	    sprintf(dset_stuff[dset_count].dset_name, "/%s", name);
-	else
-	    strcpy(dset_stuff[dset_count].dset_name, name);
+    if (H5VL_bypass_dataset_get(obj, &get_args, dxpl_id, req) < 0) {
+        fprintf(stderr, "unable to get opened dataset's dataspace\n");
+        ret_value = -1;
+        goto done;
     }
 
-    /* Get the file name of the dataset */
-    get_filename_helper(dset, file_name, H5I_DATASET, req);
+    dset->space_id = get_args.args.get_space.space_id;
 
-    strcpy(dset_stuff[dset_count].file_name, file_name);
-//fprintf(stderr, "%s at %d: dset name = %s, file_name = %s\n", __func__, __LINE__, name, file_name);
+    if ((dset->num_filters = H5Pget_nfilters(dset->dcpl_id)) < 0) {
+        fprintf(stderr, "unable to get opened dataset's number of filters\n");
+        ret_value = -1;
+        goto done;
+    }
 
-    /* Get the link info */
-    //link_type = get_linkinfo_helper(obj, name, req);
+    /* Retrieve layout */
+    if ((dset->layout = H5Pget_layout(dset->dcpl_id)) < 0) {
+        fprintf(stderr, "unable to get dataset's layout\n");
+        ret_value = -1;
+        goto done;
+    }
 
-//fprintf(stderr, "%s at %d: link_type = %d\n", __func__, __LINE__, link_type);
+    if (dset->layout == H5D_LAYOUT_ERROR) {
+        fprintf(stderr, "dataset has an invalid layout\n");
+        ret_value = -1;
+        goto done;
+    }
 
-//printf("\n%s: %d, count=%d, dset_info_size=%d, layout=%d, location=%llu, name=%s, dtype_id = %llu, H5T_STD_REF_DSETREG = %llu, dcpl_id = %llu\n", __func__, __LINE__, dset_count, dset_info_size, dset_stuff[dset_count].layout, addr, name, dset_stuff[dset_count].dtype_id, H5T_STD_REF_DSETREG, dcpl_id);
-//printf("\n%s: %d,  count=%d, dset_info_size=%d, layout=%d, location=%llu, dset_name=%s\n", __func__, __LINE__, dset_count, dset_info_size, dset_stuff[dset_count].layout, addr, dset_stuff[dset_count].dset_name);
+done:
+    if (ret_value < 0) {
+        H5E_BEGIN_TRY {
+        if (dset->dcpl_id > 0)
+            H5Pclose(dset->dcpl_id);
+        if (dset->space_id > 0)
+            H5Sclose(dset->space_id);
+        } H5E_END_TRY;
+    }
 
-    /* Turn on the flag for using the native function to handle filters, virtual dataset, or the datatypes other than atomic types
-     * which include time, opaque, compound, reference, variable-length, array types */ 
-    num_filters = H5Pget_nfilters(dset_stuff[dset_count].dcpl_id);
-
-    dtype_class = H5Tget_class(dset_stuff[dset_count].dtype_id);
-
-    //if (num_filters > 0 || H5D_VIRTUAL == dset_stuff[dset_count].layout || H5L_TYPE_EXTERNAL == link_type ||
-    if (num_filters > 0 || H5D_VIRTUAL == dset_stuff[dset_count].layout ||
-        H5T_TIME == dtype_class || H5T_OPAQUE == dtype_class || H5T_COMPOUND == dtype_class ||
-        H5T_REFERENCE == dtype_class || H5T_VLEN == dtype_class || H5T_ARRAY == dtype_class)
-        dset_stuff[dset_count].use_native = true;
-
-    /* Increment the reference count for this dataset */
-    dset_stuff[dset_count].ref_count++;
-
-    /* Increment the number of dataset */
-    dset_count++;
+    return ret_value;
 }
 
-
 /*-------------------------------------------------------------------------
  * Function:    H5VL_bypass_dataset_create
  *
@@ -1404,39 +1501,61 @@ dset_open_helper(void *obj, const char *name, H5VL_bypass_t *dset, hid_t dxpl_id
  *-------------------------------------------------------------------------
  */
 static void *
-H5VL_bypass_dataset_create(void *obj, const H5VL_loc_params_t *loc_params,
-    const char *name, hid_t lcpl_id, hid_t type_id, hid_t space_id,
-    hid_t dcpl_id, hid_t dapl_id, hid_t dxpl_id, void **req)
+H5VL_bypass_dataset_create(void *obj, const H5VL_loc_params_t *loc_params, const char *name, hid_t lcpl_id,
+                           hid_t type_id, hid_t space_id, hid_t dcpl_id, hid_t dapl_id, hid_t dxpl_id,
+                           void **req)
 {
-    H5VL_bypass_t *dset;
+    H5VL_bypass_t *dset = NULL;
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
-    void *under;
+    void          *under = NULL;
+    bool req_created = false;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL DATASET Create\n");
 #endif
 
-    under = H5VLdataset_create(o->under_object, loc_params, o->under_vol_id, name, lcpl_id, type_id, space_id, dcpl_id,  dapl_id, dxpl_id, req);
-    if(under) {
-        dset = H5VL_bypass_new_obj(under, o->under_vol_id);
-
-        /* Check for async request */
-        if(req && *req)
-            *req = H5VL_bypass_new_obj(*req, o->under_vol_id);
-    } /* end if */
-    else {
-        dset = NULL;
-        goto done;
+    if ((under = H5VLdataset_create(o->under_object, loc_params, o->under_vol_id, name,
+        lcpl_id, type_id, space_id, dcpl_id, dapl_id, dxpl_id, req)) == NULL) {
+            fprintf(stderr, "failed to create dataset in underlying connector\n");
+            goto error;
     }
 
-    /* Save the dataset information for quick access later */
-    dset_open_helper(obj, name, dset, dxpl_id, req);
+    if ((dset = H5VL_bypass_new_obj(under, o->under_vol_id)) == NULL) {
+        fprintf(stderr, "failed to create bypass object\n");
+        goto error;
+    }
 
-done:
+    dset->type = H5I_DATASET;
+    
+    if (get_filename_helper(dset, dset->file_name, H5I_DATASET, req) < 0) {
+        fprintf(stderr, "failed to get filename\n");
+        goto error;
+    }
+
+    if (dset_open_helper(dset, dxpl_id, req) < 0) {
+        fprintf(stderr, "failed to get dataset info\n");
+        goto error;
+    }
+    
+    // Check for async request
+    if (req && *req) {
+        *req = H5VL_bypass_new_obj(*req, o->under_vol_id);
+        req_created = true;
+    }
+    
     return (void *)dset;
+
+error:
+    if (dset) {
+        H5VL_bypass_free_obj(dset);
+
+        if (req && *req && req_created)
+            H5VL_bypass_free_obj(*req);
+    }
+
+    return NULL;
 } /* end H5VL_bypass_dataset_create() */
 
-
 /*-------------------------------------------------------------------------
  * Function:    H5VL_bypass_dataset_open
  *
@@ -1448,49 +1567,65 @@ done:
  *-------------------------------------------------------------------------
  */
 static void *
-H5VL_bypass_dataset_open(void *obj, const H5VL_loc_params_t *loc_params,
-    const char *name, hid_t dapl_id, hid_t dxpl_id, void **req)
+H5VL_bypass_dataset_open(void *obj, const H5VL_loc_params_t *loc_params, const char *name, hid_t dapl_id,
+                         hid_t dxpl_id, void **req)
 {
-    H5VL_bypass_t *dset;
+    H5VL_bypass_t *dset = NULL;
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
-    void          *under;
-    unsigned      i;
+    void          *under = NULL;
+    bool req_created = false;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL DATASET Open\n");
 #endif
 
-    under = H5VLdataset_open(o->under_object, loc_params, o->under_vol_id, name, dapl_id, dxpl_id, req);
-    if(under) {
-        dset = H5VL_bypass_new_obj(under, o->under_vol_id);
-
-        /* Check for async request */
-        if(req && *req)
-            *req = H5VL_bypass_new_obj(*req, o->under_vol_id);
-    } /* end if */
-    else {
-        dset = NULL;
-        goto done;
+    
+    if ((under = H5VLdataset_open(o->under_object, loc_params, o->under_vol_id, name, dapl_id, dxpl_id, req)) == NULL) {
+        fprintf(stderr, "unable to open dataset in underlying connector\n");
+        goto error;
     }
 
-    /* If the dataset has already been opened, only increment the reference count of this dataset and finish */
-    for (i = 0; i < dset_count; i++) {
-        if (!strcmp(dset_stuff[i].dset_name, name)) {
-            dset_stuff[i].ref_count++;
-            
-            goto done;
-        }
+    if ((dset = H5VL_bypass_new_obj(under, o->under_vol_id)) < 0) {
+        fprintf(stderr, "failed to create bypass object\n");
+        goto error;
     }
 
-    /* Save the dataset information for quick access later */
-    dset_open_helper(obj, name, dset, dxpl_id, req);
+    dset->type = H5I_DATASET;
 
-    for (i = 0; i < dset_count; i++)
-        if (!strcmp(dset_stuff[i].dset_name, name))
-            fprintf(stderr, "%s at %d: dset name = %s, file_name = %s\n", __func__, __LINE__, name, dset_stuff[i].file_name);
+    if (get_filename_helper(dset, dset->file_name, H5I_DATASET, req) < 0) {
+        fprintf(stderr, "failed to get filename\n");
+        goto error;
+    }
 
-done:
+    if (dset_open_helper(dset, dxpl_id, req) < 0) {
+        fprintf(stderr, "failed to get dataset info\n");
+        goto error;
+    }
+
+    /* Check for async request */
+    if (req && *req) {
+        *req = H5VL_bypass_new_obj(*req, o->under_vol_id);
+        req_created = true;
+    }
+
     return (void *)dset;
+
+error:
+    if (under) {
+        H5E_BEGIN_TRY {
+            H5VLdataset_close(under, o->under_vol_id, dxpl_id, req);
+        } H5E_END_TRY;
+    }
+
+    if (dset && H5VL_bypass_free_obj(dset) < 0)
+            fprintf(stderr, "failed to clean up bypass dataset object after dset open failure\n");
+
+    if (req && *req && req_created) {
+        if (H5VL_bypass_free_obj(*req) < 0)
+            fprintf(stderr, "failed to clean up bypass request object after dset open failure\n");
+    }
+
+    return NULL;
 } /* end H5VL_bypass_dataset_open() */
 
 static ssize_t
@@ -1498,17 +1633,17 @@ get_dset_name_helper(H5VL_bypass_t *dset, char *name, void **req)
 {
     H5VL_object_get_args_t args;
     H5VL_loc_params_t      loc_params;
-    size_t                 dset_name_len = 0;  /* Length of file name */
-    ssize_t ret_value = -1;
+    size_t                 dset_name_len = 0; /* Length of file name */
+    ssize_t                ret_value     = -1;
 
     /* Set location parameters */
     loc_params.type     = H5VL_OBJECT_BY_SELF;
     loc_params.obj_type = H5I_DATASET;
 
     /* Set up VOL callback arguments */
-    args.op_type       = H5VL_OBJECT_GET_NAME;
+    args.op_type                = H5VL_OBJECT_GET_NAME;
     args.args.get_name.buf_size = 1024;
-    args.args.get_name.buf  = name;
+    args.args.get_name.buf      = name;
     args.args.get_name.name_len = &dset_name_len;
 
     if (H5VL_bypass_object_get(dset, &loc_params, &args, H5P_DATASET_XFER_DEFAULT, req) < 0) {
@@ -1525,18 +1660,20 @@ done:
 static herr_t
 get_num_chunks_helper(H5VL_bypass_t *dset, hid_t file_space_id, hsize_t *nchunks, void **req)
 {
-    H5VL_optional_args_t                vol_cb_args;    /* Arguments to VOL callback */
-    H5VL_native_dataset_optional_args_t dset_opt_args;  /* Arguments for optional operation */
+    H5VL_optional_args_t                vol_cb_args;   /* Arguments to VOL callback */
+    H5VL_native_dataset_optional_args_t dset_opt_args; /* Arguments for optional operation */
     herr_t                              ret_value = 0;
 
     if (NULL == dset) {
-        printf("In %s of %s at line %d: dset parameter can't be a null pointer\n", __func__, __FILE__, __LINE__);
+        printf("In %s of %s at line %d: dset parameter can't be a null pointer\n", __func__, __FILE__,
+               __LINE__);
         ret_value = -1;
         goto done;
     }
 
     if (NULL == nchunks) {
-        printf("In %s of %s at line %d: nchunks parameter can't be a null pointer\n", __func__, __FILE__, __LINE__);
+        printf("In %s of %s at line %d: nchunks parameter can't be a null pointer\n", __func__, __FILE__,
+               __LINE__);
         ret_value = -1;
         goto done;
     }
@@ -1560,22 +1697,25 @@ done:
 
 static herr_t
 get_chunk_info_helper(H5VL_bypass_t *dset, hid_t fspace_id, hsize_t chk_index, hsize_t *offset /*out*/,
-                  unsigned *filter_mask /*out*/, haddr_t *addr /*out*/, hsize_t *size /*out*/, void **req)
+                      unsigned *filter_mask /*out*/, haddr_t *addr /*out*/, hsize_t *size /*out*/, void **req)
 {
-    H5VL_optional_args_t                vol_cb_args;    /* Arguments to VOL callback */
-    H5VL_native_dataset_optional_args_t dset_opt_args;  /* Arguments for optional operation */
-    hsize_t                             nchunks   = 0;  /* Number of chunks */
+    H5VL_optional_args_t                vol_cb_args;   /* Arguments to VOL callback */
+    H5VL_native_dataset_optional_args_t dset_opt_args; /* Arguments for optional operation */
+    hsize_t                             nchunks   = 0; /* Number of chunks */
     herr_t                              ret_value = 0;
 
     /* Check arguments */
     if (NULL == dset) {
-        printf("In %s of %s at line %d: dset parameter can't be a null pointer\n", __func__, __FILE__, __LINE__);
+        printf("In %s of %s at line %d: dset parameter can't be a null pointer\n", __func__, __FILE__,
+               __LINE__);
         ret_value = -1;
         goto done;
     }
 
     if (NULL == offset && NULL == filter_mask && NULL == addr && NULL == size) {
-        printf("In %s of %s at line %d: invalid arguments, must have at least one non-null output argument\n", __func__, __FILE__, __LINE__);
+        printf("In %s of %s at line %d: invalid arguments, must have at least one "
+               "non-null output argument\n",
+               __func__, __FILE__, __LINE__);
         ret_value = -1;
         goto done;
     }
@@ -1621,24 +1761,28 @@ done:
     return ret_value;
 } /* get_chunk_info_helper */
 
-/* Figure out the data spaces in file and memory and make sure the selection is valid.
- * Below is the table borrowed from the reference manual entry for H5Dread:
- * 
+/* Figure out the data spaces in file and memory and make sure the selection is
+ * valid. Below is the table borrowed from the reference manual entry for
+ * H5Dread:
+ *
  * mem_space_id	file_space_id	Behavior
  *
- * valid ID	valid ID	mem_space_id specifies the memory dataspace and the selection within it.
- *                              file_space_id specifies the selection within the file dataset's dataspace.
- * H5S_ALL	valid ID	The file dataset's dataspace is used for the memory dataspace and the selection
- *                              specified with file_space_id specifies the selection within it. The combination of
- *                              the file dataset's dataspace and the selection from file_space_id is used for memory also.
- * valid ID	H5S_ALL	        mem_space_id specifies the memory dataspace and the selection within it.
- *                              The selection within the file dataset's dataspace is set to the "all" selection.
- * H5S_ALL	H5S_ALL	        The file dataset's dataspace is used for the memory dataspace and the selection within
- *                              the memory dataspace is set to the "all" selection. The selection within the file dataset's
- *                              dataspace is set to the "all" selection.
+ * valid ID	valid ID	mem_space_id specifies the memory dataspace and the
+ * selection within it. file_space_id specifies the selection within the file
+ * dataset's dataspace. H5S_ALL	valid ID	The file dataset's dataspace is
+ * used for the memory dataspace and the selection specified with file_space_id
+ * specifies the selection within it. The combination of the file dataset's
+ * dataspace and the selection from file_space_id is used for memory also. valid
+ * ID	H5S_ALL mem_space_id specifies the memory dataspace and the selection
+ * within it. The selection within the file dataset's dataspace is set to the
+ * "all" selection. H5S_ALL	H5S_ALL	        The file dataset's dataspace is
+ * used for the memory dataspace and the selection within the memory dataspace
+ * is set to the "all" selection. The selection within the file dataset's
+ * dataspace is set to the "all" selection.
  */
 static herr_t
-check_dspaces_helper(hid_t dset_space_id, hid_t file_space_id, hid_t *file_space_id_copy, hid_t mem_space_id, hid_t *mem_space_id_copy)
+check_dspaces_helper(hid_t dset_space_id, hid_t file_space_id, hid_t *file_space_id_copy, hid_t mem_space_id,
+                     hid_t *mem_space_id_copy)
 {
     herr_t ret_value = 0;
 
@@ -1658,15 +1802,20 @@ check_dspaces_helper(hid_t dset_space_id, hid_t file_space_id, hid_t *file_space
         /* Use the original data space passed in from H5Dread or H5Dread_multi */
         *mem_space_id_copy = mem_space_id;
 
-    /* Make sure the selection + offset is within the extent of the dataspaces in file and memory */
+    /* Make sure the selection + offset is within the extent of the dataspaces in
+     * file and memory */
     if (H5Sselect_valid(*file_space_id_copy) <= 0) {
-        printf("In %s of %s at line %d: file data space selection isn't valid or H5Sselect_valide failed\n", __func__, __FILE__, __LINE__);
+        printf("In %s of %s at line %d: file data space selection isn't valid or "
+               "H5Sselect_valide failed\n",
+               __func__, __FILE__, __LINE__);
         ret_value = -1;
         goto done;
     }
 
     if (H5Sselect_valid(*mem_space_id_copy) <= 0) {
-        printf("In %s of %s at line %d: memory data space selection isn't valid or H5Sselect_valide failed\n", __func__, __FILE__, __LINE__);
+        printf("In %s of %s at line %d: memory data space selection isn't valid or "
+               "H5Sselect_valide failed\n",
+               __func__, __FILE__, __LINE__);
         ret_value = -1;
         goto done;
     }
@@ -1677,12 +1826,14 @@ done:
 
 /* Break down into smaller sections if the data size is 2GB or bigger.  Need to change the type
  * of BUF to VOID to be more general */
-static void
+static herr_t
 read_big_data(int fd, int *buf, size_t size, off_t offset)
 {
+    herr_t ret_value = 0;
+
     while (size > 0) {
-        size_t bytes_in   = 0;  /* # of bytes to read       */
-        size_t bytes_read = -1; /* # of bytes actually read */
+        int bytes_in   = 0;  /* # of bytes to read       */
+        int bytes_read = -1; /* # of bytes actually read */
 
         /* Trying to read more bytes than the return type can handle is
          * undefined behavior in POSIX.
@@ -1690,116 +1841,220 @@ read_big_data(int fd, int *buf, size_t size, off_t offset)
         if (size > POSIX_MAX_IO_BYTES)
             bytes_in = POSIX_MAX_IO_BYTES;
         else
-            bytes_in = size;
+            bytes_in = (int) size;
 
         do {
             bytes_read = pread(fd, buf, bytes_in, offset);
             if (bytes_read > 0)
                 offset += bytes_read;
+            
+            /* Error messages for unexpected values of errno */
+            if (-1 == bytes_read) {
+                switch (errno) {
+                    case EAGAIN:
+                    case EINTR:
+                        break;
+                    default:
+                        fprintf(stderr, "pread failed with error: %s\n", strerror(errno));
+                        ret_value = -1;
+                        goto done;
+                }
+            }
+
         } while (-1 == bytes_read && EINTR == errno);
 
-        size -= (size_t)bytes_read;
-        buf = (int *)((char *)buf + bytes_read);
+
+
+        if (bytes_read > 0) {
+            size -= (size_t)bytes_read;
+            buf = (int *)((char *)buf + bytes_read);
+        }
     } /* end while */
+
+done:
+    return ret_value;
 }
 
-static
-void* start_thread_for_pool(void* args)
+static void *
+start_thread_for_pool(void *args)
 {
-    //int thread_id = ((info_for_thread_t *)args)->thread_id;
-    //int fd = ((info_for_thread_t *)args)->fd;
-    int      *file_indices_local;
-    haddr_t  *addrs_local;
-    size_t   *sizes_local;
-    void     **vec_bufs_local;
+    int thread_id = * (int*) args;
+    // int thread_id = ((info_for_thread_t *)args)->thread_id;
+    // int fd = ((info_for_thread_t *)args)->fd;
+    void    *ret_value = (void*) 0;
+    int     *file_indices_local = NULL;
+    haddr_t *addrs_local = NULL;
+    size_t  *sizes_local = NULL;
+    void   **vec_bufs_local = NULL;
     int      local_count = 0;
     int      i;
 
-    //fprintf(stderr, "In start_thread_for_pool: %d\n", thread_id); 
+    // fprintf(stderr, "In start_thread_for_pool: %d\n", thread_id);
 
-    file_indices_local = (int *)malloc(nsteps_tpool * sizeof(int));
-    addrs_local    = (haddr_t *)malloc(nsteps_tpool * sizeof(haddr_t));
-    sizes_local    = (size_t *)malloc(nsteps_tpool * sizeof(size_t));
-    vec_bufs_local = (void *)malloc(nsteps_tpool * sizeof(void *));
+    if ((file_indices_local = (int *)malloc(nsteps_tpool * sizeof(int))) == NULL) {
+        fprintf(stderr, "failed to allocate file indices\n");
+        ret_value = (void*) -1;
+        goto done;
+    }
+    
+    if ((addrs_local = (haddr_t *)malloc(nsteps_tpool * sizeof(haddr_t))) == NULL) {
+        fprintf(stderr, "failed to allocate addresses\n");
+        ret_value = (void*) -1;
+        goto done;
+    }
 
+    if ((sizes_local = (size_t *)malloc(nsteps_tpool * sizeof(size_t))) == NULL) {
+        fprintf(stderr, "failed to allocate sizes\n");
+        ret_value = (void*) -1;
+        goto done;
+    }
+
+    if ((vec_bufs_local = (void *)malloc(nsteps_tpool * sizeof(void *))) == NULL) {
+        fprintf(stderr, "failed to allocate vector buffers\n");
+        ret_value = (void*) -1;
+        goto done;
+    }
     /* Rename thread_loop_finish to a more appropriate name */
-    while(!thread_loop_finish || !stop_tpool) {
-        pthread_mutex_lock(&mutex_local);
+    while (!thread_loop_finish || !stop_tpool) {
+        if (pthread_mutex_lock(&mutex_local) != 0) {
+            fprintf(stderr, "failed to lock mutex\n");
+            ret_value = (void*) -1;
+            goto done;
+        }
 
-//fprintf(stderr, "thread %d: before wait\n", thread_id); 
-        while(thread_task_count == 0 && !thread_task_finished)
+        // fprintf(stderr, "thread %d: before wait\n", thread_id);
+        while (thread_task_count == 0 && !thread_task_finished) {
             pthread_cond_wait(&cond_local, &mutex_local);
-//fprintf(stderr, "after wait\n"); 
+        }
 
-        /* THREAD_TASK_COUNT can be smaller (LEFTOVER being passed into submit_task() in read_vectors()) or
-         * larger (submit_task() keeps adding more before they are processed) than nsteps_tpool.
-         * Choose the smaller value */
+        /* If a new read call has begin, flag thread as active*/
+        if (!thread_loop_finish)
+            md_for_thread.thread_is_active[thread_id] = true;
+
+        // fprintf(stderr, "after wait\n");
+
+        /* THREAD_TASK_COUNT can be smaller (LEFTOVER being passed into
+         * submit_task() in read_vectors()) or larger (submit_task() keeps adding
+         * more before they are processed) than nsteps_tpool. Choose the smaller
+         * value */
         local_count = MIN(thread_task_count, nsteps_tpool);
 
-	for (i = 0; i < local_count; i++) {
-	    file_indices_local[i] = md_for_thread.file_indices[info_pointer];
-	    addrs_local[i]        = md_for_thread.addrs[info_pointer];
-	    sizes_local[i]        = md_for_thread.sizes[info_pointer];
-	    vec_bufs_local[i]     = md_for_thread.vec_bufs[info_pointer]; 
-
-	    info_pointer++;
-	    thread_task_count--;
-
-	    file_stuff[file_indices_local[i]].num_reads++;
-	    file_stuff[file_indices_local[i]].read_started = true;
-	}
-
-//fprintf(stderr, "thread %d: 1. local_count = %d, thread_task_count = %d, info_pointer = %d, addr = %llu, size = %lld, buf = %p, vec_arr_nused = %d\n", thread_id, local_count, thread_task_count, info_pointer - 1, addrs_local[0], sizes_local[0], vec_bufs_local[0], md_for_thread.vec_arr_nused);
-
-        /* Turn on the flag thread_loop_finish if H5Dread finished putting all tasks in the queue (thread_task_finished is on) and 
-         * the thread pool processed all the task in the queue */
-	if (thread_task_finished && thread_task_count == 0)
-	    thread_loop_finish = true;
-
-        pthread_mutex_unlock(&mutex_local);
-
-//fprintf(stderr, "before reading data\n");
         for (i = 0; i < local_count; i++) {
-//fprintf(stderr, "thread_id = %d, i = %d: file_indices_local = %d, vec_bufs_local = %p, sizes_local = %ld, addrs_local = %llu\n", thread_id, i, file_indices_local[i], vec_bufs_local[i], sizes_local[i], addrs_local[i]);
-            read_big_data(file_stuff[file_indices_local[i]].fd, vec_bufs_local[i], sizes_local[i], addrs_local[i]);
+            file_indices_local[i] = md_for_thread.file_indices[info_pointer];
+            addrs_local[i]        = md_for_thread.addrs[info_pointer];
+            sizes_local[i]        = md_for_thread.sizes[info_pointer];
+            vec_bufs_local[i]     = md_for_thread.vec_bufs[info_pointer];
 
-	    pthread_mutex_lock(&mutex_local);
-	    file_stuff[file_indices_local[i]].num_reads--;
+            info_pointer++;
+            thread_task_count--;
 
-            /* When there is no task left in the queue and all the reads finish for the current file, signal the main process that
-             * this file can be closed.
+            file_stuff[file_indices_local[i]].num_reads++;
+            file_stuff[file_indices_local[i]].read_started = true;
+        }
+
+        // fprintf(stderr, "thread %d: 1. local_count = %d, thread_task_count = %d,
+        // info_pointer = %d, addr = %llu, size = %lld, buf = %p, vec_arr_nused =
+        // %d\n", thread_id, local_count, thread_task_count, info_pointer - 1,
+        // addrs_local[0], sizes_local[0], vec_bufs_local[0],
+        // md_for_thread.vec_arr_nused);
+
+        /* Turn on the flag thread_loop_finish if H5Dread finished putting all tasks in the queue
+         * (thread_task_finished is on) and the thread pool processed all the task in the queue */
+        if (thread_task_finished && thread_task_count == 0)
+            thread_loop_finish = true;
+
+        if (pthread_mutex_unlock(&mutex_local) != 0) {
+            fprintf(stderr, "failed to unlock mutex\n");
+            ret_value = (void*) -1;
+            goto done;
+        }
+
+        // fprintf(stderr, "before reading data\n");
+        for (i = 0; i < local_count; i++) {
+            // fprintf(stderr, "thread_id = %d, i = %d: file_indices_local = %d, vec_bufs_local = %p,
+            // sizes_local = %ld, addrs_local = %llu\n", thread_id, i, file_indices_local[i],
+            // vec_bufs_local[i], sizes_local[i], addrs_local[i]);
+
+            if (read_big_data(file_stuff[file_indices_local[i]].fd, vec_bufs_local[i], sizes_local[i],
+                          addrs_local[i]) < 0)
+            {
+                fprintf(stderr, "read_big_data failed\n");
+                ret_value = (void*) -1;
+                goto done;
+            }
+
+            if (pthread_mutex_lock(&mutex_local) != 0) {
+                fprintf(stderr, "failed to lock mutex\n");
+                ret_value = (void*) -1;
+                goto done;
+            }
+
+            file_stuff[file_indices_local[i]].num_reads--;
+
+            /* When there is no task left in the queue and all the reads finish for
+             * the current file, signal the main process that this file can be closed.
              */
-	    if (thread_loop_finish && (file_stuff[file_indices_local[i]].num_reads == 0)) {
-//fprintf(stderr, "thread %d: file name = %s, signal close_ready\n", thread_id, file_stuff[file_indices_local[i]].name);
-	        pthread_cond_signal(&(file_stuff[file_indices_local[i]].close_ready));
-	    }
+            if (thread_loop_finish && (file_stuff[file_indices_local[i]].num_reads == 0)) {
+                // fprintf(stderr, "thread %d: file name = %s, signal close_ready\n", thread_id,
+                // file_stuff[file_indices_local[i]].name);
+                /* There are currently no reads active on this file - it may be closed */
+                file_stuff[file_indices_local[i]].read_started = false;
+                pthread_cond_signal(&(file_stuff[file_indices_local[i]].close_ready));
+            }
 
-	    pthread_mutex_unlock(&mutex_local);
+            if (pthread_mutex_unlock(&mutex_local) != 0) {
+                fprintf(stderr, "failed to unlock mutex\n");
+                ret_value = (void*) -1;
+                goto done;
+            }
+        }
+
+        /* If all tasks have been taken on by other threads and this thread's work is complete,
+         * flag it as inactive */
+
+        /* TBD: Lock is not in principal necessary here because each thread has a unique index.
+         * Leave it for now to prevent problems if 
+         * writes to the array are larger than expected */
+        if (pthread_mutex_lock(&mutex_local) != 0) {
+            fprintf(stderr, "failed to lock mutex\n");
+            return (void*) -1;
+        }
+
+        if (thread_loop_finish) {
+            md_for_thread.thread_is_active[thread_id] = false;
+            pthread_cond_signal(&cond_read_finished);
+        }
+
+        if (pthread_mutex_unlock(&mutex_local) != 0) {
+            fprintf(stderr, "failed to unlock mutex\n");
+            return (void*) -1;
         }
 
         /* If all task in the queue are finished and all the data read are finished, notify that
          * the corresponding file can be closed.
          */
-	/* pthread_mutex_lock(&mutex_local);
-        if (thread_loop_finish && (file_stuff[file_indices_local[0]].num_reads == 0)) {
-fprintf(stderr, "thread %d: before broadcast\n", thread_id); 
-	        pthread_cond_broadcast(&file_stuff[file_indices_local[0]].close_ready);
+        /* pthread_mutex_lock(&mutex_local);
+        if (thread_loop_finish && (file_stuff[file_indices_local[0]].num_reads ==
+    0)) { fprintf(stderr, "thread %d: before broadcast\n", thread_id);
+                pthread_cond_broadcast(&file_stuff[file_indices_local[0]].close_ready);
         }
-	pthread_mutex_unlock(&mutex_local); */
+        pthread_mutex_unlock(&mutex_local); */
 
-        //pthread_mutex_unlock(&mutex_local);
-//fprintf(stderr, "after reading data\n");
+        // pthread_mutex_unlock(&mutex_local);
+        // fprintf(stderr, "after reading data\n");
     }
+
+done:
 
     free(file_indices_local);
     free(addrs_local);
     free(sizes_local);
     free(vec_bufs_local);
 
-    return NULL;
+    return ret_value;
 } /* end start_thread_for_pool() */
 
-static void
+static herr_t
 process_vectors(void *rbuf, sel_info_t *selection_info)
 {
     hid_t      file_iter_id, mem_iter_id;
@@ -1811,274 +2066,479 @@ process_vectors(void *rbuf, sel_info_t *selection_info)
     size_t     file_len[SEL_SEQ_LIST_LEN], mem_len[SEL_SEQ_LIST_LEN];
     size_t     io_len;
     int        local_count_for_signal = 0;
+    herr_t     ret_value = 0;
 
     /* Contiguous is treated as a single chunk */
-    hss_nelmts = H5Sget_select_npoints(selection_info->file_space_id);
-    nelmts = hss_nelmts;
+    if ((hss_nelmts = H5Sget_select_npoints(selection_info->file_space_id)) < 0) {
+        fprintf(stderr, "H5Sget_select_npoints on filespace failed\n");
+        ret_value = -1;
+        goto done;
+    }
 
-    hss_nelmts = H5Sget_select_npoints(selection_info->mem_space_id);
-    if (nelmts != hss_nelmts)
-        printf("the number of selection in file (%ld) isn't equal to the number in memory (%" PRIdHSIZE")\n", nelmts,
+    nelmts     = hss_nelmts;
+
+    if ((hss_nelmts = H5Sget_select_npoints(selection_info->mem_space_id)) < 0) {
+        fprintf(stderr, "H5Sget_select_npoints on memspace failed\n");
+        ret_value = -1;
+        goto done;
+    }
+
+    if (nelmts != hss_nelmts) {
+        fprintf(stderr, "the number of selected elements in file (%ld) isn't equal to the number in memory (%" PRIdHSIZE")\n", nelmts,
                hss_nelmts);
+        ret_value = -1;
+        goto done;
+    }
 
-    file_iter_id = H5Ssel_iter_create(selection_info->file_space_id, selection_info->dtype_size, H5S_SEL_ITER_SHARE_WITH_DATASPACE);
-    mem_iter_id  = H5Ssel_iter_create(selection_info->mem_space_id, selection_info->dtype_size, H5S_SEL_ITER_SHARE_WITH_DATASPACE);
+    if ((file_iter_id =
+        H5Ssel_iter_create(selection_info->file_space_id, 
+        selection_info->dtype_size, H5S_SEL_ITER_SHARE_WITH_DATASPACE)) < 0)
+    {
+        fprintf(stderr, "H5Ssel_iter_create on filespace failed\n");
+        ret_value = -1;
+        goto done;
+    }
+
+    if ((mem_iter_id =
+        H5Ssel_iter_create(selection_info->mem_space_id, 
+        selection_info->dtype_size, H5S_SEL_ITER_SHARE_WITH_DATASPACE)) < 0)
+    {
+        fprintf(stderr, "H5Ssel_iter_create on memspace failed\n");
+        ret_value = -1;
+        goto done;
+    }
 
     /* Initialize values so sequence lists are retrieved on the first iteration */
     file_seq_i = mem_seq_i = SEL_SEQ_LIST_LEN;
-    file_nseq  = mem_nseq   = 0;
+    file_nseq = mem_nseq = 0;
 
-//printf("%s: %d\n", __func__, __LINE__);
+    // printf("%s: %d\n", __func__, __LINE__);
 
-    /* Loop until all elements are processed. The algorithm is copied from the function H5FD__read_selection_translate
-     * in H5FDint.c, which is somewhat similar to H5D__select_io in H5Dselect.c */
+    /* Loop until all elements are processed. The algorithm is copied from the
+     * function H5FD__read_selection_translate in H5FDint.c, which is somewhat
+     * similar to H5D__select_io in H5Dselect.c
+     */
     while (file_seq_i < file_nseq || nelmts > 0) {
-	if (file_seq_i == SEL_SEQ_LIST_LEN) {
-	    if (H5Ssel_iter_get_seq_list(file_iter_id, SEL_SEQ_LIST_LEN, SIZE_MAX, &file_nseq,
-					      &seq_nelem, file_off, file_len) < 0)
-		printf("file sequence length retrieval failed");
+        if (file_seq_i == SEL_SEQ_LIST_LEN) {
+            if (H5Ssel_iter_get_seq_list(file_iter_id, SEL_SEQ_LIST_LEN, SIZE_MAX, &file_nseq, &seq_nelem,
+                                         file_off, file_len) < 0)
+            {
+                fprintf(stderr, "file sequence length retrieval failed\n");
+                ret_value = -1;
+                goto done;
+            }
+
+        if (file_nseq == 0) {
+            fprintf(stderr, "no file sequences retrieved from iteration\n");
+            ret_value = -1;
+            goto done;
+        }
 
 	    nelmts -= seq_nelem;
 	    file_seq_i = 0;
 	}
 
-	/* Fill/refill memory sequence list if necessary */
-	if (mem_seq_i == SEL_SEQ_LIST_LEN) {
-	   if (H5Ssel_iter_get_seq_list(mem_iter_id, SEL_SEQ_LIST_LEN, SIZE_MAX, &mem_nseq, &seq_nelem,
-					  mem_off, mem_len) < 0)
-	       printf("memory sequence length retrieval failed");
+        /* Fill/refill memory sequence list if necessary */
+        if (mem_seq_i == SEL_SEQ_LIST_LEN) {
+            if (H5Ssel_iter_get_seq_list(mem_iter_id, SEL_SEQ_LIST_LEN, SIZE_MAX, &mem_nseq, &seq_nelem,
+                                         mem_off, mem_len) < 0)
+            {
+                fprintf(stderr, "memory sequence length retrieval failed\n");
+                ret_value = -1;
+                goto done;
+            }
+
+        if (mem_nseq == 0) {
+            fprintf(stderr, "no memory sequences retrieved from iteration\n");
+            ret_value = -1;
+            goto done;
+        }
 
 	   mem_seq_i = 0;
 	}
 
-	/* Calculate length of this IO */
-	io_len = MIN(file_len[file_seq_i], mem_len[mem_seq_i]);
+        /* Calculate length of this IO */
+        io_len = MIN(file_len[file_seq_i], mem_len[mem_seq_i]);
 
-        /* Make sure the data length isn't greater than 1MB, mainly for contiguous datasets.
-         * To do: needs a flag to turn it on and off */
+        /* Make sure the data length isn't greater than 1MB, mainly for contiguous
+         * datasets. To do: needs a flag to turn it on and off */
         io_len = MIN(io_len, MB);
 
-	/* Lock md_for_thread and update it */
-	pthread_mutex_lock(&mutex_local);
+        /* Lock md_for_thread and update it */
+        if (pthread_mutex_lock(&mutex_local) != 0) {
+            fprintf(stderr, "failed to lock local mutex\n");
+            ret_value = -1;
+            goto done;
+        }
 
-	if (md_for_thread.vec_arr_nused == md_for_thread.vec_arr_nalloc) {
-	    /* Check if we're using the static arrays */
-	    if (md_for_thread.addrs == md_for_thread.addrs_local) {
-		/* Allocate dynamic arrays.  Need to free them later */
-		if (NULL == (md_for_thread.file_indices = malloc(sizeof(md_for_thread.file_indices_local) * 2)))
-		    printf("memory allocation failed for file ids list");
-		if (NULL == (md_for_thread.addrs = malloc(sizeof(md_for_thread.addrs_local) * 2)))
-		    printf("memory allocation failed for address list");
-		if (NULL == (md_for_thread.sizes = malloc(sizeof(md_for_thread.sizes_local) * 2)))
-		    printf("memory allocation failed for size list");
-		if (NULL == (md_for_thread.vec_bufs = malloc(sizeof(md_for_thread.vec_bufs_local) * 2)))
-		    printf("memory allocation failed for buffer list");
+        if (md_for_thread.vec_arr_nused == md_for_thread.vec_arr_nalloc) {
+            /* Check if we're using the static arrays */
+            if (md_for_thread.addrs == md_for_thread.addrs_local) {
+                /* Allocate dynamic arrays.  Need to free them later */
+                if (NULL ==
+                    (md_for_thread.file_indices = malloc(sizeof(md_for_thread.file_indices_local) * 2)))
+                {
+                    fprintf(stderr, "memory allocation failed for file ids list\n");
+                    ret_value = -1;
+                    goto done;
+                }
 
-		/* Copy the existing data */
-		(void)memcpy(md_for_thread.file_indices, md_for_thread.file_indices_local, sizeof(md_for_thread.file_indices_local));
-		(void)memcpy(md_for_thread.addrs, md_for_thread.addrs_local, sizeof(md_for_thread.addrs_local));
-		(void)memcpy(md_for_thread.sizes, md_for_thread.sizes_local, sizeof(md_for_thread.sizes_local));
-		(void)memcpy(md_for_thread.vec_bufs, md_for_thread.vec_bufs_local, sizeof(md_for_thread.vec_bufs_local));
-	    } else {
-		void *tmp_ptr;
+                if (NULL == (md_for_thread.addrs = malloc(sizeof(md_for_thread.addrs_local) * 2)))
+                {
+                    fprintf(stderr, "memory allocation failed for address list\n");
+                    ret_value = -1;
+                    goto done;
+                }
 
-		/* Reallocate arrays */
-		if (NULL == (tmp_ptr = realloc(md_for_thread.file_indices, md_for_thread.vec_arr_nalloc * sizeof(*(md_for_thread.file_indices)) * 2)))
-		    printf("memory reallocation failed for file ids list");
-		md_for_thread.file_indices = tmp_ptr;
-		if (NULL == (tmp_ptr = realloc(md_for_thread.addrs, md_for_thread.vec_arr_nalloc * sizeof(*(md_for_thread.addrs)) * 2)))
-		    printf("memory reallocation failed for address list");
-		md_for_thread.addrs = tmp_ptr;
-		if (NULL == (tmp_ptr = realloc(md_for_thread.sizes, md_for_thread.vec_arr_nalloc * sizeof(*(md_for_thread.sizes)) * 2)))
-		    printf("memory reallocation failed for size list");
-		md_for_thread.sizes = tmp_ptr;
-		if (NULL == (tmp_ptr = realloc(md_for_thread.vec_bufs, md_for_thread.vec_arr_nalloc * sizeof(*(md_for_thread.vec_bufs)) * 2)))
-		    printf("memory reallocation failed for buffer list");
-		md_for_thread.vec_bufs = tmp_ptr;
-	    }
+                if (NULL == (md_for_thread.sizes = malloc(sizeof(md_for_thread.sizes_local) * 2)))
+                {
+                    fprintf(stderr, "memory allocation failed for size list\n");
+                    ret_value = -1;
+                    goto done;
+                }
 
-	    /* Record that we've doubled the array sizes */
-	    md_for_thread.vec_arr_nalloc *= 2;
+                if (NULL == (md_for_thread.vec_bufs = malloc(sizeof(md_for_thread.vec_bufs_local) * 2)))
+                {
+                    fprintf(stderr, "memory allocation failed for buffer list\n");
+                    ret_value = -1;
+                    goto done;
+                }
 
-	    md_for_thread.free_memory = true;
-	}
+                /* Copy the existing data */
+                (void)memcpy(md_for_thread.file_indices, md_for_thread.file_indices_local,
+                             sizeof(md_for_thread.file_indices_local));
+                (void)memcpy(md_for_thread.addrs, md_for_thread.addrs_local,
+                             sizeof(md_for_thread.addrs_local));
+                (void)memcpy(md_for_thread.sizes, md_for_thread.sizes_local,
+                             sizeof(md_for_thread.sizes_local));
+                (void)memcpy(md_for_thread.vec_bufs, md_for_thread.vec_bufs_local,
+                             sizeof(md_for_thread.vec_bufs_local));
+            }
+            else {
+                void *tmp_ptr;
 
-	/* Add this segment to vector read list */
-	md_for_thread.file_indices[md_for_thread.vec_arr_nused] = selection_info->my_file_index;
-	md_for_thread.addrs[md_for_thread.vec_arr_nused]        = selection_info->chunk_addr + file_off[file_seq_i]; /* Add the base offset of the dataset to the address */
-	md_for_thread.sizes[md_for_thread.vec_arr_nused]        = io_len;
-	md_for_thread.vec_bufs[md_for_thread.vec_arr_nused]     = (void *)((uint8_t *)rbuf + mem_off[mem_seq_i]);
+                /* Reallocate arrays */
+                if (NULL == (tmp_ptr = realloc(md_for_thread.file_indices,
+                                               md_for_thread.vec_arr_nalloc *
+                                                   sizeof(*(md_for_thread.file_indices)) * 2)))
+                {
+                    fprintf(stderr, "memory reallocation failed for file ids list\n");
+                    ret_value = -1;
+                    goto done;
+                }
 
-//fprintf(stderr, "In process_vector: %d. addr = %llu, sizes = %llu, buf = %p\n", md_for_thread.vec_arr_nused, md_for_thread.addrs[md_for_thread.vec_arr_nused], md_for_thread.sizes[md_for_thread.vec_arr_nused], md_for_thread.vec_bufs[md_for_thread.vec_arr_nused]);
+                md_for_thread.file_indices = tmp_ptr;
+                if (NULL == (tmp_ptr = realloc(md_for_thread.addrs, md_for_thread.vec_arr_nalloc *
+                                                                        sizeof(*(md_for_thread.addrs)) * 2)))
+                {
+                    fprintf(stderr, "memory reallocation failed for address list\n");
+                    ret_value = -1;
+                    goto done;
+                }                                                                    
 
-	md_for_thread.vec_arr_nused++;
+                md_for_thread.addrs = tmp_ptr;
+                if (NULL == (tmp_ptr = realloc(md_for_thread.sizes, md_for_thread.vec_arr_nalloc *
+                                                                        sizeof(*(md_for_thread.sizes)) * 2)))
+                {
+                    fprintf(stderr, "memory reallocation failed for size list\n");
+                    ret_value = -1;
+                    goto done;
+                }
+
+                md_for_thread.sizes = tmp_ptr;
+                if (NULL ==
+                    (tmp_ptr = realloc(md_for_thread.vec_bufs,
+                                       md_for_thread.vec_arr_nalloc * sizeof(*(md_for_thread.vec_bufs)) * 2)))
+                {
+                    fprintf(stderr, "memory reallocation failed for buffer list\n");
+                    ret_value = -1;
+                    goto done;
+                }
+
+                md_for_thread.vec_bufs = tmp_ptr;
+            }
+
+            /* Record that we've doubled the array sizes */
+            md_for_thread.vec_arr_nalloc *= 2;
+
+            md_for_thread.free_memory = true;
+        }
+
+        /* Add this segment to vector read list */
+        md_for_thread.file_indices[md_for_thread.vec_arr_nused] = selection_info->my_file_index;
+        md_for_thread.addrs[md_for_thread.vec_arr_nused] =
+            selection_info->chunk_addr + file_off[file_seq_i]; /* Add the base offset of the dataset to the
+                                                                  address */
+        md_for_thread.sizes[md_for_thread.vec_arr_nused]    = io_len;
+        md_for_thread.vec_bufs[md_for_thread.vec_arr_nused] = (void *)((uint8_t *)rbuf + mem_off[mem_seq_i]);
+
+        // fprintf(stderr, "In process_vector: %d. addr = %llu, sizes = %llu, buf =
+        // %p\n", md_for_thread.vec_arr_nused,
+        // md_for_thread.addrs[md_for_thread.vec_arr_nused],
+        // md_for_thread.sizes[md_for_thread.vec_arr_nused],
+        // md_for_thread.vec_bufs[md_for_thread.vec_arr_nused]);
+
+        md_for_thread.vec_arr_nused++;
 
         /* Increment the task in the queue of the thread pool */
-	thread_task_count++;
+        thread_task_count++;
 
-	local_count_for_signal++;
+        local_count_for_signal++;
 
-	pthread_mutex_unlock(&mutex_local);
+        if (pthread_mutex_unlock(&mutex_local) != 0) {
+            fprintf(stderr, "failed to unlock local mutex\n");
+            ret_value = -1;
+            goto done;
+        }
 
-	/* Let the queue accumulate nsteps_tpool entries then signal the thread pool to read them */
-	if (local_count_for_signal >= nsteps_tpool) {
-	    pthread_cond_broadcast(&cond_local);
-	    local_count_for_signal = 0;        
-	}
+        /* Let the queue accumulate nsteps_tpool entries then signal the thread pool
+         * to read them */
+        if (local_count_for_signal >= nsteps_tpool) {
+            pthread_cond_broadcast(&cond_local);
+            local_count_for_signal = 0;
+        }
 
-	/* Save the info for the C log file */
-	{
-	    /* Enlarge the size of the info for C and Re-allocate the memory if necessary */
-	    if (info_count == info_size) {
-		info_size  *= 2;
-		info_stuff = (info_t *)realloc(info_stuff, info_size * sizeof(info_t));
-	    }
+        /* Save the info for the C log file */
+        {
+            /* Enlarge the size of the info for C and Re-allocate the memory if
+             * necessary */
+            if (info_count == info_size) {
+                info_size *= 2;
+                if ((info_stuff = (info_t *)realloc(info_stuff, info_size * sizeof(info_t))) == NULL) {
+                    fprintf(stderr, "failed to reallocate info table\n");
+                    ret_value = -1;
+                    goto done;
+                }
+            }
 
-	    /* Save the info in the structure */
-	    strcpy(info_stuff[info_count].file_name, selection_info->file_name);
-	    strcpy(info_stuff[info_count].dset_name, selection_info->dset_name);
-	    info_stuff[info_count].dset_loc = selection_info->chunk_addr;
-	    info_stuff[info_count].data_offset_file = file_off[file_seq_i] / selection_info->dtype_size;
-	    info_stuff[info_count].real_offset = info_stuff[info_count].dset_loc + info_stuff[info_count].data_offset_file;
-	    info_stuff[info_count].nelmts = io_len / selection_info->dtype_size;
-	    info_stuff[info_count].data_offset_mem = mem_off[mem_seq_i] / selection_info->dtype_size;
-            info_stuff[info_count].end_of_read = false;
+            /* Save the info in the structure */
+            strcpy(info_stuff[info_count].file_name, selection_info->file_name);
+            strcpy(info_stuff[info_count].dset_name, selection_info->dset_name);
+            info_stuff[info_count].dset_loc         = selection_info->chunk_addr;
+            info_stuff[info_count].data_offset_file = file_off[file_seq_i] / selection_info->dtype_size;
+            info_stuff[info_count].real_offset =
+                info_stuff[info_count].dset_loc + info_stuff[info_count].data_offset_file;
+            info_stuff[info_count].nelmts          = io_len / selection_info->dtype_size;
+            info_stuff[info_count].data_offset_mem = mem_off[mem_seq_i] / selection_info->dtype_size;
+            info_stuff[info_count].end_of_read     = false;
 
-	    //printf("%s: %d, info_count = %d, end_of_read = %d\n", __func__, __LINE__, info_count, info_stuff[info_count].end_of_read);
+            // printf("%s: %d, info_count = %d, end_of_read = %d\n", __func__,
+            // __LINE__, info_count, info_stuff[info_count].end_of_read);
 
-	    /* Increment the counter */
-	    info_count++;
-	}
+            /* Increment the counter */
+            info_count++;
+        }
 
-	/* Update file sequence */
-	if (io_len == file_len[file_seq_i])
-	    file_seq_i++;
-	else {                      
-	    file_off[file_seq_i] += io_len;
-	    file_len[file_seq_i] -= io_len;
-	}                            
-		
-	/* Update memory sequence */
-	if (io_len == mem_len[mem_seq_i])
-	    mem_seq_i++;
-	else {      
-	    mem_off[mem_seq_i] += io_len;
-	    mem_len[mem_seq_i] -= io_len;
-	} 
+        /* Update file sequence */
+        if (io_len == file_len[file_seq_i])
+            file_seq_i++;
+        else {
+            file_off[file_seq_i] += io_len;
+            file_len[file_seq_i] -= io_len;
+        }
+
+        /* Update memory sequence */
+        if (io_len == mem_len[mem_seq_i])
+            mem_seq_i++;
+        else {
+            mem_off[mem_seq_i] += io_len;
+            mem_len[mem_seq_i] -= io_len;
+        }
     }
 
-    /* If there is any leftover entries in the queue, signal the thread pool to read them */
+    /* If there is any leftover entries in the queue, signal the thread pool to
+     * read them */
     if (local_count_for_signal > 0 && local_count_for_signal < nsteps_tpool)
-	pthread_cond_broadcast(&cond_local);
+        pthread_cond_broadcast(&cond_local);
 
-    H5Ssel_iter_close(file_iter_id);
-    H5Ssel_iter_close(mem_iter_id);
+    if (H5Ssel_iter_close(file_iter_id) < 0) {
+        fprintf(stderr, "failed to close file sel iterator\n");
+        ret_value = -1;
+        goto done;
+    }
+
+    if (H5Ssel_iter_close(mem_iter_id) < 0) {
+        fprintf(stderr, "failed to close mem sel iterator\n");
+        ret_value = -1;
+        goto done;
+    }
+
+done:
+    return ret_value;
 } /* end process_vectors() */
 
 static herr_t
-process_chunks(void *rbuf, void *dset, hid_t dcpl_id, hid_t mem_space, hid_t file_space, sel_info_t *selection_info, void **req)
+process_chunks(void *rbuf, void *dset, hid_t dcpl_id, hid_t mem_space, hid_t file_space,
+               sel_info_t *selection_info, void **req)
 {
-    hid_t      file_space_copy, mem_selection_id;
-    hsize_t    chunk_dims[DIM_RANK_MAX];
-    int        dset_dim_rank = 0;
-    hsize_t    num_chunks = 0;
-    haddr_t    chunk_addr;
-    unsigned   filter_mask;
-    hsize_t    chunk_offset[DIM_RANK_MAX], chunk_size;
-    hssize_t   selection_offset[DIM_RANK_MAX];
-    hssize_t   select_npoints = 0;
+    hid_t        file_space_copy, mem_selection_id;
+    hsize_t      chunk_dims[DIM_RANK_MAX];
+    int          dset_dim_rank = 0;
+    hsize_t      num_chunks    = 0;
+    haddr_t      chunk_addr;
+    unsigned     filter_mask;
+    hsize_t      chunk_offset[DIM_RANK_MAX], chunk_size;
+    hssize_t     selection_offset[DIM_RANK_MAX];
+    hssize_t     select_npoints = 0;
     H5S_sel_type select_type;
-    hsize_t    dims_retrieved[DIM_RANK_MAX];
-    hsize_t    offsets[DIM_RANK_MAX];
-    int        i, j;
-    herr_t     ret_value = 0;
+    hsize_t      dims_retrieved[DIM_RANK_MAX];
+    hsize_t      offsets[DIM_RANK_MAX];
+    int          i, j;
+    herr_t       ret_value = 0;
 
     memset(offsets, 0, sizeof(hsize_t) * DIM_RANK_MAX);
 
     /* Maybe use the dataset's dataspace return from H5Dget_space */
-    dset_dim_rank = H5Sget_simple_extent_ndims(file_space);
+    if ((dset_dim_rank = H5Sget_simple_extent_ndims(file_space)) < 0) {
+        fprintf(stderr, "unable to get the file space rank of chunked dataset\n");
+        ret_value = -1;
+        goto done;
+    }
 
-    H5Pget_chunk(dcpl_id, dset_dim_rank, chunk_dims);
+    if (H5Pget_chunk(dcpl_id, dset_dim_rank, chunk_dims) < 0) {
+        fprintf(stderr, "unable to get the chunk dimensions of chunked dataset\n");
+        ret_value = -1;
+        goto done;
+    }
 
-    H5Sget_simple_extent_dims(file_space, dims_retrieved, NULL);
+    if (H5Sget_simple_extent_dims(file_space, dims_retrieved, NULL) < 0) {
+        fprintf(stderr, "unable to get dimensions of chunked dataset\n");
+        ret_value = -1;
+        goto done;
+    }
 
-    get_num_chunks_helper(dset, file_space, &num_chunks, req);
+    if (get_num_chunks_helper(dset, file_space, &num_chunks, req) < 0) {
+        fprintf(stderr, "unable to get the number of chunks\n");
+        ret_value = -1;
+        goto done;
+    }
 
-    /* Iterate through all chunks and get the data selection falling into each chunk and the matching selection in memory */ 
+    /* Iterate through all chunks and get the data selection falling into each
+     * chunk and the matching selection in memory */
     for (i = 0; i < num_chunks; i++) {
-        get_chunk_info_helper(dset, file_space, i, chunk_offset, &filter_mask, &chunk_addr, &chunk_size, req);
-
-        file_space_copy = H5Scopy(file_space);
-        select_type     = H5Sget_select_type(file_space_copy);
-
-        /* To calculate the intersection area in the next step, there must be a hyperslab selection to start with.
-         * If there is no hyperslab selection in the file dataspace, select the whole dataspace. */
-        if (H5S_SEL_HYPERSLABS != select_type && H5Sselect_hyperslab(file_space_copy, H5S_SELECT_SET, offsets, NULL, dims_retrieved, NULL) < 0) {
-	    printf("In %s of %s at line %d: H5Sselect_hyperslab failed\n", __func__, __FILE__, __LINE__);
-	    ret_value = -1;
-	    goto done;
+        if (get_chunk_info_helper(dset, file_space, i, chunk_offset, &filter_mask, &chunk_addr, &chunk_size, req) < 0) {
+            fprintf(stderr, "unable to get chunk info for chunk #%d\n", i);
+            ret_value = -1;
+            goto done;
         }
 
-        /* Get the intersection between file space selection and this chunk. In other words, 
-         * get the file space selection falling into this chunk. */
+        if ((file_space_copy = H5Scopy(file_space)) < 0) {
+            fprintf(stderr, "unable to copy filespace\n");
+            ret_value = -1;
+            goto done;
+        }
+
+        if ((select_type = H5Sget_select_type(file_space_copy)) < 0) {
+            fprintf(stderr, "unable to get the selection type of file space\n");
+            ret_value = -1;
+            goto done;
+        }
+
+        /* To calculate the intersection area in the next step, there must be a
+         * hyperslab selection to start with. If there is no hyperslab selection in
+         * the file dataspace, select the whole dataspace. */
+        if (H5S_SEL_HYPERSLABS != select_type &&
+            H5Sselect_hyperslab(file_space_copy, H5S_SELECT_SET, offsets, NULL, dims_retrieved, NULL) < 0) {
+            printf("In %s of %s at line %d: H5Sselect_hyperslab failed\n", __func__, __FILE__, __LINE__);
+            ret_value = -1;
+            goto done;
+        }
+
+        /* Get the intersection between file space selection and this chunk. In
+         * other words, get the file space selection falling into this chunk. */
         if (H5Sselect_hyperslab(file_space_copy, H5S_SELECT_AND, chunk_offset, NULL, chunk_dims, NULL) < 0) {
             printf("In %s of %s at line %d: H5Sselect_hyperslab failed\n", __func__, __FILE__, __LINE__);
             ret_value = -1;
             goto done;
         }
 
-        select_npoints = H5Sget_select_npoints(file_space_copy);
+        if ((select_npoints = H5Sget_select_npoints(file_space_copy)) < 0) {
+            fprintf(stderr, "unable to get the number of points in file selection\n");
+            ret_value = -1;
+            goto done;
+        }
 
-        /* printf("\t\t2. chunk_offset={%llu, %llu}, chunk_dims={%llu, %llu}, chunk_addr = %llu, chunk_size = %llu, select_npoints = %llu\n", chunk_offset[0], chunk_offset[1], 
-                       chunk_dims[0], chunk_dims[1], chunk_addr, chunk_size, select_npoints); */
+        /* printf("\t\t2. chunk_offset={%llu, %llu}, chunk_dims={%llu, %llu},
+           chunk_addr = %llu, chunk_size = %llu, select_npoints = %llu\n",
+           chunk_offset[0], chunk_offset[1], chunk_dims[0], chunk_dims[1],
+           chunk_addr, chunk_size, select_npoints); */
 
-        /* If the any selection falls into this chunk, save the selection information */
+        /* If the any selection falls into this chunk, save the selection
+         * information */
         if (select_npoints > 0) {
-            /* Key function: get the data selection in memory which matches the file space selection falling into this chunk */ 
-            mem_selection_id = H5Sselect_project_intersection(file_space, mem_space, file_space_copy);
+            /* Key function: get the data selection in memory which matches the file space selection falling
+             * into this chunk */
+            if ((mem_selection_id = H5Sselect_project_intersection(file_space, mem_space, file_space_copy)) < 0) {
+                fprintf(stderr, "unable to get projected dataspace intersection\n");
+                ret_value = -1;
+                goto done;
+            }
 
-            for(j = 0; j < dset_dim_rank; j++)
-                selection_offset[j] = chunk_offset[j];    
+            for (j = 0; j < dset_dim_rank; j++)
+                selection_offset[j] = chunk_offset[j];
 
-            /* Move the file space selection in this chunk to upper-left corner and adjust (shrink) its extent to the size of the chunk.
-             * In other words, the 'file_space_copy' that contains the data selection in file which falls into the current chunk is adjusted
-             * from the size of the dataset to the size of chunk which still contains the same data selection. 'chunk_addr' is the original point
-             * for 'file_space_copy'.
+            /* Move the file space selection in this chunk to upper-left corner and
+             * adjust (shrink) its extent to the size of the chunk. In other words,
+             * the 'file_space_copy' that contains the data selection in file which
+             * falls into the current chunk is adjusted from the size of the dataset
+             * to the size of chunk which still contains the same data selection.
+             * 'chunk_addr' is the original point for 'file_space_copy'.
              */
             if (H5Sselect_adjust(file_space_copy, selection_offset) < 0) {
-		printf("In %s of %s at line %d: H5Sselect_adjust failed\n", __func__, __FILE__, __LINE__);
-		ret_value = -1;
-		goto done;
-	    }
+                printf("In %s of %s at line %d: H5Sselect_adjust failed\n", __func__, __FILE__, __LINE__);
+                ret_value = -1;
+                goto done;
+            }
 
-            H5Sset_extent_simple(file_space_copy, dset_dim_rank, chunk_dims, chunk_dims);
+            if (H5Sset_extent_simple(file_space_copy, dset_dim_rank, chunk_dims, chunk_dims) < 0) {
+                fprintf(stderr, "unable to set dataspace extent\n");
+                ret_value = -1;
+                goto done;
+            }
 
-            select_npoints = H5Sget_select_npoints(file_space_copy);
-            //printf("\t\t5. chunk_offset={%llu, %llu}, chunk_addr = %llu, chunk_size = %llu, select_npoints = %llu\n", chunk_offset[0], chunk_offset[1], chunk_addr, chunk_size, select_npoints);
-            //printf("\t\t select_npoints in memory = %llu\n", H5Sget_select_npoints(mem_selection_id));
-            //printf("\t\t start[0] = %llu, start[1] = %llu, end[0] = %llu, end[1] = %llu\n", start[0], start[1], end[0], end[1]);
+            if ((select_npoints = H5Sget_select_npoints(file_space_copy)) < 0) {
+                fprintf(stderr, "unable to get the number of points in file selection\n");
+                ret_value = -1;
+                goto done;
+            }
+            // printf("\t\t5. chunk_offset={%llu, %llu}, chunk_addr = %llu, chunk_size = %llu, select_npoints
+            // = %llu\n", chunk_offset[0], chunk_offset[1], chunk_addr, chunk_size, select_npoints);
+            // printf("\t\t select_npoints in memory = %llu\n", H5Sget_select_npoints(mem_selection_id));
+            // printf("\t\t start[0] = %llu, start[1] = %llu, end[0] = %llu, end[1] = %llu\n", start[0],
+            // start[1], end[0], end[1]);
 
             /* Save the information for this chunk */
-            selection_info->mem_space_id = mem_selection_id;
+            selection_info->mem_space_id  = mem_selection_id;
             selection_info->file_space_id = file_space_copy;
-            selection_info->chunk_addr = chunk_addr;
+            selection_info->chunk_addr    = chunk_addr;
 
             /* Retrieve the pieces of data (vectors) from the chunk and put them into the memory */
-	    process_vectors(rbuf, selection_info);
+            if (process_vectors(rbuf, selection_info) < 0) {
+                fprintf(stderr, "failed to insert vectors into queue\n");
+                ret_value = -1;
+                goto done;
+            }
 
             /* Close the space ID for the memory selection */
-            H5Sclose(mem_selection_id);
+            if (H5Sclose(mem_selection_id) < 0) {
+                fprintf(stderr, "unable to close memory selection\n");
+                ret_value = -1;
+                goto done;
+            }
         }
 
         /* Close the space ID for the file */
-        H5Sclose(file_space_copy);
+        if (H5Sclose(file_space_copy) < 0) {
+            fprintf(stderr, "unable to close file selection");
+            ret_value = -1;
+            goto done;
+        }
     }
 
 done:
     return ret_value;
 } /* end process_chunks() */
 
-
 /*-------------------------------------------------------------------------
  * Function:    H5VL_bypass_dataset_read
  *
@@ -2090,28 +2550,30 @@ done:
  *-------------------------------------------------------------------------
  */
 static herr_t
-H5VL_bypass_dataset_read(size_t count, void *dset[],
-    hid_t mem_type_id[], hid_t mem_space_id[],
-    hid_t file_space_id[], hid_t plist_id, void *buf[], void **req)
+H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t mem_space_id[],
+                         hid_t file_space_id[], hid_t plist_id, void *buf[], void **req)
 {
-    void *o_arr[count];                     /* Array of under objects */
-    hid_t under_vol_id;                     /* VOL ID for all objects */
-    herr_t ret_value = 1;
-    haddr_t dset_loc = 0;
-    H5D_layout_t dset_layout = -1;
-    hid_t dset_dtype_id;
-    hid_t dset_space_id;
-    hid_t file_space_id_copy, mem_space_id_copy;
-    hid_t dcpl_id = H5I_INVALID_HID;
-    hbool_t use_native = false;
-    hbool_t dset_found = false;             /* True if a dataset is opened with H5Dopen. False if it's opened in other ways
-                                             * like H5Rdeference (let native lib handle it).  For external link, it's also 
-                                             * false because the path name is different. */
-    char file_name[1024];
-    char dset_name[1024];
+    void        *o_arr[count]; /* Array of under objects */
+    hid_t        under_vol_id = H5I_INVALID_HID; /* VOL ID for all objects */
+    herr_t       ret_value   = 0;
+    hid_t        file_space_id_copy = H5I_INVALID_HID;
+    hid_t        mem_space_id_copy = H5I_INVALID_HID;
+    bool      dset_use_native = false;
+    H5VL_bypass_t *bypass_obj = NULL;
+    Bypass_dataset_t *bypass_dset = NULL;
     sel_info_t selection_info;
-    int i, j;
-    //hid_t  native_dtype;
+    int        i, j;
+    int        num_ext_files     = 0;
+    bool       any_thread_active = false;
+    bool       read_use_native   = false;
+    bool       external_link_access = false;
+    H5S_sel_type mem_sel_type = H5S_SEL_ERROR;
+    H5S_sel_type file_sel_type = H5S_SEL_ERROR;
+    bool types_equal = false;
+    dtype_info_t mem_type_info;
+    H5D_space_status_t dset_space_status = H5D_SPACE_STATUS_ERROR;
+
+    // hid_t  native_dtype;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL DATASET Read\n");
@@ -2119,132 +2581,267 @@ H5VL_bypass_dataset_read(size_t count, void *dset[],
 
     /* Loop through all datasets and process them individually */
     for (j = 0; j < count; j++) {
-	/* Retrieve the dataset's name */
-	get_dset_name_helper((H5VL_bypass_t *)(dset[j]), dset_name, req);
+        /* Prevent information persisting between iterations */
+        memset(&selection_info, 0, sizeof(sel_info_t));
+        memset(&mem_type_info, 0, sizeof(dtype_info_t));
+        dset_use_native = false;
+        read_use_native = false;
+        external_link_access = false;
+        mem_sel_type = H5S_SEL_ERROR;
+        file_sel_type = H5S_SEL_ERROR;
+        file_space_id_copy = H5I_INVALID_HID;
+        mem_space_id_copy = H5I_INVALID_HID;
 
-	/* Find the dataset's info using its name */
-	for (i = 0; i < dset_count; i++) {
-	    if (!strcmp(dset_stuff[i].dset_name, dset_name)) {
-                strcpy(file_name, dset_stuff[i].file_name);
-		dcpl_id = dset_stuff[i].dcpl_id;
-		dset_layout = dset_stuff[i].layout;
-		dset_loc = dset_stuff[i].location;
-		dset_dtype_id = dset_stuff[i].dtype_id;
-		dset_space_id = dset_stuff[i].space_id;
-		use_native = dset_stuff[i].use_native;
-                dset_found = true;
-	    }
-	}
+        bypass_obj = (H5VL_bypass_t*)dset[j];
 
-//printf("\n%s: %d, count=%lu, dset_name = %s, file_name = %s, dtype_id = %llu, H5T_STD_REF_DSETREG = %llu, H5T_NATIVE_INT = %llu, dcpl_id = %llu, H5I_INVALID_HID = %d\n", __func__, __LINE__, count, dset_name, file_name, dset_dtype_id, H5T_STD_REF_DSETREG, H5T_NATIVE_INT, dcpl_id, H5I_INVALID_HID);
+        if (bypass_obj->type != H5I_DATASET) { 
+            fprintf(stderr, "object provided for bypass dataset read is not a dataset\n");
+            ret_value = -1;
+            goto done;
+        }
 
-	/* Let the native function handle datatype conversion.  Also check the flag for filters, virtual dataset and reference datatype */
-	if (use_native || !dset_found || !H5Tequal(dset_dtype_id, mem_type_id[j])) {
+        bypass_dset = (Bypass_dataset_t*)&bypass_obj->u.dataset;
+        // printf("\n%s: %d, count=%lu, dset_name = %s, file_name = %s, dtype_id = %llu, H5T_STD_REF_DSETREG =
+        // %llu, H5T_NATIVE_INT = %llu, dcpl_id = %llu, H5I_INVALID_HID = %d\n", __func__, __LINE__, count,
+        // dset_name, file_name, dset_dtype_id, H5T_STD_REF_DSETREG, H5T_NATIVE_INT, dcpl_id,
+        // H5I_INVALID_HID);
 
-	    /* Populate the array of under objects */
-	    under_vol_id = ((H5VL_bypass_t *)(dset[0]))->under_vol_id;
+        /* Let the native function handle datatype conversion.  Also check the flag for filters, virtual
+         * dataset and reference datatype */
+        if (should_dset_use_native(bypass_dset, &dset_use_native) < 0) {
+            fprintf(stderr, "failed to determine if native function should be used\n");
+            ret_value = -1;
+            goto done;
+        }
 
-	    o_arr[j] = ((H5VL_bypass_t *)(dset[j]))->under_object;
-	    assert(under_vol_id == ((H5VL_bypass_t *)(dset[j]))->under_vol_id);
-  
-            //printf("%s: %d, in bypass VOL, count = %lu\n", __func__, __LINE__, count);
+        // fprintf(stderr, "%s at %d: file_name = %s\n", __func__, __LINE__, file_name);
 
-	    ret_value = H5VLdataset_read(1, &(o_arr[j]), under_vol_id, &(mem_type_id[j]), &(mem_space_id[j]), &(file_space_id[j]), plist_id, &(buf[j]), req);
-	} else { /* Coming into Bypass VOL when no data conversion and filter */
-	    //pthread_t th[nthreads_tpool];
-	    //info_for_thread_t info_for_thread[nthreads_tpool]; /* Remove it and use the global variable meta_for_thread? */
+        /* Find the correct data file, if any */
+        selection_info.my_file_index = -1;
+        
+        for (i = 0; i < file_stuff_count; i++) {
+            if (!strcmp(file_stuff[i].name, bypass_obj->file_name)) {
+                selection_info.my_file_index =
+                    i; /* Save this index in the list of FILE_T structures for quick lookup later */
+                break;
+            }
+        }
 
-            //printf("%s: %d, in bypass VOL\n", __func__, __LINE__);
+        if ((num_ext_files = H5Pget_external_count(bypass_dset->dcpl_id)) < 0) {
+            fprintf(stderr, "failed to get external file count\n");
+            ret_value = -1;
+            goto done;
+        }
 
-            /* Decide the dataspaces in memory and file */
-            if (check_dspaces_helper(dset_space_id, file_space_id[j], &file_space_id_copy, mem_space_id[j], &mem_space_id_copy) < 0) {
-                printf("In %s of %s at line %d: can't figure out the data space in file or memory\n", __func__, __FILE__, __LINE__);
+        /* If the dataset's file is not in table, it was accessed through an external link. */
+        if (selection_info.my_file_index < 0 || num_ext_files > 0)
+            external_link_access = true;
+    
+
+        /* Check selection type */
+        if (mem_space_id[j] == H5S_ALL) {
+            mem_sel_type = H5S_SEL_ALL;
+        } else if ((mem_sel_type = H5Sget_select_type(mem_space_id[j])) < 0) {
+            fprintf(stderr, "failed to get selection type\n");
+            ret_value = -1;
+            goto done;
+        }
+
+        if (mem_sel_type == H5S_SEL_NONE)
+            continue;
+
+        if (file_space_id[j] == H5S_ALL) {
+            file_sel_type = H5S_SEL_ALL;
+        } else if ((file_sel_type = H5Sget_select_type(file_space_id[j])) < 0) {
+            fprintf(stderr, "failed to get selection type\n");
+            ret_value = -1;
+            goto done;
+        }
+
+        if (file_sel_type == H5S_SEL_NONE)
+            continue;
+
+        if (get_dtype_info_helper(mem_type_id[j], &mem_type_info) < 0) {
+            fprintf(stderr, "failed to get mem dtype info\n");
+            ret_value = -1;
+            goto done;
+        }
+
+        types_equal = bypass_types_equal(&bypass_dset->dtype_info, &mem_type_info);
+
+        if ((dset_space_status = get_dset_space_status(dset[j], plist_id, req)) < 0) {
+            fprintf(stderr, "failed to get dataset space status\n");
+            ret_value = -1;
+            goto done;
+        }
+
+        read_use_native = dset_use_native || !types_equal || 
+            external_link_access || mem_sel_type == H5S_SEL_POINTS || file_sel_type == H5S_SEL_POINTS
+            || dset_space_status != H5D_SPACE_STATUS_ALLOCATED || mem_space_id[j] == H5S_BLOCK
+            || file_space_id[j] == H5S_BLOCK || mem_space_id[j] == H5S_PLIST || file_space_id[j] == H5S_PLIST;
+
+        if (read_use_native) {
+
+            /* Populate the array of under objects */
+            under_vol_id = ((H5VL_bypass_t *)(dset[0]))->under_vol_id;
+
+            o_arr[j] = ((H5VL_bypass_t *)(dset[j]))->under_object;
+            assert(under_vol_id == ((H5VL_bypass_t *)(dset[j]))->under_vol_id);
+
+            // printf("%s: %d, in bypass VOL, count = %lu\n", __func__, __LINE__,
+            // count);
+
+            if ((ret_value =
+                H5VLdataset_read(1, &(o_arr[j]),
+                    under_vol_id, &(mem_type_id[j]), &(mem_space_id[j]),
+                    &(file_space_id[j]), plist_id, &(buf[j]), req)) < 0) {
+
+                    fprintf(stderr, "In %s of %s at line %d: H5VLdataset_read failed\n", __func__,
+                            __FILE__, __LINE__);
+                    goto done;
+            }
+        } else { /* Coming into Bypass VOL when no data conversion and filter */
+               // pthread_t th[nthreads_tpool];
+            // info_for_thread_t info_for_thread[nthreads_tpool]; /* Remove it and use
+            // the global variable meta_for_thread? */
+
+            // printf("%s: %d, in bypass VOL\n", __func__, __LINE__);
+            if (get_dset_location(dset[j], plist_id, req, &selection_info.chunk_addr) < 0) {
+                fprintf(stderr, "failed to get file location of contiguous dataset\n");
                 ret_value = -1;
                 goto done;
             }
 
-	    /* Reset for the next H5Dread */
-	    pthread_mutex_lock(&mutex_local);
-	    thread_task_finished = false;
-	    thread_loop_finish   = false;
-	    pthread_mutex_unlock(&mutex_local);
+            /* Decide the dataspaces in memory and file */
+            if (check_dspaces_helper(bypass_dset->space_id, file_space_id[j], &file_space_id_copy, mem_space_id[j],
+                                     &mem_space_id_copy) < 0) {
+                printf("In %s of %s at line %d: can't figure out the data space in file or memory\n",
+                       __func__, __FILE__, __LINE__);
+                ret_value = -1;
+                goto done;
+            }
 
-	    /* Find out the file name */
-	    //get_filename_helper((H5VL_bypass_t *)(dset[j]), file_name, H5I_DATASET, req);
-//fprintf(stderr, "%s at %d: file_name = %s\n", __func__, __LINE__, file_name);
+            /* Reset for the next H5Dread */
+            pthread_mutex_lock(&mutex_local);
 
-            selection_info.my_file_index = -1;
+            for (i = 0; i < nthreads_tpool; i++)
+                md_for_thread.thread_is_active[i] = true;
 
-	    /* Find the correct data file */
-	    for (i = 0; i < file_stuff_count; i++) {
-		if (!strcmp(file_stuff[i].name, file_name)) {
-		    selection_info.my_file_index = i;             /* Save this index in the list of FILE_T structures for quick lookup later */
-                    break;
+            thread_task_finished = false;
+            thread_loop_finish   = false;
+            pthread_mutex_unlock(&mutex_local);
+
+            /* Initialize data selection info */
+            strcpy(selection_info.file_name, bypass_obj->file_name);
+            if (get_dset_name_helper((H5VL_bypass_t *)(dset[j]), selection_info.dset_name, req) < 0) {
+                fprintf(stderr, "failed to retrieve dataset name\n");
+                ret_value = -1;
+                goto done;
+            }
+
+            selection_info.dtype_size = bypass_dset->dtype_info.size;
+
+            if (H5D_CHUNKED == bypass_dset->layout) {
+                /* Iterate through all chunks and map the data selection in each chunk to the memory.
+                 * Put the selections into a queue for the thread pool to read the data */
+                // process_chunks(buf[j], dset[j], dcpl_id, mem_space_id[j], file_space_id[j],
+                // &selection_info, req);
+                process_chunks(buf[j], dset[j], bypass_dset->dcpl_id, mem_space_id_copy, file_space_id_copy,
+                               &selection_info, req);
+            }
+            else if (H5D_CONTIGUOUS == bypass_dset->layout) {
+                selection_info.file_space_id = file_space_id_copy;
+                selection_info.mem_space_id  = mem_space_id_copy;
+
+                /* Handles the hyperslab selection and read the data */
+                if (process_vectors(buf[j], &selection_info) < 0) {
+                    fprintf(stderr, "failed to insert vectors into queue\n");
+                    ret_value = -1;
+                    goto done;
                 }
+            } else {
+                fprintf(stderr, "unsupported dataset layout\n");
+                ret_value = -1;
+                goto done;
             }
 
-            if (selection_info.my_file_index == -1) {
-	        printf("In %s of %s at line %d: can't find the file with the name %s\n", __func__, __FILE__, __LINE__, file_name);
-	        ret_value = -1;
-	        goto done;
+            /* Save the info for the C log file */
+            {
+                /* Enlarge the size of the info for C and Re-allocate the memory if necessary */
+                if (info_count == info_size) {
+                    info_size  *= 2;
+                    info_stuff = (info_t *)realloc(info_stuff, info_size * sizeof(info_t));
+                }
+
+                /* Save the info in the structure */
+                info_stuff[info_count].end_of_read = true;
+
+                //printf("%s: %d, info_count = %d, end_of_read = %d\n", __func__, __LINE__, info_count, info_stuff[info_count].end_of_read);
+
+                /* Increment the counter */
+                info_count++;
             }
+        }
 
-	    /* Initialize data selection info */
-	    strcpy(selection_info.file_name, file_name);
-	    strcpy(selection_info.dset_name, dset_name);
-
-	    selection_info.dtype_size = H5Tget_size(dset_dtype_id);
-
-	    if (H5D_CHUNKED == dset_layout) {
-		/* Iterate through all chunks and map the data selection in each chunk to the memory.
-		 * Put the selections into a queue for the thread pool to read the data */ 
-		//process_chunks(buf[j], dset[j], dcpl_id, mem_space_id[j], file_space_id[j], &selection_info, req);
-		process_chunks(buf[j], dset[j], dcpl_id, mem_space_id_copy, file_space_id_copy, &selection_info, req);
-	    } else if (H5D_CONTIGUOUS == dset_layout) {
-		selection_info.file_space_id = file_space_id_copy;
-		selection_info.mem_space_id = mem_space_id_copy;
-		selection_info.chunk_addr = dset_loc;
-
-		/* Handles the hyperslab selection and read the data */
-		process_vectors(buf[j], &selection_info);
-	    }
-
-	    /* Signal the thread pool to finish this read. Notify the thread pool that it finished putting tasks in the queue. */
-	    pthread_mutex_lock(&mutex_local);
-	    thread_task_finished = true;
-	    pthread_mutex_unlock(&mutex_local);
-	    pthread_cond_broadcast(&cond_local);  /* Why do this signal/broadcast? */
-
-	    /* Save the info for the C log file */
-	    {
-		/* Enlarge the size of the info for C and Re-allocate the memory if necessary */
-		if (info_count == info_size) {
-		    info_size  *= 2;
-		    info_stuff = (info_t *)realloc(info_stuff, info_size * sizeof(info_t));
-		}
-
-		/* Save the info in the structure */
-		info_stuff[info_count].end_of_read = true;
-
-		//printf("%s: %d, info_count = %d, end_of_read = %d\n", __func__, __LINE__, info_count, info_stuff[info_count].end_of_read);
-
-		/* Increment the counter */
-		info_count++;
-	    }
-	}
-
-        dset_found = false;
     }
 
     /* Check for async request */
-    if(req && *req)
+    if (req && *req)
         *req = H5VL_bypass_new_obj(*req, under_vol_id);
 
+
+    /* Signal the thread pool to finish this read. Notify the thread pool that it finished putting tasks in the queue. */
+    pthread_mutex_lock(&mutex_local);
+    thread_task_finished = true;
+    pthread_mutex_unlock(&mutex_local);
+    pthread_cond_broadcast(&cond_local);  /* Why do this signal/broadcast? */
+    
+    /* Do not return until the thread pool finishes the read */
+    /* TBD: Enforcing this will become more complicated once multiple
+     * application threads making concurrent H5Dread() calls is supported. */
+    if (pthread_mutex_lock(&mutex_local) < 0) {
+        printf("In %s of %s at line %d: pthread_mutex_lock failed\n", __func__, __FILE__, __LINE__);
+        ret_value = -1;
+        goto done;
+    }
+
+    /* Only finish H5Dread() once all threads are inactive and no tasks are undone */
+    /* Only block here if Bypass VOL was used for the read */
+    while (!read_use_native) {
+        any_thread_active = false;
+
+        if (is_any_thread_active(&any_thread_active) < 0) {
+            fprintf(stderr, "Unable to query thread active status\n");
+            /* Prevent deadlock on error */
+            pthread_mutex_unlock(&mutex_local);
+            ret_value = -1;
+            goto done;
+        }
+
+        if (!any_thread_active)
+            break;
+
+        pthread_cond_wait(&cond_read_finished, &mutex_local);
+    }
+
+    if (ret_value < 0) {
+        fprintf(stderr, "Unable to query thread active status\n");
+        goto done;
+    }
+
+    if (pthread_mutex_unlock(&mutex_local) < 0) {
+        printf("In %s of %s at line %d: pthread_mutex_unlock failed\n", __func__, __FILE__, __LINE__);
+        ret_value = -1;
+        goto done;
+    }
+
+    assert(thread_task_count == 0);
+
 done:
+
     return ret_value;
 } /* end H5VL_bypass_dataset_read() */
 
-
 /*-------------------------------------------------------------------------
  * Function:    H5VL_bypass_dataset_write
  *
@@ -2256,12 +2853,11 @@ done:
  *-------------------------------------------------------------------------
  */
 static herr_t
-H5VL_bypass_dataset_write(size_t count, void *dset[],
-    hid_t mem_type_id[], hid_t mem_space_id[],
-    hid_t file_space_id[], hid_t plist_id, const void *buf[], void **req)
+H5VL_bypass_dataset_write(size_t count, void *dset[], hid_t mem_type_id[], hid_t mem_space_id[],
+                          hid_t file_space_id[], hid_t plist_id, const void *buf[], void **req)
 {
-    void *o_arr[count];   /* Array of under objects */
-    hid_t under_vol_id;                     /* VOL ID for all objects */
+    void  *o_arr[count]; /* Array of under objects */
+    hid_t  under_vol_id; /* VOL ID for all objects */
     herr_t ret_value;
 
 #ifdef ENABLE_BYPASS_LOGGING
@@ -2270,21 +2866,21 @@ H5VL_bypass_dataset_write(size_t count, void *dset[],
 
     /* Populate the array of under objects */
     under_vol_id = ((H5VL_bypass_t *)(dset[0]))->under_vol_id;
-    for(size_t u = 0; u < count; u++) {
+    for (size_t u = 0; u < count; u++) {
         o_arr[u] = ((H5VL_bypass_t *)(dset[u]))->under_object;
         assert(under_vol_id == ((H5VL_bypass_t *)(dset[u]))->under_vol_id);
     }
 
-    ret_value = H5VLdataset_write(count, o_arr, under_vol_id, mem_type_id, mem_space_id, file_space_id, plist_id, buf, req);
+    ret_value = H5VLdataset_write(count, o_arr, under_vol_id, mem_type_id, mem_space_id, file_space_id,
+                                  plist_id, buf, req);
 
     /* Check for async request */
-    if(req && *req)
+    if (req && *req)
         *req = H5VL_bypass_new_obj(*req, under_vol_id);
 
     return ret_value;
 } /* end H5VL_bypass_dataset_write() */
 
-
 /*-------------------------------------------------------------------------
  * Function:    H5VL_bypass_dataset_get
  *
@@ -2296,11 +2892,10 @@ H5VL_bypass_dataset_write(size_t count, void *dset[],
  *-------------------------------------------------------------------------
  */
 static herr_t
-H5VL_bypass_dataset_get(void *dset, H5VL_dataset_get_args_t *args,
-    hid_t dxpl_id, void **req)
+H5VL_bypass_dataset_get(void *dset, H5VL_dataset_get_args_t *args, hid_t dxpl_id, void **req)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)dset;
-    herr_t ret_value;
+    herr_t         ret_value;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL DATASET Get\n");
@@ -2309,13 +2904,12 @@ H5VL_bypass_dataset_get(void *dset, H5VL_dataset_get_args_t *args,
     ret_value = H5VLdataset_get(o->under_object, o->under_vol_id, args, dxpl_id, req);
 
     /* Check for async request */
-    if(req && *req)
+    if (req && *req)
         *req = H5VL_bypass_new_obj(*req, o->under_vol_id);
 
     return ret_value;
 } /* end H5VL_bypass_dataset_get() */
 
-
 /*-------------------------------------------------------------------------
  * Function:    H5VL_bypass_dataset_specific
  *
@@ -2327,31 +2921,75 @@ H5VL_bypass_dataset_get(void *dset, H5VL_dataset_get_args_t *args,
  *-------------------------------------------------------------------------
  */
 static herr_t
-H5VL_bypass_dataset_specific(void *obj, H5VL_dataset_specific_args_t *args,
-    hid_t dxpl_id, void **req)
+H5VL_bypass_dataset_specific(void *obj, H5VL_dataset_specific_args_t *args, hid_t dxpl_id, void **req)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
     hid_t under_vol_id;
-    herr_t ret_value;
+    herr_t ret_value = 0;
+    bool req_created = false;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL H5Dspecific\n");
 #endif
+    assert(o->type == H5I_DATASET);
 
     // Save copy of underlying VOL connector ID and prov helper, in case of
     // refresh destroying the current object
     under_vol_id = o->under_vol_id;
 
-    ret_value = H5VLdataset_specific(o->under_object, o->under_vol_id, args, dxpl_id, req);
+    if (H5VLdataset_specific(o->under_object, o->under_vol_id, args, dxpl_id, req) < 0) {
+        fprintf(stderr, "H5VLdataset_specific failed\n");
+        ret_value = -1;
+        goto done;
+    }
 
     /* Check for async request */
-    if(req && *req)
+    if (req && *req) {
         *req = H5VL_bypass_new_obj(*req, under_vol_id);
+        req_created = true;
+    }
+
+    /* If dataspace was changed, update the stored dataspace */
+    if (args->op_type == H5VL_DATASET_SET_EXTENT) {
+        H5VL_dataset_get_args_t get_args;        
+
+        if (H5Sclose(o->u.dataset.space_id) < 0) {
+            fprintf(stderr, "unable to close old dataspace\n");
+            ret_value = -1;
+            goto done;
+        }
+        
+        o->u.dataset.space_id = H5I_INVALID_HID;
+
+        /* Figure out the dataset's dataspace */
+        get_args.op_type                 = H5VL_DATASET_GET_SPACE;
+        get_args.args.get_space.space_id = H5I_INVALID_HID;
+
+        /* Retrieve the dataset's dataspace ID */
+        if (H5VL_bypass_dataset_get(obj, &get_args, dxpl_id, req) < 0) {
+            fprintf(stderr, "unable to get opened dataset's dataspace\n");
+            ret_value = -1;
+            goto done;
+        }
+
+        if (get_args.args.get_space.space_id == H5I_INVALID_HID) {
+            fprintf(stderr, "retrieved invalid dataspace for dataset\n");
+            ret_value = -1;
+            goto done;
+        }
+
+        o->u.dataset.space_id = get_args.args.get_space.space_id;
+    }
+
+done:
+    if (ret_value < 0) {
+        if (req_created)
+            H5VL_bypass_free_obj(*req);
+    }
 
     return ret_value;
 } /* end H5VL_bypass_dataset_specific() */
 
-
 /*-------------------------------------------------------------------------
  * Function:    H5VL_bypass_dataset_optional
  *
@@ -2363,11 +3001,10 @@ H5VL_bypass_dataset_specific(void *obj, H5VL_dataset_specific_args_t *args,
  *-------------------------------------------------------------------------
  */
 static herr_t
-H5VL_bypass_dataset_optional(void *obj, H5VL_optional_args_t *args,
-    hid_t dxpl_id, void **req)
+H5VL_bypass_dataset_optional(void *obj, H5VL_optional_args_t *args, hid_t dxpl_id, void **req)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
-    herr_t ret_value;
+    herr_t         ret_value;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL DATASET Optional\n");
@@ -2376,51 +3013,12 @@ H5VL_bypass_dataset_optional(void *obj, H5VL_optional_args_t *args,
     ret_value = H5VLdataset_optional(o->under_object, o->under_vol_id, args, dxpl_id, req);
 
     /* Check for async request */
-    if(req && *req)
+    if (req && *req)
         *req = H5VL_bypass_new_obj(*req, o->under_vol_id);
 
     return ret_value;
 } /* end H5VL_bypass_dataset_optional() */
 
-static void
-remove_dset_info_helper(unsigned index)
-{
-    unsigned i;
-
-    /* First, close the IDs related to the dataset */
-    H5Pclose(dset_stuff[index].dcpl_id);
-    dset_stuff[index].dcpl_id = H5I_INVALID_HID;
-
-    H5Tclose(dset_stuff[index].dtype_id);
-    dset_stuff[index].dtype_id = H5I_INVALID_HID;
-
-    H5Sclose(dset_stuff[index].space_id);
-    dset_stuff[index].space_id = H5I_INVALID_HID;
-
-    dset_stuff[index].use_native = false;
-
-    /* Remove the entry by shifting leftward all elements after this entry.
-     * But don't do anything if this entry is the only one or is the last one in the array
-     * except decrement the number of entries.
-     */
-    if (dset_count > 1 && index != dset_count -1 ) {
-        for (i = index; i < dset_count - 1; i++) {
-            strcpy(dset_stuff[i].dset_name, dset_stuff[i + 1].dset_name);
-            strcpy(dset_stuff[i].file_name, dset_stuff[i + 1].file_name);
-            dset_stuff[i].layout =          dset_stuff[i + 1].layout;
-            dset_stuff[i].ref_count =       dset_stuff[i + 1].ref_count;
-            dset_stuff[i].dcpl_id =         dset_stuff[i + 1].dcpl_id;
-            dset_stuff[i].dtype_id =        dset_stuff[i + 1].dtype_id;
-            dset_stuff[i].space_id =        dset_stuff[i + 1].space_id;
-            dset_stuff[i].location =        dset_stuff[i + 1].location;
-            dset_stuff[i].use_native =      dset_stuff[i + 1].use_native;
-        }
-    }
-
-    dset_count--;
-}
-
-
 /*-------------------------------------------------------------------------
  * Function:    H5VL_bypass_dataset_close
  *
@@ -2435,41 +3033,31 @@ static herr_t
 H5VL_bypass_dataset_close(void *dset, hid_t dxpl_id, void **req)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)dset;
-    char dset_name[1024];
-    unsigned i;
-    herr_t ret_value;
+    herr_t         ret_value = 0;
 
+    
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL DATASET Close\n");
 #endif
 
-    /* Retrieve the dataset's name */
-    get_dset_name_helper(o, dset_name, req);
-
-    /* Decrement the reference count.  Remove the dataset structure from the list when the reference count drops to zero */
-    for (i = 0; i < dset_count; i++) {
-        if (!strcmp(dset_stuff[i].dset_name, dset_name)) {
-            dset_stuff[i].ref_count--;
-
-            if (!dset_stuff[i].ref_count)
-                remove_dset_info_helper(i);
-        }
+    if (H5VLdataset_close(o->under_object, o->under_vol_id, dxpl_id, req) < 0) {
+        fprintf(stderr, "Failed to close dataset in underlying connectors\n");
+        ret_value = -1;
+        goto done;
     }
 
-    ret_value = H5VLdataset_close(o->under_object, o->under_vol_id, dxpl_id, req);
-
     /* Check for async request */
-    if(req && *req)
+    if (req && *req)
         *req = H5VL_bypass_new_obj(*req, o->under_vol_id);
 
     /* Release our wrapper, if underlying dataset was closed */
-    if(ret_value >= 0)
+    if (ret_value >= 0)
         H5VL_bypass_free_obj(o);
 
+done:
     return ret_value;
 } /* end H5VL_bypass_dataset_close() */
 
-
 /*-------------------------------------------------------------------------
  * Function:    H5VL_bypass_datatype_commit
  *
@@ -2481,24 +3069,24 @@ H5VL_bypass_dataset_close(void *dset, hid_t dxpl_id, void **req)
  *-------------------------------------------------------------------------
  */
 static void *
-H5VL_bypass_datatype_commit(void *obj, const H5VL_loc_params_t *loc_params,
-    const char *name, hid_t type_id, hid_t lcpl_id, hid_t tcpl_id, hid_t tapl_id,
-    hid_t dxpl_id, void **req)
+H5VL_bypass_datatype_commit(void *obj, const H5VL_loc_params_t *loc_params, const char *name, hid_t type_id,
+                            hid_t lcpl_id, hid_t tcpl_id, hid_t tapl_id, hid_t dxpl_id, void **req)
 {
     H5VL_bypass_t *dt;
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
-    void *under;
+    void          *under;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL DATATYPE Commit\n");
 #endif
 
-    under = H5VLdatatype_commit(o->under_object, loc_params, o->under_vol_id, name, type_id, lcpl_id, tcpl_id, tapl_id, dxpl_id, req);
-    if(under) {
+    under = H5VLdatatype_commit(o->under_object, loc_params, o->under_vol_id, name, type_id, lcpl_id, tcpl_id,
+                                tapl_id, dxpl_id, req);
+    if (under) {
         dt = H5VL_bypass_new_obj(under, o->under_vol_id);
 
         /* Check for async request */
-        if(req && *req)
+        if (req && *req)
             *req = H5VL_bypass_new_obj(*req, o->under_vol_id);
     } /* end if */
     else
@@ -2507,7 +3095,6 @@ H5VL_bypass_datatype_commit(void *obj, const H5VL_loc_params_t *loc_params,
     return (void *)dt;
 } /* end H5VL_bypass_datatype_commit() */
 
-
 /*-------------------------------------------------------------------------
  * Function:    H5VL_bypass_datatype_open
  *
@@ -2519,23 +3106,23 @@ H5VL_bypass_datatype_commit(void *obj, const H5VL_loc_params_t *loc_params,
  *-------------------------------------------------------------------------
  */
 static void *
-H5VL_bypass_datatype_open(void *obj, const H5VL_loc_params_t *loc_params,
-    const char *name, hid_t tapl_id, hid_t dxpl_id, void **req)
+H5VL_bypass_datatype_open(void *obj, const H5VL_loc_params_t *loc_params, const char *name, hid_t tapl_id,
+                          hid_t dxpl_id, void **req)
 {
     H5VL_bypass_t *dt;
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
-    void *under;
+    void          *under;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL DATATYPE Open\n");
 #endif
 
     under = H5VLdatatype_open(o->under_object, loc_params, o->under_vol_id, name, tapl_id, dxpl_id, req);
-    if(under) {
+    if (under) {
         dt = H5VL_bypass_new_obj(under, o->under_vol_id);
 
         /* Check for async request */
-        if(req && *req)
+        if (req && *req)
             *req = H5VL_bypass_new_obj(*req, o->under_vol_id);
     } /* end if */
     else
@@ -2544,7 +3131,6 @@ H5VL_bypass_datatype_open(void *obj, const H5VL_loc_params_t *loc_params,
     return (void *)dt;
 } /* end H5VL_bypass_datatype_open() */
 
-
 /*-------------------------------------------------------------------------
  * Function:    H5VL_bypass_datatype_get
  *
@@ -2556,11 +3142,10 @@ H5VL_bypass_datatype_open(void *obj, const H5VL_loc_params_t *loc_params,
  *-------------------------------------------------------------------------
  */
 static herr_t
-H5VL_bypass_datatype_get(void *dt, H5VL_datatype_get_args_t *args,
-    hid_t dxpl_id, void **req)
+H5VL_bypass_datatype_get(void *dt, H5VL_datatype_get_args_t *args, hid_t dxpl_id, void **req)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)dt;
-    herr_t ret_value;
+    herr_t         ret_value;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL DATATYPE Get\n");
@@ -2569,13 +3154,12 @@ H5VL_bypass_datatype_get(void *dt, H5VL_datatype_get_args_t *args,
     ret_value = H5VLdatatype_get(o->under_object, o->under_vol_id, args, dxpl_id, req);
 
     /* Check for async request */
-    if(req && *req)
+    if (req && *req)
         *req = H5VL_bypass_new_obj(*req, o->under_vol_id);
 
     return ret_value;
 } /* end H5VL_bypass_datatype_get() */
 
-
 /*-------------------------------------------------------------------------
  * Function:    H5VL_bypass_datatype_specific
  *
@@ -2587,12 +3171,11 @@ H5VL_bypass_datatype_get(void *dt, H5VL_datatype_get_args_t *args,
  *-------------------------------------------------------------------------
  */
 static herr_t
-H5VL_bypass_datatype_specific(void *obj, H5VL_datatype_specific_args_t *args,
-    hid_t dxpl_id, void **req)
+H5VL_bypass_datatype_specific(void *obj, H5VL_datatype_specific_args_t *args, hid_t dxpl_id, void **req)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
-    hid_t under_vol_id;
-    herr_t ret_value;
+    hid_t          under_vol_id;
+    herr_t         ret_value;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL DATATYPE Specific\n");
@@ -2605,13 +3188,12 @@ H5VL_bypass_datatype_specific(void *obj, H5VL_datatype_specific_args_t *args,
     ret_value = H5VLdatatype_specific(o->under_object, o->under_vol_id, args, dxpl_id, req);
 
     /* Check for async request */
-    if(req && *req)
+    if (req && *req)
         *req = H5VL_bypass_new_obj(*req, under_vol_id);
 
     return ret_value;
 } /* end H5VL_bypass_datatype_specific() */
 
-
 /*-------------------------------------------------------------------------
  * Function:    H5VL_bypass_datatype_optional
  *
@@ -2623,11 +3205,10 @@ H5VL_bypass_datatype_specific(void *obj, H5VL_datatype_specific_args_t *args,
  *-------------------------------------------------------------------------
  */
 static herr_t
-H5VL_bypass_datatype_optional(void *obj, H5VL_optional_args_t *args,
-    hid_t dxpl_id, void **req)
+H5VL_bypass_datatype_optional(void *obj, H5VL_optional_args_t *args, hid_t dxpl_id, void **req)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
-    herr_t ret_value;
+    herr_t         ret_value;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL DATATYPE Optional\n");
@@ -2636,13 +3217,12 @@ H5VL_bypass_datatype_optional(void *obj, H5VL_optional_args_t *args,
     ret_value = H5VLdatatype_optional(o->under_object, o->under_vol_id, args, dxpl_id, req);
 
     /* Check for async request */
-    if(req && *req)
+    if (req && *req)
         *req = H5VL_bypass_new_obj(*req, o->under_vol_id);
 
     return ret_value;
 } /* end H5VL_bypass_datatype_optional() */
 
-
 /*-------------------------------------------------------------------------
  * Function:    H5VL_bypass_datatype_close
  *
@@ -2657,7 +3237,7 @@ static herr_t
 H5VL_bypass_datatype_close(void *dt, hid_t dxpl_id, void **req)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)dt;
-    herr_t ret_value;
+    herr_t         ret_value;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL DATATYPE Close\n");
@@ -2668,55 +3248,71 @@ H5VL_bypass_datatype_close(void *dt, hid_t dxpl_id, void **req)
     ret_value = H5VLdatatype_close(o->under_object, o->under_vol_id, dxpl_id, req);
 
     /* Check for async request */
-    if(req && *req)
+    if (req && *req)
         *req = H5VL_bypass_new_obj(*req, o->under_vol_id);
 
     /* Release our wrapper, if underlying datatype was closed */
-    if(ret_value >= 0)
+    if (ret_value >= 0)
         H5VL_bypass_free_obj(o);
 
     return ret_value;
 } /* end H5VL_bypass_datatype_close() */
 
-static void
+static herr_t
 c_file_open_helper(const char *name)
 {
+    herr_t ret_value = 0;
+
     /* Enlarge the size of the file stuff for C and Re-allocate the memory if necessary */
     if (file_stuff_count == file_stuff_size) {
-	file_stuff_size  *= 2;
-	file_stuff = (file_t *)realloc(file_stuff, file_stuff_size * sizeof(file_t));
+        file_stuff_size *= 2;
+        if ((file_stuff = (file_t *)realloc(file_stuff, file_stuff_size * sizeof(file_t))) == NULL)
+        {
+            fprintf(stderr, "failed to allocate more memory for file info table\n");
+            ret_value = -1;
+            goto done;
+        }
     }
 
     /* Open the file in C for IO without HDF5 */
     strcpy(file_stuff[file_stuff_count].name, name);
 
-    //get_vfd_handle_helper(file, &(file_stuff[file_stuff_count].vfd_file_handle), req);
+    // get_vfd_handle_helper(file,
+    // &(file_stuff[file_stuff_count].vfd_file_handle), req);
 
     /* VFD handle is not currently used */
-    /* if (NULL == (file_stuff[file_stuff_count].vfd_file_handle = H5FDopen(name, H5F_ACC_RDONLY, H5P_DEFAULT, HADDR_UNDEF)))
-	puts("failed to open VFD file");
+    /* if (NULL == (file_stuff[file_stuff_count].vfd_file_handle = H5FDopen(name,
+    H5F_ACC_RDONLY, H5P_DEFAULT, HADDR_UNDEF))) puts("failed to open VFD file");
 
     if (!file_stuff[file_stuff_count].vfd_file_handle)
-	puts("failed to get VFD file handle"); */
-   
-    file_stuff[file_stuff_count].fd = open(name, O_RDONLY);
-   
-    /* Increment the reference count for this file */ 
+        puts("failed to get VFD file handle"); */
+
+    if ((file_stuff[file_stuff_count].fd = open(name, O_RDONLY)) < 0) {
+        fprintf(stderr, "failed to open file descriptor: %s\n", strerror(errno));
+        ret_value = -1;
+        goto done;
+    }
+
+    /* Increment the reference count for this file */
     file_stuff[file_stuff_count].ref_count++;
-   
+
     strcpy(file_stuff[file_stuff_count].name, name);
 
-    file_stuff[file_stuff_count].num_reads = 0;
+    file_stuff[file_stuff_count].num_reads    = 0;
     file_stuff[file_stuff_count].read_started = false;
-    pthread_cond_init(&(file_stuff[file_stuff_count].close_ready), NULL);  /* Initialize the condition variable for file closing */
-    
-    /*printf("%s: name = %s, file_stuff_count = %d, file_stuff[%d].name = %s, file_stuff[%d].fp = %d\n", __func__, name, file_stuff_count, file_stuff_count, file_stuff[file_stuff_count].name, file_stuff_count, file_stuff[file_stuff_count].fp);*/
+    pthread_cond_init(&(file_stuff[file_stuff_count].close_ready),
+                      NULL); /* Initialize the condition variable for file closing */
+    /*printf("%s: name = %s, file_stuff_count = %d, file_stuff[%d].name = %s, file_stuff[%d].fp = %d\n",
+     * __func__, name, file_stuff_count, file_stuff_count, file_stuff[file_stuff_count].name,
+     * file_stuff_count, file_stuff[file_stuff_count].fp);*/
 
     /* Increment the number of files being opened with C */
     file_stuff_count++;
+
+done:
+    return ret_value;
 }
 
-
 /*-------------------------------------------------------------------------
  * Function:    H5VL_bypass_file_create
  *
@@ -2728,61 +3324,102 @@ c_file_open_helper(const char *name)
  *-------------------------------------------------------------------------
  */
 static void *
-H5VL_bypass_file_create(const char *name, unsigned flags, hid_t fcpl_id,
-    hid_t fapl_id, hid_t dxpl_id, void **req)
+H5VL_bypass_file_create(const char *name, unsigned flags, hid_t fcpl_id, hid_t fapl_id, hid_t dxpl_id,
+                        void **req)
 {
-    H5VL_bypass_info_t *info;
-    H5VL_bypass_t *file;
-    hid_t under_fapl_id;
-    void *under;
+    H5VL_bypass_info_t *info = NULL;
+    H5VL_bypass_t      *file = NULL;
+    hid_t               under_fapl_id = H5I_INVALID_HID;
+    void               *under = NULL;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL FILE Create\n");
 #endif
 
     /* Get copy of our VOL info from FAPL */
-    H5Pget_vol_info(fapl_id, (void **)&info);
+    if (H5Pget_vol_info(fapl_id, (void **)&info) < 0) {
+        fprintf(stderr, "error while getting VOL info from FAPL\n");
+        goto error;
+    }
 
     /* Make sure we have info about the underlying VOL to be used */
     if (!info)
         return NULL;
 
     /* Copy the FAPL */
-    under_fapl_id = H5Pcopy(fapl_id);
+    if ((under_fapl_id = H5Pcopy(fapl_id)) < 0) {
+        fprintf(stderr, "error while copying FAPL\n");
+        goto error;
+    }
 
     /* Set the VOL ID and info for the underlying FAPL */
-    H5Pset_vol(under_fapl_id, info->under_vol_id, info->under_vol_info);
+    if (H5Pset_vol(under_fapl_id, info->under_vol_id, info->under_vol_info) < 0) {
+        fprintf(stderr, "error while setting VOL info in FAPL\n");
+        goto error;
+    }
 
     /* Open the file with the underlying VOL connector */
-    under = H5VLfile_create(name, flags, fcpl_id, under_fapl_id, dxpl_id, req);
-    if(under) {
-        file = H5VL_bypass_new_obj(under, info->under_vol_id);
+    if ((under = H5VLfile_create(name, flags, fcpl_id, under_fapl_id, dxpl_id, req)) == NULL) {
+        fprintf(stderr, "error while opening file with underlying VOL\n");
+        goto error;
+    }
 
-        /* Check for async request */
-        if(req && *req)
-            *req = H5VL_bypass_new_obj(*req, info->under_vol_id);
-    } /* end if */
-    else
-        file = NULL;
+    if ((file = H5VL_bypass_new_obj(under, info->under_vol_id)) < 0) {
+        fprintf(stderr, "error while creating bypass file object\n");
+        goto error;
+    }
+
+    /* Check for async request */
+    if (req && *req)
+        if ((*req = H5VL_bypass_new_obj(*req, info->under_vol_id)) < 0) {
+            fprintf(stderr, "error while creating bypass async request\n");
+            goto error;
+        }
 
     /* Close underlying FAPL */
-    H5Pclose(under_fapl_id);
+    if (H5Pclose(under_fapl_id) < 0) {
+        fprintf(stderr, "error while closing underlying FAPL\n");
+        goto error;
+    }
+
+    under_fapl_id = H5I_INVALID_HID;
 
     /* Release copy of our VOL info */
-    H5VL_bypass_info_free(info);
-
+    if (H5VL_bypass_info_free(info) < 0) {
+        fprintf(stderr, "error while releasing VOL info\n");
+        goto error;
+    }
+    
+    info = NULL;
+    
     /* Open the C file and set the fields for the file_t structure */
-    c_file_open_helper(name);
+    if (c_file_open_helper(name) < 0) {
+        fprintf(stderr, "error while opening c file\n");
+        goto error;
+    }
 
     return (void *)file;
+
+error:
+    H5E_BEGIN_TRY {
+        if (under)
+            H5VLfile_close(under, under_fapl_id, dxpl_id, req);
+        if (file)
+            H5VL_bypass_free_obj(file);
+        if (under_fapl_id > 0)
+            H5Pclose(under_fapl_id);
+    } H5E_END_TRY;
+
+    return NULL;
+
 } /* end H5VL_bypass_file_create() */
 
 #ifdef TMP
 static void
 get_vfd_handle_helper(H5VL_bypass_t *obj, void **file_handle, void **req)
 {
-    H5VL_optional_args_t             vol_cb_args;         /* Arguments to VOL callback */
-    H5VL_native_file_optional_args_t file_opt_args;       /* Arguments for optional operation */
+    H5VL_optional_args_t             vol_cb_args;   /* Arguments to VOL callback */
+    H5VL_native_file_optional_args_t file_opt_args; /* Arguments for optional operation */
 
     /* Set up VOL callback arguments */
     file_opt_args.get_vfd_handle.fapl_id     = H5P_DEFAULT;
@@ -2795,7 +3432,6 @@ get_vfd_handle_helper(H5VL_bypass_t *obj, void **file_handle, void **req)
 }
 #endif
 
-
 /*-------------------------------------------------------------------------
  * Function:    H5VL_bypass_file_open
  *
@@ -2807,14 +3443,13 @@ get_vfd_handle_helper(H5VL_bypass_t *obj, void **file_handle, void **req)
  *-------------------------------------------------------------------------
  */
 static void *
-H5VL_bypass_file_open(const char *name, unsigned flags, hid_t fapl_id,
-    hid_t dxpl_id, void **req)
+H5VL_bypass_file_open(const char *name, unsigned flags, hid_t fapl_id, hid_t dxpl_id, void **req)
 {
     H5VL_bypass_info_t *info;
-    H5VL_bypass_t *file;
-    hid_t under_fapl_id;
-    void *under;
-    unsigned i;
+    H5VL_bypass_t      *file;
+    hid_t               under_fapl_id;
+    void               *under;
+    unsigned            i;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL FILE Open\n");
@@ -2835,11 +3470,11 @@ H5VL_bypass_file_open(const char *name, unsigned flags, hid_t fapl_id,
 
     /* Open the file with the underlying VOL connector */
     under = H5VLfile_open(name, flags, under_fapl_id, dxpl_id, req);
-    if(under) {
+    if (under) {
         file = H5VL_bypass_new_obj(under, info->under_vol_id);
 
         /* Check for async request */
-        if(req && *req)
+        if (req && *req)
             *req = H5VL_bypass_new_obj(*req, info->under_vol_id);
     } /* end if */
     else
@@ -2851,11 +3486,12 @@ H5VL_bypass_file_open(const char *name, unsigned flags, hid_t fapl_id,
     /* Release copy of our VOL info */
     H5VL_bypass_info_free(info);
 
-    /* If the file has already been opened, only increment the reference count of this file and finish */
+    /* If the file has already been opened, only increment the reference count of
+     * this file and finish */
     for (i = 0; i < file_stuff_count; i++) {
         if (!strcmp(file_stuff[i].name, name) && file_stuff[i].fd) {
             file_stuff[i].ref_count++;
-            
+
             goto done;
         }
     }
@@ -2867,7 +3503,6 @@ done:
     return (void *)file;
 } /* end H5VL_bypass_file_open() */
 
-
 /*-------------------------------------------------------------------------
  * Function:    H5VL_bypass_file_get
  *
@@ -2879,11 +3514,10 @@ done:
  *-------------------------------------------------------------------------
  */
 static herr_t
-H5VL_bypass_file_get(void *file, H5VL_file_get_args_t *args, hid_t dxpl_id,
-    void **req)
+H5VL_bypass_file_get(void *file, H5VL_file_get_args_t *args, hid_t dxpl_id, void **req)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)file;
-    herr_t ret_value;
+    herr_t         ret_value;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL FILE Get\n");
@@ -2892,13 +3526,12 @@ H5VL_bypass_file_get(void *file, H5VL_file_get_args_t *args, hid_t dxpl_id,
     ret_value = H5VLfile_get(o->under_object, o->under_vol_id, args, dxpl_id, req);
 
     /* Check for async request */
-    if(req && *req)
+    if (req && *req)
         *req = H5VL_bypass_new_obj(*req, o->under_vol_id);
 
     return ret_value;
 } /* end H5VL_bypass_file_get() */
 
-
 /*-------------------------------------------------------------------------
  * Function:    H5VL_bypass_file_specific
  *
@@ -2910,23 +3543,22 @@ H5VL_bypass_file_get(void *file, H5VL_file_get_args_t *args, hid_t dxpl_id,
  *-------------------------------------------------------------------------
  */
 static herr_t
-H5VL_bypass_file_specific(void *file, H5VL_file_specific_args_t *args,
-    hid_t dxpl_id, void **req)
+H5VL_bypass_file_specific(void *file, H5VL_file_specific_args_t *args, hid_t dxpl_id, void **req)
 {
-    H5VL_bypass_t *o = (H5VL_bypass_t *)file;
-    H5VL_bypass_t *new_o;
-    H5VL_file_specific_args_t my_args;
+    H5VL_bypass_t             *o = (H5VL_bypass_t *)file;
+    H5VL_bypass_t             *new_o;
+    H5VL_file_specific_args_t  my_args;
     H5VL_file_specific_args_t *new_args;
-    H5VL_bypass_info_t *info;
-    hid_t under_vol_id = -1;
-    herr_t ret_value;
+    H5VL_bypass_info_t        *info;
+    hid_t                      under_vol_id = -1;
+    herr_t                     ret_value;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL FILE Specific\n");
 #endif
 
     /* Check for 'is accessible' operation */
-    if(args->op_type == H5VL_FILE_IS_ACCESSIBLE) {
+    if (args->op_type == H5VL_FILE_IS_ACCESSIBLE) {
         /* Make a (shallow) copy of the arguments */
         memcpy(&my_args, args, sizeof(my_args));
 
@@ -2955,7 +3587,7 @@ H5VL_bypass_file_specific(void *file, H5VL_file_specific_args_t *args,
         new_o = NULL;
     } /* end else-if */
     /* Check for 'delete' operation */
-    else if(args->op_type == H5VL_FILE_DELETE) {
+    else if (args->op_type == H5VL_FILE_DELETE) {
         /* Make a (shallow) copy of the arguments */
         memcpy(&my_args, args, sizeof(my_args));
 
@@ -2997,11 +3629,11 @@ H5VL_bypass_file_specific(void *file, H5VL_file_specific_args_t *args,
     ret_value = H5VLfile_specific(new_o, under_vol_id, new_args, dxpl_id, req);
 
     /* Check for async request */
-    if(req && *req)
+    if (req && *req)
         *req = H5VL_bypass_new_obj(*req, under_vol_id);
 
     /* Check for 'is accessible' operation */
-    if(args->op_type == H5VL_FILE_IS_ACCESSIBLE) {
+    if (args->op_type == H5VL_FILE_IS_ACCESSIBLE) {
         /* Close underlying FAPL */
         H5Pclose(my_args.args.is_accessible.fapl_id);
 
@@ -3009,23 +3641,22 @@ H5VL_bypass_file_specific(void *file, H5VL_file_specific_args_t *args,
         H5VL_bypass_info_free(info);
     } /* end else-if */
     /* Check for 'delete' operation */
-    else if(args->op_type == H5VL_FILE_DELETE) {
+    else if (args->op_type == H5VL_FILE_DELETE) {
         /* Close underlying FAPL */
         H5Pclose(my_args.args.del.fapl_id);
 
         /* Release copy of our VOL info */
         H5VL_bypass_info_free(info);
     } /* end else-if */
-    else if(args->op_type == H5VL_FILE_REOPEN) {
+    else if (args->op_type == H5VL_FILE_REOPEN) {
         /* Wrap reopened file struct pointer, if we reopened one */
-        if(ret_value >= 0 && args->args.reopen.file)
+        if (ret_value >= 0 && args->args.reopen.file)
             *args->args.reopen.file = H5VL_bypass_new_obj(*args->args.reopen.file, o->under_vol_id);
     } /* end else */
 
     return ret_value;
 } /* end H5VL_bypass_file_specific() */
 
-
 /*-------------------------------------------------------------------------
  * Function:    H5VL_bypass_file_optional
  *
@@ -3037,11 +3668,10 @@ H5VL_bypass_file_specific(void *file, H5VL_file_specific_args_t *args,
  *-------------------------------------------------------------------------
  */
 static herr_t
-H5VL_bypass_file_optional(void *file, H5VL_optional_args_t *args,
-    hid_t dxpl_id, void **req)
+H5VL_bypass_file_optional(void *file, H5VL_optional_args_t *args, hid_t dxpl_id, void **req)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)file;
-    herr_t ret_value;
+    herr_t         ret_value;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL File Optional\n");
@@ -3050,7 +3680,7 @@ H5VL_bypass_file_optional(void *file, H5VL_optional_args_t *args,
     ret_value = H5VLfile_optional(o->under_object, o->under_vol_id, args, dxpl_id, req);
 
     /* Check for async request */
-    if(req && *req)
+    if (req && *req)
         *req = H5VL_bypass_new_obj(*req, o->under_vol_id);
 
     return ret_value;
@@ -3062,25 +3692,24 @@ remove_file_info_helper(unsigned index)
     unsigned i;
 
     /* Remove the entry by shifting leftward all elements after this entry.
-     * But don't do anything if this entry is the only one or is the last one in the array
-     * except decrement the number of entries.
+     * But don't do anything if this entry is the only one or is the last one in
+     * the array except decrement the number of entries.
      */
-    if (file_stuff_count > 1 && index != file_stuff_count -1 ) {
+    if (file_stuff_count > 1 && index != file_stuff_count - 1) {
         for (i = index; i < file_stuff_count - 1; i++) {
             strcpy(file_stuff[i].name, file_stuff[i + 1].name);
-            file_stuff[i].fd =              file_stuff[i + 1].fd;
+            file_stuff[i].fd = file_stuff[i + 1].fd;
             /* file_stuff[i].vfd_file_handle = file_stuff[i + 1].vfd_file_handle; */
-            file_stuff[i].ref_count =       file_stuff[i + 1].ref_count;
-            file_stuff[i].num_reads =       file_stuff[i + 1].num_reads;
-            file_stuff[i].read_started =    file_stuff[i + 1].read_started;
-            file_stuff[i].close_ready =     file_stuff[i + 1].close_ready;
+            file_stuff[i].ref_count    = file_stuff[i + 1].ref_count;
+            file_stuff[i].num_reads    = file_stuff[i + 1].num_reads;
+            file_stuff[i].read_started = file_stuff[i + 1].read_started;
+            file_stuff[i].close_ready  = file_stuff[i + 1].close_ready;
         }
     }
 
     file_stuff_count--;
 }
 
-
 /*-------------------------------------------------------------------------
  * Function:    H5VL_bypass_file_close
  *
@@ -3095,9 +3724,9 @@ static herr_t
 H5VL_bypass_file_close(void *file, hid_t dxpl_id, void **req)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)file;
-    char file_name[1024];
-    herr_t ret_value;
-    int i;
+    char           file_name[1024];
+    herr_t         ret_value;
+    int            i;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL FILE Close\n");
@@ -3105,52 +3734,66 @@ H5VL_bypass_file_close(void *file, hid_t dxpl_id, void **req)
 
     /* Find the name of this file */
     get_filename_helper((H5VL_bypass_t *)file, file_name, H5I_FILE, req);
-//fprintf(stderr, "%s at %d: file_name = %s\n", __func__, __LINE__, file_name);
+    // fprintf(stderr, "%s at %d: file_name = %s\n", __func__, __LINE__,
+    // file_name);
 
-    /* Close the file opened with C.  Remove the file structure from the list when the reference count drops to zero */
+    /* Close the file opened with C.  Remove the file structure from the list when
+     * the reference count drops to zero */
     for (i = 0; i < file_stuff_count; i++) {
         if (!strcmp(file_stuff[i].name, file_name) && file_stuff[i].fd) {
-//fprintf(stderr, "%s at %d: file_name = %s, i = %d, file_stuff_count = %d, file_stuff[i].ref_count = %d, file_stuff[i].read_started = %d, num_reads = %d\n", __func__, __LINE__, file_name, i, file_stuff_count, file_stuff[i].ref_count, file_stuff[i].read_started, file_stuff[i].num_reads);
-            /* Wait until all thread in the thread pool finish reading the data before closing the C file */
+            // fprintf(stderr, "%s at %d: file_name = %s, i = %d, file_stuff_count =
+            // %d, file_stuff[i].ref_count = %d, file_stuff[i].read_started = %d,
+            // num_reads = %d\n", __func__,
+            // __LINE__, file_name, i, file_stuff_count, file_stuff[i].ref_count,
+            // file_stuff[i].read_started, file_stuff[i].num_reads);
+            /* Wait until all thread in the thread pool finish reading the data before
+             * closing the C file */
             if (file_stuff[i].read_started) {
-		pthread_mutex_lock(&mutex_local);
-		//while (!file_stuff[i].read_started || file_stuff[i].num_reads)
-		while (file_stuff[i].num_reads)
-		    pthread_cond_wait(&(file_stuff[i].close_ready), &mutex_local);
-		pthread_mutex_unlock(&mutex_local);
+                pthread_mutex_lock(&mutex_local);
+                // while (!file_stuff[i].read_started || file_stuff[i].num_reads)
+                while (file_stuff[i].num_reads)
+                    pthread_cond_wait(&(file_stuff[i].close_ready), &mutex_local);
+                pthread_mutex_unlock(&mutex_local);
             }
 
-//fprintf(stderr, "%s at %d: file_name = %s, i = %d, file_stuff_count = %d, file_stuff[i].ref_count = %d, file_stuff[i].read_started = %d, num_reads = %d\n", __func__, __LINE__, file_name, i, file_stuff_count, file_stuff[i].ref_count, file_stuff[i].read_started, file_stuff[i].num_reads);
+            // fprintf(stderr, "%s at %d: file_name = %s, i = %d, file_stuff_count =
+            // %d, file_stuff[i].ref_count = %d, file_stuff[i].read_started = %d,
+            // num_reads = %d\n", __func__,
+            // __LINE__, file_name, i, file_stuff_count, file_stuff[i].ref_count,
+            // file_stuff[i].read_started, file_stuff[i].num_reads);
 
             file_stuff[i].ref_count--;
 
             /* When the reference count drops to zero, close the file */
             if (!file_stuff[i].ref_count) {
-		close(file_stuff[i].fd);
-		file_stuff[i].fd = -1;
-		//H5FDclose(file_stuff[i].vfd_file_handle);
-		pthread_cond_destroy(&(file_stuff[i].close_ready));
+                close(file_stuff[i].fd);
+                file_stuff[i].fd = -1;
+                // H5FDclose(file_stuff[i].vfd_file_handle);
+                pthread_cond_destroy(&(file_stuff[i].close_ready));
 
-		/* Remove this file info structure from the list */
+                /* Remove this file info structure from the list */
                 remove_file_info_helper(i);
             }
         }
     }
 
-    ret_value = H5VLfile_close(o->under_object, o->under_vol_id, dxpl_id, req);
+    if ((ret_value = H5VLfile_close(o->under_object, o->under_vol_id, dxpl_id, req)) < 0) {
+        fprintf(stderr, "Failed to close file in underlying VOL connectors\n");
+        goto done;
+    }
 
     /* Check for async request */
-    if(req && *req)
+    if (req && *req)
         *req = H5VL_bypass_new_obj(*req, o->under_vol_id);
 
     /* Release our wrapper, if underlying file was closed */
-    if(ret_value >= 0)
+    if (ret_value >= 0)
         H5VL_bypass_free_obj(o);
 
+done:
     return ret_value;
 } /* end H5VL_bypass_file_close() */
 
-
 /*-------------------------------------------------------------------------
  * Function:    H5VL_bypass_group_create
  *
@@ -3162,24 +3805,24 @@ H5VL_bypass_file_close(void *file, hid_t dxpl_id, void **req)
  *-------------------------------------------------------------------------
  */
 static void *
-H5VL_bypass_group_create(void *obj, const H5VL_loc_params_t *loc_params,
-    const char *name, hid_t lcpl_id, hid_t gcpl_id, hid_t gapl_id,
-    hid_t dxpl_id, void **req)
+H5VL_bypass_group_create(void *obj, const H5VL_loc_params_t *loc_params, const char *name, hid_t lcpl_id,
+                         hid_t gcpl_id, hid_t gapl_id, hid_t dxpl_id, void **req)
 {
     H5VL_bypass_t *group;
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
-    void *under;
+    void          *under;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL GROUP Create\n");
 #endif
 
-    under = H5VLgroup_create(o->under_object, loc_params, o->under_vol_id, name, lcpl_id, gcpl_id,  gapl_id, dxpl_id, req);
-    if(under) {
+    under = H5VLgroup_create(o->under_object, loc_params, o->under_vol_id, name, lcpl_id, gcpl_id, gapl_id,
+                             dxpl_id, req);
+    if (under) {
         group = H5VL_bypass_new_obj(under, o->under_vol_id);
 
         /* Check for async request */
-        if(req && *req)
+        if (req && *req)
             *req = H5VL_bypass_new_obj(*req, o->under_vol_id);
     } /* end if */
     else
@@ -3188,7 +3831,6 @@ H5VL_bypass_group_create(void *obj, const H5VL_loc_params_t *loc_params,
     return (void *)group;
 } /* end H5VL_bypass_group_create() */
 
-
 /*-------------------------------------------------------------------------
  * Function:    H5VL_bypass_group_open
  *
@@ -3200,23 +3842,23 @@ H5VL_bypass_group_create(void *obj, const H5VL_loc_params_t *loc_params,
  *-------------------------------------------------------------------------
  */
 static void *
-H5VL_bypass_group_open(void *obj, const H5VL_loc_params_t *loc_params,
-    const char *name, hid_t gapl_id, hid_t dxpl_id, void **req)
+H5VL_bypass_group_open(void *obj, const H5VL_loc_params_t *loc_params, const char *name, hid_t gapl_id,
+                       hid_t dxpl_id, void **req)
 {
     H5VL_bypass_t *group;
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
-    void *under;
+    void          *under;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL GROUP Open\n");
 #endif
 
     under = H5VLgroup_open(o->under_object, loc_params, o->under_vol_id, name, gapl_id, dxpl_id, req);
-    if(under) {
+    if (under) {
         group = H5VL_bypass_new_obj(under, o->under_vol_id);
 
         /* Check for async request */
-        if(req && *req)
+        if (req && *req)
             *req = H5VL_bypass_new_obj(*req, o->under_vol_id);
     } /* end if */
     else
@@ -3225,7 +3867,6 @@ H5VL_bypass_group_open(void *obj, const H5VL_loc_params_t *loc_params,
     return (void *)group;
 } /* end H5VL_bypass_group_open() */
 
-
 /*-------------------------------------------------------------------------
  * Function:    H5VL_bypass_group_get
  *
@@ -3237,11 +3878,10 @@ H5VL_bypass_group_open(void *obj, const H5VL_loc_params_t *loc_params,
  *-------------------------------------------------------------------------
  */
 static herr_t
-H5VL_bypass_group_get(void *obj, H5VL_group_get_args_t *args, hid_t dxpl_id,
-    void **req)
+H5VL_bypass_group_get(void *obj, H5VL_group_get_args_t *args, hid_t dxpl_id, void **req)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
-    herr_t ret_value;
+    herr_t         ret_value;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL GROUP Get\n");
@@ -3250,13 +3890,12 @@ H5VL_bypass_group_get(void *obj, H5VL_group_get_args_t *args, hid_t dxpl_id,
     ret_value = H5VLgroup_get(o->under_object, o->under_vol_id, args, dxpl_id, req);
 
     /* Check for async request */
-    if(req && *req)
+    if (req && *req)
         *req = H5VL_bypass_new_obj(*req, o->under_vol_id);
 
     return ret_value;
 } /* end H5VL_bypass_group_get() */
 
-
 /*-------------------------------------------------------------------------
  * Function:    H5VL_bypass_group_specific
  *
@@ -3268,14 +3907,13 @@ H5VL_bypass_group_get(void *obj, H5VL_group_get_args_t *args, hid_t dxpl_id,
  *-------------------------------------------------------------------------
  */
 static herr_t
-H5VL_bypass_group_specific(void *obj, H5VL_group_specific_args_t *args,
-    hid_t dxpl_id, void **req)
+H5VL_bypass_group_specific(void *obj, H5VL_group_specific_args_t *args, hid_t dxpl_id, void **req)
 {
-    H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
-    H5VL_group_specific_args_t my_args;
+    H5VL_bypass_t              *o = (H5VL_bypass_t *)obj;
+    H5VL_group_specific_args_t  my_args;
     H5VL_group_specific_args_t *new_args;
-    hid_t under_vol_id;
-    herr_t ret_value;
+    hid_t                       under_vol_id;
+    herr_t                      ret_value;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL GROUP Specific\n");
@@ -3286,7 +3924,7 @@ H5VL_bypass_group_specific(void *obj, H5VL_group_specific_args_t *args,
     under_vol_id = o->under_vol_id;
 
     /* Unpack arguments to get at the child file pointer when mounting a file */
-    if(args->op_type == H5VL_GROUP_MOUNT) {
+    if (args->op_type == H5VL_GROUP_MOUNT) {
 
         /* Make a (shallow) copy of the arguments */
         memcpy(&my_args, args, sizeof(my_args));
@@ -3303,13 +3941,12 @@ H5VL_bypass_group_specific(void *obj, H5VL_group_specific_args_t *args,
     ret_value = H5VLgroup_specific(o->under_object, under_vol_id, new_args, dxpl_id, req);
 
     /* Check for async request */
-    if(req && *req)
+    if (req && *req)
         *req = H5VL_bypass_new_obj(*req, under_vol_id);
 
     return ret_value;
 } /* end H5VL_bypass_group_specific() */
 
-
 /*-------------------------------------------------------------------------
  * Function:    H5VL_bypass_group_optional
  *
@@ -3321,11 +3958,10 @@ H5VL_bypass_group_specific(void *obj, H5VL_group_specific_args_t *args,
  *-------------------------------------------------------------------------
  */
 static herr_t
-H5VL_bypass_group_optional(void *obj, H5VL_optional_args_t *args,
-    hid_t dxpl_id, void **req)
+H5VL_bypass_group_optional(void *obj, H5VL_optional_args_t *args, hid_t dxpl_id, void **req)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
-    herr_t ret_value;
+    herr_t         ret_value;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL GROUP Optional\n");
@@ -3334,13 +3970,12 @@ H5VL_bypass_group_optional(void *obj, H5VL_optional_args_t *args,
     ret_value = H5VLgroup_optional(o->under_object, o->under_vol_id, args, dxpl_id, req);
 
     /* Check for async request */
-    if(req && *req)
+    if (req && *req)
         *req = H5VL_bypass_new_obj(*req, o->under_vol_id);
 
     return ret_value;
 } /* end H5VL_bypass_group_optional() */
 
-
 /*-------------------------------------------------------------------------
  * Function:    H5VL_bypass_group_close
  *
@@ -3355,7 +3990,7 @@ static herr_t
 H5VL_bypass_group_close(void *grp, hid_t dxpl_id, void **req)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)grp;
-    herr_t ret_value;
+    herr_t         ret_value;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL GROUP Close\n");
@@ -3364,11 +3999,11 @@ H5VL_bypass_group_close(void *grp, hid_t dxpl_id, void **req)
     ret_value = H5VLgroup_close(o->under_object, o->under_vol_id, dxpl_id, req);
 
     /* Check for async request */
-    if(req && *req)
+    if (req && *req)
         *req = H5VL_bypass_new_obj(*req, o->under_vol_id);
 
     /* Release our wrapper, if underlying file was closed */
-    if(ret_value >= 0)
+    if (ret_value >= 0)
         H5VL_bypass_free_obj(o);
 
     return ret_value;
@@ -3385,33 +4020,33 @@ H5VL_bypass_group_close(void *grp, hid_t dxpl_id, void **req)
  *-------------------------------------------------------------------------
  */
 static herr_t
-H5VL_bypass_link_create(H5VL_link_create_args_t *args, void *obj,
-    const H5VL_loc_params_t *loc_params, hid_t lcpl_id, hid_t lapl_id,
-    hid_t dxpl_id, void **req)
+H5VL_bypass_link_create(H5VL_link_create_args_t *args, void *obj, const H5VL_loc_params_t *loc_params,
+                        hid_t lcpl_id, hid_t lapl_id, hid_t dxpl_id, void **req)
 {
-    H5VL_link_create_args_t my_args;
+    H5VL_link_create_args_t  my_args;
     H5VL_link_create_args_t *new_args;
-    H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
-    hid_t under_vol_id = -1;
-    herr_t ret_value;
+    H5VL_bypass_t           *o            = (H5VL_bypass_t *)obj;
+    hid_t                    under_vol_id = -1;
+    herr_t                   ret_value;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL LINK Create\n");
 #endif
 
     /* Try to retrieve the "under" VOL id */
-    if(o)
+    if (o)
         under_vol_id = o->under_vol_id;
 
     /* Fix up the link target object for hard link creation */
-    if(H5VL_LINK_CREATE_HARD == args->op_type) {
-        /* If it's a non-NULL pointer, find the 'under object' and re-set the args */
-        if(args->args.hard.curr_obj) {
+    if (H5VL_LINK_CREATE_HARD == args->op_type) {
+        /* If it's a non-NULL pointer, find the 'under object' and re-set the args
+         */
+        if (args->args.hard.curr_obj) {
             /* Make a (shallow) copy of the arguments */
             memcpy(&my_args, args, sizeof(my_args));
 
             /* Check if we still need the "under" VOL ID */
-            if(under_vol_id < 0)
+            if (under_vol_id < 0)
                 under_vol_id = ((H5VL_bypass_t *)args->args.hard.curr_obj)->under_vol_id;
 
             /* Set the object for the link target */
@@ -3427,24 +4062,23 @@ H5VL_bypass_link_create(H5VL_link_create_args_t *args, void *obj,
         new_args = args;
 
     /* Re-issue 'link create' call, possibly using the unwrapped pieces */
-    ret_value = H5VLlink_create(new_args, (o ? o->under_object : NULL), loc_params, under_vol_id, lcpl_id, lapl_id, dxpl_id, req);
+    ret_value = H5VLlink_create(new_args, (o ? o->under_object : NULL), loc_params, under_vol_id, lcpl_id,
+                                lapl_id, dxpl_id, req);
 
     /* Check for async request */
-    if(req && *req)
+    if (req && *req)
         *req = H5VL_bypass_new_obj(*req, under_vol_id);
 
     return ret_value;
 } /* end H5VL_bypass_link_create() */
 
-
 /*-------------------------------------------------------------------------
  * Function:    H5VL_bypass_link_copy
  *
- * Purpose:     Renames an object within an HDF5 container and copies it to a new
- *              group.  The original name SRC is unlinked from the group graph
- *              and then inserted with the new name DST (which can specify a
- *              new path for the object) as an atomic operation. The names
- *              are interpreted relative to SRC_LOC_ID and
+ * Purpose:     Renames an object within an HDF5 container and copies it to a
+ *new group.  The original name SRC is unlinked from the group graph and then
+ *inserted with the new name DST (which can specify a new path for the object)
+ *as an atomic operation. The names are interpreted relative to SRC_LOC_ID and
  *              DST_LOC_ID, which are either file IDs or group ID.
  *
  * Return:      Success:    0
@@ -3453,36 +4087,37 @@ H5VL_bypass_link_create(H5VL_link_create_args_t *args, void *obj,
  *-------------------------------------------------------------------------
  */
 static herr_t
-H5VL_bypass_link_copy(void *src_obj, const H5VL_loc_params_t *loc_params1,
-    void *dst_obj, const H5VL_loc_params_t *loc_params2, hid_t lcpl_id,
-    hid_t lapl_id, hid_t dxpl_id, void **req)
+H5VL_bypass_link_copy(void *src_obj, const H5VL_loc_params_t *loc_params1, void *dst_obj,
+                      const H5VL_loc_params_t *loc_params2, hid_t lcpl_id, hid_t lapl_id, hid_t dxpl_id,
+                      void **req)
 {
-    H5VL_bypass_t *o_src = (H5VL_bypass_t *)src_obj;
-    H5VL_bypass_t *o_dst = (H5VL_bypass_t *)dst_obj;
-    hid_t under_vol_id = -1;
-    herr_t ret_value;
+    H5VL_bypass_t *o_src        = (H5VL_bypass_t *)src_obj;
+    H5VL_bypass_t *o_dst        = (H5VL_bypass_t *)dst_obj;
+    hid_t          under_vol_id = -1;
+    herr_t         ret_value;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL LINK Copy\n");
 #endif
 
     /* Retrieve the "under" VOL id */
-    if(o_src)
+    if (o_src)
         under_vol_id = o_src->under_vol_id;
-    else if(o_dst)
+    else if (o_dst)
         under_vol_id = o_dst->under_vol_id;
     assert(under_vol_id > 0);
 
-    ret_value = H5VLlink_copy((o_src ? o_src->under_object : NULL), loc_params1, (o_dst ? o_dst->under_object : NULL), loc_params2, under_vol_id, lcpl_id, lapl_id, dxpl_id, req);
+    ret_value =
+        H5VLlink_copy((o_src ? o_src->under_object : NULL), loc_params1, (o_dst ? o_dst->under_object : NULL),
+                      loc_params2, under_vol_id, lcpl_id, lapl_id, dxpl_id, req);
 
     /* Check for async request */
-    if(req && *req)
+    if (req && *req)
         *req = H5VL_bypass_new_obj(*req, under_vol_id);
 
     return ret_value;
 } /* end H5VL_bypass_link_copy() */
 
-
 /*-------------------------------------------------------------------------
  * Function:    H5VL_bypass_link_move
  *
@@ -3499,36 +4134,37 @@ H5VL_bypass_link_copy(void *src_obj, const H5VL_loc_params_t *loc_params1,
  *-------------------------------------------------------------------------
  */
 static herr_t
-H5VL_bypass_link_move(void *src_obj, const H5VL_loc_params_t *loc_params1,
-    void *dst_obj, const H5VL_loc_params_t *loc_params2, hid_t lcpl_id,
-    hid_t lapl_id, hid_t dxpl_id, void **req)
+H5VL_bypass_link_move(void *src_obj, const H5VL_loc_params_t *loc_params1, void *dst_obj,
+                      const H5VL_loc_params_t *loc_params2, hid_t lcpl_id, hid_t lapl_id, hid_t dxpl_id,
+                      void **req)
 {
-    H5VL_bypass_t *o_src = (H5VL_bypass_t *)src_obj;
-    H5VL_bypass_t *o_dst = (H5VL_bypass_t *)dst_obj;
-    hid_t under_vol_id = -1;
-    herr_t ret_value;
+    H5VL_bypass_t *o_src        = (H5VL_bypass_t *)src_obj;
+    H5VL_bypass_t *o_dst        = (H5VL_bypass_t *)dst_obj;
+    hid_t          under_vol_id = -1;
+    herr_t         ret_value;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL LINK Move\n");
 #endif
 
     /* Retrieve the "under" VOL id */
-    if(o_src)
+    if (o_src)
         under_vol_id = o_src->under_vol_id;
-    else if(o_dst)
+    else if (o_dst)
         under_vol_id = o_dst->under_vol_id;
     assert(under_vol_id > 0);
 
-    ret_value = H5VLlink_move((o_src ? o_src->under_object : NULL), loc_params1, (o_dst ? o_dst->under_object : NULL), loc_params2, under_vol_id, lcpl_id, lapl_id, dxpl_id, req);
+    ret_value =
+        H5VLlink_move((o_src ? o_src->under_object : NULL), loc_params1, (o_dst ? o_dst->under_object : NULL),
+                      loc_params2, under_vol_id, lcpl_id, lapl_id, dxpl_id, req);
 
     /* Check for async request */
-    if(req && *req)
+    if (req && *req)
         *req = H5VL_bypass_new_obj(*req, under_vol_id);
 
     return ret_value;
 } /* end H5VL_bypass_link_move() */
 
-
 /*-------------------------------------------------------------------------
  * Function:    H5VL_bypass_link_get
  *
@@ -3540,11 +4176,11 @@ H5VL_bypass_link_move(void *src_obj, const H5VL_loc_params_t *loc_params1,
  *-------------------------------------------------------------------------
  */
 static herr_t
-H5VL_bypass_link_get(void *obj, const H5VL_loc_params_t *loc_params,
-    H5VL_link_get_args_t *args, hid_t dxpl_id, void **req)
+H5VL_bypass_link_get(void *obj, const H5VL_loc_params_t *loc_params, H5VL_link_get_args_t *args,
+                     hid_t dxpl_id, void **req)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
-    herr_t ret_value;
+    herr_t         ret_value;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL LINK Get\n");
@@ -3553,13 +4189,12 @@ H5VL_bypass_link_get(void *obj, const H5VL_loc_params_t *loc_params,
     ret_value = H5VLlink_get(o->under_object, loc_params, o->under_vol_id, args, dxpl_id, req);
 
     /* Check for async request */
-    if(req && *req)
+    if (req && *req)
         *req = H5VL_bypass_new_obj(*req, o->under_vol_id);
 
     return ret_value;
 } /* end H5VL_bypass_link_get() */
 
-
 /*-------------------------------------------------------------------------
  * Function:    H5VL_bypass_link_specific
  *
@@ -3571,11 +4206,11 @@ H5VL_bypass_link_get(void *obj, const H5VL_loc_params_t *loc_params,
  *-------------------------------------------------------------------------
  */
 static herr_t
-H5VL_bypass_link_specific(void *obj, const H5VL_loc_params_t *loc_params,
-    H5VL_link_specific_args_t *args, hid_t dxpl_id, void **req)
+H5VL_bypass_link_specific(void *obj, const H5VL_loc_params_t *loc_params, H5VL_link_specific_args_t *args,
+                          hid_t dxpl_id, void **req)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
-    herr_t ret_value;
+    herr_t         ret_value;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL LINK Specific\n");
@@ -3584,13 +4219,12 @@ H5VL_bypass_link_specific(void *obj, const H5VL_loc_params_t *loc_params,
     ret_value = H5VLlink_specific(o->under_object, loc_params, o->under_vol_id, args, dxpl_id, req);
 
     /* Check for async request */
-    if(req && *req)
+    if (req && *req)
         *req = H5VL_bypass_new_obj(*req, o->under_vol_id);
 
     return ret_value;
 } /* end H5VL_bypass_link_specific() */
 
-
 /*-------------------------------------------------------------------------
  * Function:    H5VL_bypass_link_optional
  *
@@ -3602,11 +4236,11 @@ H5VL_bypass_link_specific(void *obj, const H5VL_loc_params_t *loc_params,
  *-------------------------------------------------------------------------
  */
 static herr_t
-H5VL_bypass_link_optional(void *obj, const H5VL_loc_params_t *loc_params,
-    H5VL_optional_args_t *args, hid_t dxpl_id, void **req)
+H5VL_bypass_link_optional(void *obj, const H5VL_loc_params_t *loc_params, H5VL_optional_args_t *args,
+                          hid_t dxpl_id, void **req)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
-    herr_t ret_value;
+    herr_t         ret_value;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL LINK Optional\n");
@@ -3615,13 +4249,12 @@ H5VL_bypass_link_optional(void *obj, const H5VL_loc_params_t *loc_params,
     ret_value = H5VLlink_optional(o->under_object, loc_params, o->under_vol_id, args, dxpl_id, req);
 
     /* Check for async request */
-    if(req && *req)
+    if (req && *req)
         *req = H5VL_bypass_new_obj(*req, o->under_vol_id);
 
     return ret_value;
 } /* end H5VL_bypass_link_optional() */
 
-
 /*-------------------------------------------------------------------------
  * Function:    H5VL_bypass_object_open
  *
@@ -3633,32 +4266,61 @@ H5VL_bypass_link_optional(void *obj, const H5VL_loc_params_t *loc_params,
  *-------------------------------------------------------------------------
  */
 static void *
-H5VL_bypass_object_open(void *obj, const H5VL_loc_params_t *loc_params,
-    H5I_type_t *opened_type, hid_t dxpl_id, void **req)
+H5VL_bypass_object_open(void *obj, const H5VL_loc_params_t *loc_params, H5I_type_t *opened_type,
+                        hid_t dxpl_id, void **req)
 {
-    H5VL_bypass_t *new_obj;
+    H5VL_bypass_t *new_obj = false;
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
-    void *under;
-
+    void          *under = NULL;
+    bool           req_created = false;
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL OBJECT Open\n");
 #endif
 
-    under = H5VLobject_open(o->under_object, loc_params, o->under_vol_id, opened_type, dxpl_id, req);
-    if(under) {
-        new_obj = H5VL_bypass_new_obj(under, o->under_vol_id);
+    if ((under = H5VLobject_open(o->under_object, loc_params, o->under_vol_id, opened_type, dxpl_id, req)) == NULL) {
+        fprintf(stderr, "failed to open object in underlying connector\n");
+        goto error;
+    }
 
-        /* Check for async request */
-        if(req && *req)
-            *req = H5VL_bypass_new_obj(*req, o->under_vol_id);
-    } /* end if */
-    else
-        new_obj = NULL;
+    if ((new_obj = H5VL_bypass_new_obj(under, o->under_vol_id)) == NULL) {
+        fprintf(stderr, "failed to create bypass object\n");
+        goto error;
+    }
+
+    new_obj->type = *opened_type;
+
+    if (get_filename_helper(new_obj, new_obj->file_name, *opened_type, req) < 0) {
+        fprintf(stderr, "failed to get filename\n");
+        goto error;
+    }
+
+    /* If the object is a dataset, populate the underlying bypass object */
+    
+    if (new_obj->type == H5I_DATASET) {
+        if (dset_open_helper(new_obj, dxpl_id, req) < 0) {
+            fprintf(stderr, "failed to populate bypass object\n");
+            goto error;
+        }
+    }
+        
+    /* Check for async request */
+    if (req && *req) {
+        *req = H5VL_bypass_new_obj(*req, o->under_vol_id);
+        req_created = true;
+    }
 
     return (void *)new_obj;
+
+error:
+    if (new_obj)
+        H5VL_bypass_free_obj(new_obj);
+
+    if (req && *req && req_created)
+        H5VL_bypass_free_obj(*req);
+
+    return NULL;
 } /* end H5VL_bypass_object_open() */
 
-
 /*-------------------------------------------------------------------------
  * Function:    H5VL_bypass_object_copy
  *
@@ -3670,29 +4332,29 @@ H5VL_bypass_object_open(void *obj, const H5VL_loc_params_t *loc_params,
  *-------------------------------------------------------------------------
  */
 static herr_t
-H5VL_bypass_object_copy(void *src_obj, const H5VL_loc_params_t *src_loc_params,
-    const char *src_name, void *dst_obj, const H5VL_loc_params_t *dst_loc_params,
-    const char *dst_name, hid_t ocpypl_id, hid_t lcpl_id, hid_t dxpl_id,
-    void **req)
+H5VL_bypass_object_copy(void *src_obj, const H5VL_loc_params_t *src_loc_params, const char *src_name,
+                        void *dst_obj, const H5VL_loc_params_t *dst_loc_params, const char *dst_name,
+                        hid_t ocpypl_id, hid_t lcpl_id, hid_t dxpl_id, void **req)
 {
     H5VL_bypass_t *o_src = (H5VL_bypass_t *)src_obj;
     H5VL_bypass_t *o_dst = (H5VL_bypass_t *)dst_obj;
-    herr_t ret_value;
+    herr_t         ret_value;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL OBJECT Copy\n");
 #endif
 
-    ret_value = H5VLobject_copy(o_src->under_object, src_loc_params, src_name, o_dst->under_object, dst_loc_params, dst_name, o_src->under_vol_id, ocpypl_id, lcpl_id, dxpl_id, req);
+    ret_value =
+        H5VLobject_copy(o_src->under_object, src_loc_params, src_name, o_dst->under_object, dst_loc_params,
+                        dst_name, o_src->under_vol_id, ocpypl_id, lcpl_id, dxpl_id, req);
 
     /* Check for async request */
-    if(req && *req)
+    if (req && *req)
         *req = H5VL_bypass_new_obj(*req, o_src->under_vol_id);
 
     return ret_value;
 } /* end H5VL_bypass_object_copy() */
 
-
 /*-------------------------------------------------------------------------
  * Function:    H5VL_bypass_object_get
  *
@@ -3704,10 +4366,11 @@ H5VL_bypass_object_copy(void *src_obj, const H5VL_loc_params_t *src_loc_params,
  *-------------------------------------------------------------------------
  */
 static herr_t
-H5VL_bypass_object_get(void *obj, const H5VL_loc_params_t *loc_params, H5VL_object_get_args_t *args, hid_t dxpl_id, void **req)
+H5VL_bypass_object_get(void *obj, const H5VL_loc_params_t *loc_params, H5VL_object_get_args_t *args,
+                       hid_t dxpl_id, void **req)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
-    herr_t ret_value;
+    herr_t         ret_value;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL OBJECT Get\n");
@@ -3716,13 +4379,12 @@ H5VL_bypass_object_get(void *obj, const H5VL_loc_params_t *loc_params, H5VL_obje
     ret_value = H5VLobject_get(o->under_object, loc_params, o->under_vol_id, args, dxpl_id, req);
 
     /* Check for async request */
-    if(req && *req)
+    if (req && *req)
         *req = H5VL_bypass_new_obj(*req, o->under_vol_id);
 
     return ret_value;
 } /* end H5VL_bypass_object_get() */
 
-
 /*-------------------------------------------------------------------------
  * Function:    H5VL_bypass_object_specific
  *
@@ -3734,12 +4396,12 @@ H5VL_bypass_object_get(void *obj, const H5VL_loc_params_t *loc_params, H5VL_obje
  *-------------------------------------------------------------------------
  */
 static herr_t
-H5VL_bypass_object_specific(void *obj, const H5VL_loc_params_t *loc_params,
-    H5VL_object_specific_args_t *args, hid_t dxpl_id, void **req)
+H5VL_bypass_object_specific(void *obj, const H5VL_loc_params_t *loc_params, H5VL_object_specific_args_t *args,
+                            hid_t dxpl_id, void **req)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
-    hid_t under_vol_id;
-    herr_t ret_value;
+    hid_t          under_vol_id;
+    herr_t         ret_value;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL OBJECT Specific\n");
@@ -3752,13 +4414,12 @@ H5VL_bypass_object_specific(void *obj, const H5VL_loc_params_t *loc_params,
     ret_value = H5VLobject_specific(o->under_object, loc_params, o->under_vol_id, args, dxpl_id, req);
 
     /* Check for async request */
-    if(req && *req)
+    if (req && *req)
         *req = H5VL_bypass_new_obj(*req, under_vol_id);
 
     return ret_value;
 } /* end H5VL_bypass_object_specific() */
 
-
 /*-------------------------------------------------------------------------
  * Function:    H5VL_bypass_object_optional
  *
@@ -3770,11 +4431,11 @@ H5VL_bypass_object_specific(void *obj, const H5VL_loc_params_t *loc_params,
  *-------------------------------------------------------------------------
  */
 static herr_t
-H5VL_bypass_object_optional(void *obj, const H5VL_loc_params_t *loc_params,
-    H5VL_optional_args_t *args, hid_t dxpl_id, void **req)
+H5VL_bypass_object_optional(void *obj, const H5VL_loc_params_t *loc_params, H5VL_optional_args_t *args,
+                            hid_t dxpl_id, void **req)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
-    herr_t ret_value;
+    herr_t         ret_value;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL OBJECT Optional\n");
@@ -3783,13 +4444,12 @@ H5VL_bypass_object_optional(void *obj, const H5VL_loc_params_t *loc_params,
     ret_value = H5VLobject_optional(o->under_object, loc_params, o->under_vol_id, args, dxpl_id, req);
 
     /* Check for async request */
-    if(req && *req)
+    if (req && *req)
         *req = H5VL_bypass_new_obj(*req, o->under_vol_id);
 
     return ret_value;
 } /* end H5VL_bypass_object_optional() */
 
-
 /*-------------------------------------------------------------------------
  * Function:    H5VL_bypass_introspect_get_conn_clss
  *
@@ -3800,29 +4460,26 @@ H5VL_bypass_object_optional(void *obj, const H5VL_loc_params_t *loc_params,
  *-------------------------------------------------------------------------
  */
 herr_t
-H5VL_bypass_introspect_get_conn_cls(void *obj, H5VL_get_conn_lvl_t lvl,
-    const H5VL_class_t **conn_cls)
+H5VL_bypass_introspect_get_conn_cls(void *obj, H5VL_get_conn_lvl_t lvl, const H5VL_class_t **conn_cls)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
-    herr_t ret_value;
+    herr_t         ret_value;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL INTROSPECT GetConnCls\n");
 #endif
 
     /* Check for querying this connector's class */
-    if(H5VL_GET_CONN_LVL_CURR == lvl) {
+    if (H5VL_GET_CONN_LVL_CURR == lvl) {
         *conn_cls = &H5VL_bypass_g;
         ret_value = 0;
     } /* end if */
     else
-        ret_value = H5VLintrospect_get_conn_cls(o->under_object, o->under_vol_id,
-            lvl, conn_cls);
+        ret_value = H5VLintrospect_get_conn_cls(o->under_object, o->under_vol_id, lvl, conn_cls);
 
     return ret_value;
 } /* end H5VL_bypass_introspect_get_conn_cls() */
 
-
 /*-------------------------------------------------------------------------
  * Function:    H5VL_bypass_introspect_get_cap_flags
  *
@@ -3837,7 +4494,7 @@ herr_t
 H5VL_bypass_introspect_get_cap_flags(const void *_info, uint64_t *cap_flags)
 {
     const H5VL_bypass_info_t *info = (const H5VL_bypass_info_t *)_info;
-    herr_t                          ret_value;
+    herr_t                    ret_value;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL INTROSPECT GetCapFlags\n");
@@ -3853,7 +4510,6 @@ H5VL_bypass_introspect_get_cap_flags(const void *_info, uint64_t *cap_flags)
     return ret_value;
 } /* end H5VL_bypass_introspect_ext_get_cap_flags() */
 
-
 /*-------------------------------------------------------------------------
  * Function:    H5VL_bypass_introspect_opt_query
  *
@@ -3864,23 +4520,20 @@ H5VL_bypass_introspect_get_cap_flags(const void *_info, uint64_t *cap_flags)
  *-------------------------------------------------------------------------
  */
 herr_t
-H5VL_bypass_introspect_opt_query(void *obj, H5VL_subclass_t cls,
-    int op_type, uint64_t *flags)
+H5VL_bypass_introspect_opt_query(void *obj, H5VL_subclass_t cls, int op_type, uint64_t *flags)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
-    herr_t ret_value;
+    herr_t         ret_value;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL INTROSPECT OptQuery\n");
 #endif
 
-    ret_value = H5VLintrospect_opt_query(o->under_object, o->under_vol_id, cls,
-        op_type, flags);
+    ret_value = H5VLintrospect_opt_query(o->under_object, o->under_vol_id, cls, op_type, flags);
 
     return ret_value;
 } /* end H5VL_bypass_introspect_opt_query() */
 
-
 /*-------------------------------------------------------------------------
  * Function:    H5VL_bypass_request_wait
  *
@@ -3895,11 +4548,10 @@ H5VL_bypass_introspect_opt_query(void *obj, H5VL_subclass_t cls,
  *-------------------------------------------------------------------------
  */
 static herr_t
-H5VL_bypass_request_wait(void *obj, uint64_t timeout,
-    H5VL_request_status_t *status)
+H5VL_bypass_request_wait(void *obj, uint64_t timeout, H5VL_request_status_t *status)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
-    herr_t ret_value;
+    herr_t         ret_value;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL REQUEST Wait\n");
@@ -3910,7 +4562,6 @@ H5VL_bypass_request_wait(void *obj, uint64_t timeout,
     return ret_value;
 } /* end H5VL_bypass_request_wait() */
 
-
 /*-------------------------------------------------------------------------
  * Function:    H5VL_bypass_request_notify
  *
@@ -3928,7 +4579,7 @@ static herr_t
 H5VL_bypass_request_notify(void *obj, H5VL_request_notify_t cb, void *ctx)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
-    herr_t ret_value;
+    herr_t         ret_value;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL REQUEST Notify\n");
@@ -3939,7 +4590,6 @@ H5VL_bypass_request_notify(void *obj, H5VL_request_notify_t cb, void *ctx)
     return ret_value;
 } /* end H5VL_bypass_request_notify() */
 
-
 /*-------------------------------------------------------------------------
  * Function:    H5VL_bypass_request_cancel
  *
@@ -3956,7 +4606,7 @@ static herr_t
 H5VL_bypass_request_cancel(void *obj, H5VL_request_status_t *status)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
-    herr_t ret_value;
+    herr_t         ret_value;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL REQUEST Cancel\n");
@@ -3967,7 +4617,6 @@ H5VL_bypass_request_cancel(void *obj, H5VL_request_status_t *status)
     return ret_value;
 } /* end H5VL_bypass_request_cancel() */
 
-
 /*-------------------------------------------------------------------------
  * Function:    H5VL_bypass_request_specific
  *
@@ -3981,8 +4630,8 @@ H5VL_bypass_request_cancel(void *obj, H5VL_request_status_t *status)
 static herr_t
 H5VL_bypass_request_specific(void *obj, H5VL_request_specific_args_t *args)
 {
-    H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
-    herr_t ret_value = -1;
+    H5VL_bypass_t *o         = (H5VL_bypass_t *)obj;
+    herr_t         ret_value = -1;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL REQUEST Specific\n");
@@ -3993,7 +4642,6 @@ H5VL_bypass_request_specific(void *obj, H5VL_request_specific_args_t *args)
     return ret_value;
 } /* end H5VL_bypass_request_specific() */
 
-
 /*-------------------------------------------------------------------------
  * Function:    H5VL_bypass_request_optional
  *
@@ -4008,7 +4656,7 @@ static herr_t
 H5VL_bypass_request_optional(void *obj, H5VL_optional_args_t *args)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
-    herr_t ret_value;
+    herr_t         ret_value;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL REQUEST Optional\n");
@@ -4019,7 +4667,6 @@ H5VL_bypass_request_optional(void *obj, H5VL_optional_args_t *args)
     return ret_value;
 } /* end H5VL_bypass_request_optional() */
 
-
 /*-------------------------------------------------------------------------
  * Function:    H5VL_bypass_request_free
  *
@@ -4035,7 +4682,7 @@ static herr_t
 H5VL_bypass_request_free(void *obj)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
-    herr_t ret_value;
+    herr_t         ret_value;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL REQUEST Free\n");
@@ -4043,13 +4690,12 @@ H5VL_bypass_request_free(void *obj)
 
     ret_value = H5VLrequest_free(o->under_object, o->under_vol_id);
 
-    if(ret_value >= 0)
+    if (ret_value >= 0)
         H5VL_bypass_free_obj(o);
 
     return ret_value;
 } /* end H5VL_bypass_request_free() */
 
-
 /*-------------------------------------------------------------------------
  * Function:    H5VL_bypass_blob_put
  *
@@ -4060,23 +4706,20 @@ H5VL_bypass_request_free(void *obj)
  *-------------------------------------------------------------------------
  */
 herr_t
-H5VL_bypass_blob_put(void *obj, const void *buf, size_t size,
-    void *blob_id, void *ctx)
+H5VL_bypass_blob_put(void *obj, const void *buf, size_t size, void *blob_id, void *ctx)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
-    herr_t ret_value;
+    herr_t         ret_value;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL BLOB Put\n");
 #endif
 
-    ret_value = H5VLblob_put(o->under_object, o->under_vol_id, buf, size,
-        blob_id, ctx);
+    ret_value = H5VLblob_put(o->under_object, o->under_vol_id, buf, size, blob_id, ctx);
 
     return ret_value;
 } /* end H5VL_bypass_blob_put() */
 
-
 /*-------------------------------------------------------------------------
  * Function:    H5VL_bypass_blob_get
  *
@@ -4087,23 +4730,20 @@ H5VL_bypass_blob_put(void *obj, const void *buf, size_t size,
  *-------------------------------------------------------------------------
  */
 herr_t
-H5VL_bypass_blob_get(void *obj, const void *blob_id, void *buf,
-    size_t size, void *ctx)
+H5VL_bypass_blob_get(void *obj, const void *blob_id, void *buf, size_t size, void *ctx)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
-    herr_t ret_value;
+    herr_t         ret_value;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL BLOB Get\n");
 #endif
 
-    ret_value = H5VLblob_get(o->under_object, o->under_vol_id, blob_id, buf,
-        size, ctx);
+    ret_value = H5VLblob_get(o->under_object, o->under_vol_id, blob_id, buf, size, ctx);
 
     return ret_value;
 } /* end H5VL_bypass_blob_get() */
 
-
 /*-------------------------------------------------------------------------
  * Function:    H5VL_bypass_blob_specific
  *
@@ -4114,11 +4754,10 @@ H5VL_bypass_blob_get(void *obj, const void *blob_id, void *buf,
  *-------------------------------------------------------------------------
  */
 herr_t
-H5VL_bypass_blob_specific(void *obj, void *blob_id,
-    H5VL_blob_specific_args_t *args)
+H5VL_bypass_blob_specific(void *obj, void *blob_id, H5VL_blob_specific_args_t *args)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
-    herr_t ret_value;
+    herr_t         ret_value;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL BLOB Specific\n");
@@ -4129,7 +4768,6 @@ H5VL_bypass_blob_specific(void *obj, void *blob_id,
     return ret_value;
 } /* end H5VL_bypass_blob_specific() */
 
-
 /*-------------------------------------------------------------------------
  * Function:    H5VL_bypass_blob_optional
  *
@@ -4143,7 +4781,7 @@ herr_t
 H5VL_bypass_blob_optional(void *obj, void *blob_id, H5VL_optional_args_t *args)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
-    herr_t ret_value;
+    herr_t         ret_value;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL BLOB Optional\n");
@@ -4154,7 +4792,6 @@ H5VL_bypass_blob_optional(void *obj, void *blob_id, H5VL_optional_args_t *args)
     return ret_value;
 } /* end H5VL_bypass_blob_optional() */
 
-
 /*---------------------------------------------------------------------------
  * Function:    H5VL_bypass_token_cmp
  *
@@ -4167,11 +4804,10 @@ H5VL_bypass_blob_optional(void *obj, void *blob_id, H5VL_optional_args_t *args)
  *---------------------------------------------------------------------------
  */
 static herr_t
-H5VL_bypass_token_cmp(void *obj, const H5O_token_t *token1,
-    const H5O_token_t *token2, int *cmp_value)
+H5VL_bypass_token_cmp(void *obj, const H5O_token_t *token1, const H5O_token_t *token2, int *cmp_value)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
-    herr_t ret_value;
+    herr_t         ret_value;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL TOKEN Compare\n");
@@ -4188,7 +4824,6 @@ H5VL_bypass_token_cmp(void *obj, const H5O_token_t *token1,
     return ret_value;
 } /* end H5VL_bypass_token_cmp() */
 
-
 /*---------------------------------------------------------------------------
  * Function:    H5VL_bypass_token_to_str
  *
@@ -4200,11 +4835,10 @@ H5VL_bypass_token_cmp(void *obj, const H5O_token_t *token1,
  *---------------------------------------------------------------------------
  */
 static herr_t
-H5VL_bypass_token_to_str(void *obj, H5I_type_t obj_type,
-    const H5O_token_t *token, char **token_str)
+H5VL_bypass_token_to_str(void *obj, H5I_type_t obj_type, const H5O_token_t *token, char **token_str)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
-    herr_t ret_value;
+    herr_t         ret_value;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL TOKEN To string\n");
@@ -4220,7 +4854,6 @@ H5VL_bypass_token_to_str(void *obj, H5I_type_t obj_type,
     return ret_value;
 } /* end H5VL_bypass_token_to_str() */
 
-
 /*---------------------------------------------------------------------------
  * Function:    H5VL_bypass_token_from_str
  *
@@ -4232,11 +4865,10 @@ H5VL_bypass_token_to_str(void *obj, H5I_type_t obj_type,
  *---------------------------------------------------------------------------
  */
 static herr_t
-H5VL_bypass_token_from_str(void *obj, H5I_type_t obj_type,
-    const char *token_str, H5O_token_t *token)
+H5VL_bypass_token_from_str(void *obj, H5I_type_t obj_type, const char *token_str, H5O_token_t *token)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
-    herr_t ret_value;
+    herr_t         ret_value;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL TOKEN From string\n");
@@ -4252,7 +4884,6 @@ H5VL_bypass_token_from_str(void *obj, H5I_type_t obj_type,
     return ret_value;
 } /* end H5VL_bypass_token_from_str() */
 
-
 /*-------------------------------------------------------------------------
  * Function:    H5VL_bypass_optional
  *
@@ -4266,7 +4897,7 @@ herr_t
 H5VL_bypass_optional(void *obj, H5VL_optional_args_t *args, hid_t dxpl_id, void **req)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
-    herr_t ret_value;
+    herr_t         ret_value;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS VOL generic Optional\n");
@@ -4276,3 +4907,241 @@ H5VL_bypass_optional(void *obj, H5VL_optional_args_t *args, hid_t dxpl_id, void 
 
     return ret_value;
 } /* end H5VL_bypass_optional() */
+
+/* This is a helper function to check if any thread is active. */
+herr_t
+is_any_thread_active(bool *out) {
+    herr_t ret_value = 0;
+
+    assert(out);
+
+    if (pthread_mutex_lock(&mutex_local) != 0) {
+        fprintf(stderr, "pthread_mutex_lock failed\n");
+        ret_value = -1;
+        goto done;
+    }
+
+    assert(md_for_thread.thread_is_active);
+
+    for (int i = 0; i < nthreads_tpool; i++)
+        *out = *out || md_for_thread.thread_is_active[i];
+
+done:
+    if (pthread_mutex_unlock(&mutex_local) != 0) {
+        fprintf(stderr, "pthread_mutex_unlock failed\n");
+        ret_value = -1;
+    }
+    return ret_value;
+}
+
+static herr_t
+should_dset_use_native(const Bypass_dataset_t* dset, bool *should_use_native) {
+    herr_t ret_value = 0;
+
+    assert(dset);
+    assert(should_use_native);
+
+    if (dset->num_filters > 0) {
+        *should_use_native = true;
+        goto done;
+    }
+        
+    if (H5D_VIRTUAL == dset->layout) {
+        *should_use_native = true;
+        goto done;
+    }
+
+    if (H5T_INTEGER != dset->dtype_info.class && H5T_FLOAT != dset->dtype_info.class) {
+        *should_use_native = true;
+        goto done;
+    }
+
+    if (dset->layout == H5D_COMPACT) {
+        *should_use_native = true;
+        goto done;
+    }
+
+    // TBD: Link type?
+    *should_use_native = false;
+
+done:
+    return ret_value;
+}
+
+static herr_t
+release_dset_info(Bypass_dataset_t *dset) {
+    herr_t ret_value = 0;
+
+    assert(dset);
+
+    if (dset->dcpl_id > 0 && H5Pclose(dset->dcpl_id) < 0) {
+        fprintf(stderr, "unable to decrement ref count of DCPL\n");
+        ret_value = -1;
+        goto done;
+    }
+
+    dset->dcpl_id = H5I_INVALID_HID;
+
+    if (dset->space_id > 0 && H5Sclose(dset->space_id) < 0) {
+        fprintf(stderr, "unable to decrement ref count of dataspace\n");
+        ret_value = -1;
+        goto done;
+    }
+
+    dset->space_id = H5I_INVALID_HID;
+
+    dset->num_filters = 0;
+    dset->layout = H5D_LAYOUT_ERROR;
+
+done:
+    if (ret_value < 0) {
+        H5E_BEGIN_TRY {
+            if (dset->dcpl_id > 0)
+                H5Pclose(dset->dcpl_id);
+            if (dset->space_id > 0)
+                H5Sclose(dset->space_id);
+        } H5E_END_TRY;
+    }
+
+    return ret_value;
+}
+
+static herr_t
+get_dset_location(H5VL_bypass_t *dset_obj, hid_t dxpl_id, void **req, haddr_t *location) {
+    herr_t ret_value = 0;
+    H5VL_optional_args_t                opt_args;
+    H5VL_native_dataset_optional_args_t dset_opt_args;
+
+    assert(dset_obj);
+    assert(location);
+
+    dset_opt_args.get_offset.offset = location;
+    opt_args.op_type                = H5VL_NATIVE_DATASET_GET_OFFSET;
+    opt_args.args                   = &dset_opt_args;
+
+    if (H5VL_bypass_dataset_optional(dset_obj, &opt_args, dxpl_id, req) < 0) {
+        fprintf(stderr, "unable to get opened dataset's location\n");
+        ret_value = -1;
+        goto done;
+    }
+done:
+    return ret_value;
+}
+
+static herr_t
+get_dtype_info(H5VL_bypass_t *dset_obj, hid_t dxpl_id, void **req) {
+    herr_t ret_value = 0;
+    dtype_info_t *type_info = NULL;
+    H5VL_dataset_get_args_t get_args;
+
+    assert(dset_obj);
+    assert(dset_obj->type == H5I_DATASET);
+
+    type_info = &dset_obj->u.dataset.dtype_info;
+
+    /* Retrieve the dataset's datatype */
+    get_args.op_type               = H5VL_DATASET_GET_TYPE;
+    get_args.args.get_type.type_id = H5I_INVALID_HID;
+
+    if (H5VL_bypass_dataset_get(dset_obj, &get_args, dxpl_id, req) < 0) {
+        fprintf(stderr, "unable to get dataset's datatype\n");
+        ret_value = -1;
+        goto done;
+    }
+
+    if (get_args.args.get_type.type_id < 0) {
+        fprintf(stderr, "retrieved datatype is invalid\n");
+        ret_value = -1;
+        goto done;
+    }
+
+    if (get_dtype_info_helper(get_args.args.get_type.type_id, type_info) < 0) {
+        fprintf(stderr, "unable to get dataset's datatype info\n");
+        ret_value = -1;
+        goto done;
+    }
+
+done:
+    if (get_args.args.get_type.type_id > 0)
+        if (H5Tclose(get_args.args.get_type.type_id) < 0) {
+            fprintf(stderr, "unable to close datatype\n");
+            ret_value = -1;
+            goto done;
+        }
+
+    return ret_value;
+}
+
+static herr_t
+get_dtype_info_helper(hid_t type_id, dtype_info_t *type_info_out) {
+    herr_t ret_value = 0;
+
+    if ((type_info_out->class = H5Tget_class(type_id)) < 0) {
+        fprintf(stderr, "unable to get dataset's datatype class\n");
+        ret_value = -1;
+        goto done;
+    }
+
+    if ((type_info_out->size = H5Tget_size(type_id)) < 0) {
+        fprintf(stderr, "unable to get dataset's datatype size\n");
+        ret_value = -1;
+        goto done;
+    }
+
+    if ((type_info_out->order = H5Tget_order(type_id)) < 0) {
+        fprintf(stderr, "unable to get dataset's datatype order\n");
+        ret_value = -1;
+        goto done;
+    }
+
+    if (type_info_out->class == H5T_INTEGER) {
+        if ((type_info_out->sign = H5Tget_sign(type_id)) < 0) {
+            fprintf(stderr, "unable to get dataset's datatype sign\n");
+            ret_value = -1;
+            goto done;
+        }
+    } else {
+        type_info_out->sign = H5T_SGN_ERROR;
+    }
+done:
+    return ret_value;
+}
+
+static bool bypass_types_equal(dtype_info_t *type_info1, dtype_info_t *type_info2) {
+    bool ret_value = true;
+
+    if (type_info1->class != type_info2->class)
+        ret_value = false;
+    
+    if (type_info1->size != type_info2->size)
+        ret_value = false;
+
+    if (type_info1->order != type_info2->order)
+        ret_value = false;
+
+    if (type_info1->sign != type_info2->sign)
+        ret_value = false;
+
+    return ret_value;
+}
+
+static H5D_space_status_t
+get_dset_space_status(H5VL_bypass_t *dset_obj, hid_t dxpl_id, void **req) {
+    H5D_space_status_t ret_value = H5D_SPACE_STATUS_ERROR;
+    H5VL_dataset_get_args_t get_args;
+
+    assert(dset_obj);
+    assert(dset_obj->type == H5I_DATASET);
+
+    get_args.op_type               = H5VL_DATASET_GET_SPACE_STATUS;
+    get_args.args.get_space_status.status = &ret_value;
+
+    if (H5VL_bypass_dataset_get(dset_obj, &get_args, dxpl_id, req) < 0) {
+        fprintf(stderr, "unable to get dataset's space status\n");
+        ret_value = H5D_SPACE_STATUS_ERROR;
+        goto done;
+    }
+
+done:
+    return ret_value;
+}
