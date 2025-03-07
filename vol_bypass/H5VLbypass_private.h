@@ -105,7 +105,6 @@ typedef struct H5VL_bypass_t {
     hid_t under_vol_id; /* ID for underlying VOL connector */
     void *under_object; /* Underlying VOL connector's object */
     H5I_type_t type; /* Type of this object. */
-    char file_name[1024]; // TODO: Move to file object. Any obj within a file will have a file ptr.
 
     union {
         /* Only dataset objects are needed for now */
@@ -136,7 +135,6 @@ typedef struct {
 typedef struct {
     size_t  counter;
 
-    char    file_name[64];
     char    dset_name[64];
 
     hid_t   file_space_id;

@@ -438,7 +438,6 @@ H5VL_bypass_new_obj(void *under_obj, hid_t under_vol_id)
     new_obj->under_object = under_obj;
     new_obj->under_vol_id = under_vol_id;
     new_obj->type = H5I_BADID;
-    new_obj->file_name[0] = '\0';
 
     if (H5Iinc_ref(new_obj->under_vol_id) < 0) {
         fprintf(stderr, "failed to increment ref count of underlying vol connector\n");
@@ -1551,9 +1550,6 @@ H5VL_bypass_dataset_create(void *obj, const H5VL_loc_params_t *loc_params, const
     }
 
     dset->type = H5I_DATASET;
-    
-    // TODO: Move name to file sub-object
-    strcpy(dset->file_name, o->file_name);
 
     assert(o->type == H5I_FILE);
     assert(o->u.file.ref_count > 0);
@@ -1619,14 +1615,6 @@ H5VL_bypass_dataset_open(void *obj, const H5VL_loc_params_t *loc_params, const c
     }
 
     dset->type = H5I_DATASET;
-
-    if (get_filename_helper(dset, dset->file_name, H5I_DATASET, req) < 0) {
-        fprintf(stderr, "failed to get filename\n");
-        goto error;
-    }
-
-    // TODO - Move name to file sub-object
-    strcpy(dset->file_name, o->file_name);
 
     assert(o->type == H5I_FILE);
     assert(o->u.file.ref_count > 0);
@@ -1968,7 +1956,7 @@ start_thread_for_pool(void *args)
             if (read_big_data(files_local[i]->u.file.fd, vec_bufs_local[i], sizes_local[i],
                           addrs_local[i]) < 0)
             {
-                fprintf(stderr, "read_big_data failed within file %s\n", files_local[i]->file_name);
+                fprintf(stderr, "read_big_data failed within file %s\n", files_local[i]->u.file.name);
                 /* Return a failure code, but try to complete the rest of the read request.
                  * This is important to properly decrement the reference count/num_reads on the local file object */
                 ret_value = (void *)-1;
@@ -2278,7 +2266,7 @@ process_vectors(void *rbuf, sel_info_t *selection_info)
             }
 
             /* Save the info in the structure */
-            strcpy(info_stuff[info_count].file_name, selection_info->file_name);
+            strcpy(info_stuff[info_count].file_name, selection_info->file->u.file.name);
             strcpy(info_stuff[info_count].dset_name, selection_info->dset_name);
             info_stuff[info_count].dset_loc         = selection_info->chunk_addr;
             info_stuff[info_count].data_offset_file = file_off[file_seq_i] / selection_info->dtype_size;
@@ -2700,7 +2688,6 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
             pthread_mutex_unlock(&mutex_local);
 
             /* Initialize data selection info */
-            strcpy(selection_info.file_name, bypass_obj->file_name);
             if (get_dset_name_helper((H5VL_bypass_t *)(dset[j]), selection_info.dset_name, req) < 0) {
                 fprintf(stderr, "failed to retrieve dataset name\n");
                 ret_value = -1;
@@ -3304,8 +3291,6 @@ H5VL_bypass_file_create(const char *name, unsigned flags, hid_t fcpl_id, hid_t f
         goto error;
     }
 
-    strcpy(file->file_name, name);
-
     /* Check for async request */
     if (req && *req)
         if ((*req = H5VL_bypass_new_obj(*req, info->under_vol_id)) < 0) {
@@ -3458,7 +3443,6 @@ H5VL_bypass_file_open(const char *name, unsigned flags, hid_t fapl_id, hid_t dxp
 
     info = NULL;
 
-    strcpy(file->file_name, name);
     file->type = H5I_FILE;
 
     if (c_file_open_helper(file, name) < 0) {
@@ -4216,6 +4200,7 @@ H5VL_bypass_object_open(void *obj, const H5VL_loc_params_t *loc_params, H5I_type
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL OBJECT Open\n");
 #endif
+    assert(o->type == H5I_FILE);
 
     if ((under = H5VLobject_open(o->under_object, loc_params, o->under_vol_id, opened_type, dxpl_id, req)) == NULL) {
         fprintf(stderr, "failed to open object in underlying connector\n");
@@ -4229,11 +4214,6 @@ H5VL_bypass_object_open(void *obj, const H5VL_loc_params_t *loc_params, H5I_type
 
     new_obj->type = *opened_type;
 
-    if (get_filename_helper(new_obj, new_obj->file_name, *opened_type, req) < 0) {
-        fprintf(stderr, "failed to get filename\n");
-        goto error;
-    }
-
     /* If the object is a dataset, populate the underlying bypass object */
     
     if (new_obj->type == H5I_DATASET) {
@@ -4241,6 +4221,8 @@ H5VL_bypass_object_open(void *obj, const H5VL_loc_params_t *loc_params, H5I_type
             fprintf(stderr, "failed to populate bypass object\n");
             goto error;
         }
+
+        new_obj->u.dataset.file = o;
     }
         
     /* Check for async request */
