@@ -496,7 +496,7 @@ H5VL_bypass_free_obj(H5VL_bypass_t *obj)
 done:
     free(obj);
 
-    return 0;
+    return ret_value;
 } /* end H5VL_bypass_free_obj() */
 
 /*-------------------------------------------------------------------------
@@ -1414,10 +1414,7 @@ static herr_t
 dset_open_helper(H5VL_bypass_t *obj, hid_t dxpl_id, void **req) {
     herr_t ret_value = 0;
     H5VL_dataset_get_args_t get_args;
-    H5VL_optional_args_t                opt_args;
-    H5VL_native_dataset_optional_args_t dset_opt_args;
     Bypass_dataset_t *dset = NULL;
-    haddr_t addr = 0;
 
     assert(obj->type == H5I_DATASET);
     dset = &obj->u.dataset;
@@ -1488,6 +1485,8 @@ done:
             H5Sclose(dset->space_id);
         } H5E_END_TRY;
     }
+
+    return ret_value;
 }
 
 /*-------------------------------------------------------------------------
@@ -1543,7 +1542,6 @@ H5VL_bypass_dataset_create(void *obj, const H5VL_loc_params_t *loc_params, const
         req_created = true;
     }
     
-done:
     return (void *)dset;
 
 error:
@@ -1574,7 +1572,6 @@ H5VL_bypass_dataset_open(void *obj, const H5VL_loc_params_t *loc_params, const c
     H5VL_bypass_t *dset = NULL;
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
     void          *under = NULL;
-    unsigned      i;
     bool req_created = false;
 
 #ifdef ENABLE_BYPASS_LOGGING
@@ -1610,7 +1607,6 @@ H5VL_bypass_dataset_open(void *obj, const H5VL_loc_params_t *loc_params, const c
         req_created = true;
     }
 
-done:
     return (void *)dset;
 
 error:
@@ -1627,6 +1623,7 @@ error:
         if (H5VL_bypass_free_obj(*req) < 0)
             fprintf(stderr, "failed to clean up bypass request object after dset open failure\n");
     }
+
     return NULL;
 } /* end H5VL_bypass_dataset_open() */
 
@@ -2643,7 +2640,7 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
         /* Check selection type */
         if (mem_space_id[j] == H5S_ALL) {
             mem_sel_type = H5S_SEL_ALL;
-        } else if ((mem_sel_type == H5Sget_select_type(mem_space_id[j])) < 0) {
+        } else if ((mem_sel_type = H5Sget_select_type(mem_space_id[j])) < 0) {
             fprintf(stderr, "failed to get selection type\n");
             ret_value = -1;
             goto done;
@@ -2659,6 +2656,9 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
             ret_value = -1;
             goto done;
         }
+
+        if (file_sel_type == H5S_SEL_NONE)
+            continue;
 
         if (get_dtype_info_helper(mem_type_id[j], &mem_type_info) < 0) {
             fprintf(stderr, "failed to get mem dtype info\n");
@@ -2924,7 +2924,7 @@ H5VL_bypass_dataset_specific(void *obj, H5VL_dataset_specific_args_t *args, hid_
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
     hid_t under_vol_id;
-    herr_t ret_value;
+    herr_t ret_value = 0;
     bool req_created = false;
 
 #ifdef ENABLE_BYPASS_LOGGING
@@ -3032,7 +3032,6 @@ static herr_t
 H5VL_bypass_dataset_close(void *dset, hid_t dxpl_id, void **req)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)dset;
-    unsigned       i;
     herr_t         ret_value = 0;
 
     
