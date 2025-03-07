@@ -250,6 +250,9 @@ static herr_t H5VL_bypass_optional(void *obj, H5VL_optional_args_t *args, hid_t 
 /* Check if any threads are still performing or waiting for tasks */
 herr_t is_any_thread_active(bool *out);
 
+/* Flush the file containing the provided dataset */
+static herr_t flush_containing_file(H5VL_bypass_t *file);
+
 /* Populate the dataset structure on the bypass object */
 static herr_t dset_open_helper(H5VL_bypass_t *obj, hid_t dxpl_id, void **req);
 
@@ -2735,6 +2738,13 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
             /* Reset for the next H5Dread */
             pthread_mutex_lock(&mutex_local);
 
+            /* Future optimization: Only flush when a write has been performed */
+            if (flush_containing_file((H5VL_bypass_t *)dset[j]) < 0) {
+                fprintf(stderr, "failed to flush dataset\n");
+                ret_value = -1;
+                goto done;
+            }
+
             for (i = 0; i < nthreads_tpool; i++)
                 md_for_thread.thread_is_active[i] = true;
 
@@ -5150,6 +5160,26 @@ get_dset_space_status(H5VL_bypass_t *dset_obj, hid_t dxpl_id, void **req) {
     if (H5VL_bypass_dataset_get(dset_obj, &get_args, dxpl_id, req) < 0) {
         fprintf(stderr, "unable to get dataset's space status\n");
         ret_value = H5D_SPACE_STATUS_ERROR;
+        goto done;
+    }
+
+done:
+    return ret_value;
+}
+
+/* Flush the file containing the provided dataset */
+static herr_t
+flush_containing_file(H5VL_bypass_t *dset) {
+    herr_t ret_value = 0;
+    H5VL_file_specific_args_t args;
+
+    args.op_type = H5VL_FILE_FLUSH;
+    args.args.flush.obj_type = H5I_DATASET;
+    args.args.flush.scope = H5F_SCOPE_LOCAL;
+
+    if ((H5VLfile_specific((void*) dset->under_object, dset->under_vol_id, &args, H5P_DEFAULT, NULL) < 0)) {
+        fprintf(stderr, "unable to flush file\n");
+        ret_value = -1;
         goto done;
     }
 
