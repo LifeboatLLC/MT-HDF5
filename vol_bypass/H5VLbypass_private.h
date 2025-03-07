@@ -84,8 +84,8 @@ typedef struct {
 typedef struct {
     size_t  counter;
 
-    char    file_name[64];
-    char    dset_name[64];
+    char    file_name[BYPASS_NAME_SIZE_LONG];
+    char    dset_name[BYPASS_NAME_SIZE_LONG];
 
     int     my_file_index;        /* The index of the FILE_T structure for this file */ 
     hid_t   file_space_id;
