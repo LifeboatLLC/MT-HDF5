@@ -2641,6 +2641,12 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
             }
         }
 
+        if (selection_info.my_file_index < 0) {
+            fprintf(stderr, "failed to find file in file_stuff\n");
+            ret_value = -1;
+            goto done;
+        }
+
         if ((num_ext_files = H5Pget_external_count(bypass_dset->dcpl_id)) < 0) {
             fprintf(stderr, "failed to get external file count\n");
             ret_value = -1;
