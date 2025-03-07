@@ -69,23 +69,6 @@ static file_t *file_stuff;
 static int file_stuff_count = 0;
 static int file_stuff_size = FILE_STUFF_SIZE;
 
-/* Dataset info */
-typedef struct {
-    char dset_name[BYPASS_NAME_SIZE_LONG];
-    char file_name[BYPASS_NAME_SIZE_LONG];
-    H5D_layout_t layout;
-    unsigned ref_count;     /* Reference count    */
-    hid_t dcpl_id;
-    hid_t dtype_id;
-    hid_t space_id;
-    haddr_t location;
-    hbool_t use_native;    /* flag for skipping bypass VOL and use the native functions */
-} dset_t;
-
-static dset_t *dset_stuff;
-static int dset_count = 0;
-static int dset_info_size = DSET_INFO_SIZE;
-
 /* Log info to be written out for the C program */
 typedef struct {
     char    file_name[64];        /* file name to be read or written */
