@@ -1,0 +1,824 @@
+\documentclass[../HDF5_RFC.tex]{subfiles}
+ 
+\begin{document}
+
+% Start each appendix on a new page
+\newpage
+
+\section{Appendix: H5S interface public API functions}
+\label{apdx:h5s_functions}
+
+The following sections give an overview of the public API functions in the H5S interface
+and outline any concurrency issues that will have to be dealt with for each function.
+Note that the following three general assumptions are made before getting into concurrency
+issues specific to individual functions:
+
+\begin{itemize}
+    \item The assumption is made that the H5I interface in HDF5 is thread-safe. While this
+          is, for the most part, currently the case in Lifeboat's HDF5 fork, there may be
+          some additional concurrency bugs encountered when adapting the H5S interface
+          for multi-thread environments. Most or all of these functions use the H5I interface
+          in some form or another, so concurrent use of H5S relies on an H5I interface capable
+          of concurrency.
+    \item The assumption is made that all of the usages of HDF5's H5FL free list interface
+          will have been converted to thread-safe equivalents before beginning the work of
+          adapting the H5S interface for multi-thread environments. The H5FL interface is
+          not currently thread-safe and would pose several concurrency issues related to
+          memory management of objects.
+    \item Unless specifically discussed, the assumption is made that parameters passed into
+          these functions are either thread-local or are being concurrently accessed in
+          a read-only capacity.
+\end{itemize}
+
+Some of the functions in the following sections discuss issues when a dataspace object is
+concurrently modified while being used inside the function. For these discussions, it should
+be kept in mind that concurrent modification to a dataspace object can primarily happen in two
+ways. The first way is via direct manipulation, e.g. multiple threads pass the same dataspace
+ID as a parameter to functions where one or more of the function calls will update the dataspace
+object in some manner. If the chosen approach to H5S concurrency does not allow for the same
+dataspace object to be shared by multiple threads, this issue is not relevant. Otherwise, a
+system will need to be devised for ensuring that the dataspace remains coherent during operations.
+
+The second way is via indirect manipulation, e.g. multiple threads pass distinct dataspace IDs
+to functions where one or more of the function calls will update the dataspace objects in some
+manner and the underlying dataspace objects have shared selection information between them.
+Currently, this is a concern for dataspaces that have either a hyperslab or point selection set
+on them. In certain edge cases, these dataspace objects could have shared selection information
+between them and updating one dataspace object may update another. After determining the full
+impact of this state sharing, a system may need to be devised for ensuring that the dataspace
+remains coherent during operations. Refer to \ref{h5s_state_sharing} for more information on
+this case.
+
+\subsection{\texttt{H5Sclose()}}
+\label{apdx:h5s_func_h5sclose}
+
+\begin{minted}{C}
+herr_t
+H5Sclose(hid_t space_id);
+\end{minted}
+
+Releases and terminates access to a dataspace.
+
+\textbf{Concurrency notes:} With the general assumptions made at the beginning of this
+appendix, this function should be thread-safe. However, note that locking may need to
+temporarily be performed around the call to \texttt{H5I\_dec\_app\_ref()} to deal with
+issues with an ID being closed by one thread while already having been removed by another
+thread. Further investigation is needed to determine if this will actually be an issue.
+
+\subsection{\texttt{H5Scombine\_hyperslab()}}
+\label{apdx:h5s_func_h5scombine_hyperslab}
+
+\begin{minted}{C}
+hid_t
+H5Scombine_hyperslab(hid_t space_id, H5S_seloper_t op,
+                     const hsize_t start[],
+                     const hsize_t stride[],
+                     const hsize_t count[],
+                     const hsize_t block[]);
+\end{minted}
+
+Performs an operation on a hyperslab with an existing selection and returns the ID of a
+new dataspace object with the resulting selection.
+
+\textbf{Concurrency notes:} This function appears to have several issues with concurrency.
+
+First, unexpected results could occur if the dataspace is concurrently modified while this
+function is executing.
+
+Next, when multiple threads call \texttt{H5Scombine\_hyperslab()} on the same dataspace ID,
+then, depending on the selection operator used, the span tree information could be shared
+among all the dataspaces that are newly created for each thread. If the chosen approach to
+H5S concurrency does not allow for the same dataspace object to be shared by multiple threads,
+this issue is not relevant. A similar situation exists when multiple threads call
+\texttt{H5Scombine\_hyperslab()} on distinct dataspace IDs where the span tree information
+is shared between the dataspaces. The potential danger for both of these situations is
+described more in section \ref{h5s_state_sharing}.
+
+Finally, this function can encounter the issue described in section \ref{h5s_op_gen}.
+
+\subsection{\texttt{H5Scombine\_select()}}
+\label{apdx:h5s_func_h5scombine_select}
+
+\begin{minted}{C}
+hid_t
+H5Scombine_select(hid_t space1_id, H5S_seloper_t op, hid_t space2_id);
+\end{minted}
+
+Combines two hyperslab selections according to the given selection operation and returns
+the ID of a new dataspace object with the resulting selection. This function is very similar
+to \texttt{H5Scombine\_hyperslab()}.
+
+\textbf{Concurrency notes:} This function appears to have several issues with concurrency.
+
+First, unexpected results could occur if either of the dataspaces are concurrently modified
+while this function is executing.
+
+Next, when multiple threads call \texttt{H5Scombine\_select()} on the same dataspace ID
+(\texttt{space1\_id}), then, depending on the selection operator used and the selection in
+\texttt{space2\_id}, the span tree information could be shared among all the dataspaces that
+are newly created for each thread. If the chosen approach to H5S concurrency does not allow
+for the same dataspace object to be shared by multiple threads, this issue is not relevant.
+A similar situation exists when multiple threads call \texttt{H5Scombine\_select()} on
+distinct dataspace IDs where the span tree information is shared between the dataspaces.
+The potential danger for both of these situations is described more in section
+\ref{h5s_state_sharing}.
+
+Finally, this function can encounter the issue described in section \ref{h5s_op_gen}.
+
+\subsection{\texttt{H5Scopy()}}
+\label{apdx:h5s_func_h5scopy}
+
+\begin{minted}{C}
+hid_t
+H5Scopy(hid_t space_id);
+\end{minted}
+
+Copies the extent and selection for a dataspace object and returns the ID of a new
+dataspace object with the copied extent and selection.
+
+\textbf{Concurrency notes:} If multiple threads call \texttt{H5Scopy()} on the same dataspace
+ID (presumably to obtain their own copy of a shared dataspace to work with) and that dataspace
+object is modified concurrently, the extent and/or selection of the resulting dataspace copy
+could be indeterminate. If the chosen approach to H5S concurrency does not allow for the
+same dataspace object to be shared by multiple threads, this issue is not relevant. Otherwise,
+a system will need to be devised for ensuring that the dataspace being copied remains coherent
+during the copy operation.
+
+The same situation could occur for the selection in the resulting dataspace if multiple threads
+call \texttt{H5Scopy()} on distinct dataspace IDs where the underlying dataspace objects have
+shared selection information between them. Note that \texttt{H5Scopy()} never shares the
+selection information between the source and resulting dataspaces, but if the dataspaces are
+modified during the copy operation, the results could be indeterminate. Refer to section
+\ref{h5s_state_sharing} for information on shared selection information.
+
+\subsection{\texttt{H5Screate()}}
+\label{apdx:h5s_func_h5screate}
+
+\begin{minted}{C}
+hid_t
+H5Screate(H5S_class_t type);
+\end{minted}
+
+Creates a new dataspace object of the specified type and returns the ID of the newly-created
+dataspace object.
+
+\textbf{Concurrency notes:} With the general assumptions made at the beginning of this
+appendix, this function should be thread-safe. It simply allocates a new \texttt{H5S\_t}
+structure, performs some setup operations on the allocated structure and then calls
+\texttt{H5I\_register()} to get an ID for the dataspace object that is then returned.
+
+\subsection{\texttt{H5Screate\_simple()}}
+\label{apdx:h5s_func_h5screate_simple}
+
+\begin{minted}{C}
+hid_t
+H5Screate_simple(int rank, const hsize_t dims[],
+                 const hsize_t maxdims[]);
+\end{minted}
+
+Creates a new simple dataspace object and returns the ID of the newly-created dataspace
+object.
+
+\textbf{Concurrency notes:} With the general assumptions made at the beginning of this
+appendix, this function should be thread-safe. It simply allocates a new \texttt{H5S\_t}
+structure, performs some setup operations on the allocated structure and then calls
+\texttt{H5I\_register()} to get an ID for the dataspace object that is then returned.
+
+\subsection{\texttt{H5Sdecode()}}
+\label{apdx:h5s_func_h5sdecode}
+
+\begin{minted}{C}
+hid_t
+H5Sdecode(const void *buf);
+\end{minted}
+
+Decodes a binary representation of a dataspace object and then returns the ID of a
+dataspace object created from the decoded data.
+
+\textbf{Concurrency notes:} With the general assumptions made at the beginning of this
+appendix, the remaining concurrency issues with \texttt{H5Sdecode()} lie in its helper
+function \texttt{H5S\_decode()}. To correctly decode a binary representation for a dataspace
+object, \texttt{H5S\_decode()} calls \texttt{H5F\_fake\_alloc()} to allocate a fake
+\texttt{H5F\_t} file structure object which is primarily used for determining the 'size of
+sizes' in a file. This function uses free list memory management operations and must be converted
+to thread-safe equivalents. \texttt{H5S\_decode()} also calls the \texttt{H5O\_msg\_decode()}
+and \texttt{H5O\_msg\_copy()} functions to decode the dataspace extent part of the binary blob
+and copy it into the newly-created dataspace object. Both of these functions use free list
+memory management operations as well.
+
+Finally, \texttt{H5S\_decode()} calls \texttt{H5S\_select\_deserialize()} to decode the dataspace
+selection part of the binary blob and set that selection in the newly-created dataspace object.
+Depending on the selection type, there are further concurrency issues to consider.
+
+\begin{itemize}
+    \item For 'all' and 'none' selections, no operations performed by their 'deserialize' callbacks
+          appear to be problematic for concurrency.
+    \item For point selections, the callback function \texttt{H5S\_\_point\_deserialize()} allocates
+          space for the point coordinates array using \texttt{H5MM\_malloc()} which should currently
+          be thread-safe as it's just a wrapper around \texttt{malloc()}, but it may be worth
+          converting to an explicit call to \texttt{malloc()} for future-proofing reasons.
+          \texttt{H5S\_\_point\_deserialize()} also calls the \texttt{H5S\_select\_elements()} function
+          to select elements in the newly-created dataspace object which were selected in the binary representation of the dataspace object. The main concurrency issue in this function is the
+          various calls to free list memory management operations, which we'll assume will have been
+          updated to thread-safe equivalents.
+    \item For hyperslab selections, the callback function \texttt{H5S\_\_hyper\_deserialize()} eventually
+          calls \texttt{H5S\_select\_hyperslab()} to setup the selection in the newly-created dataspace
+          object. This function will need to generate the span information for the new dataspace object,
+          which is very likely to encounter the issue with hyperslab operation generation values described
+          in section \ref{h5s_op_gen}.
+\end{itemize}
+
+\subsection{\texttt{H5Sencode2()}}
+\label{apdx:h5s_func_h5sencode2}
+
+\begin{minted}{C}
+herr_t
+H5Sencode2(hid_t obj_id, void *buf, size_t *nalloc, hid_t fapl);
+\end{minted}
+
+Encodes a dataspace object into a binary buffer.
+
+\textbf{Concurrency notes:} With the general assumptions made at the beginning of this
+appendix, \texttt{H5Sencode2()} has a few remaining concurrency issues. This function
+calls \texttt{H5CX\_set\_apl()}, which will need to be dealt with until the H5CX interface can
+be made thread-safe. Other concurrency issues with \texttt{H5Sencode2()} lie in its helper function
+\texttt{H5S\_encode()}. To correctly encode a binary representation for a dataspace object,
+\texttt{H5S\_encode()} calls \texttt{H5F\_fake\_alloc()} to allocate a fake \texttt{H5F\_t} file
+structure object which is primarily used for determining the 'size of sizes' in a file. This
+function uses free list memory management operations and must be converted to thread-safe equivalents.
+
+Then, \texttt{H5S\_encode()} calls \texttt{H5S\_select\_serial\_size()} to determine the size of
+the buffer needed for encoding the selection part of the dataspace object. Depending on the
+selection type, there are further concurrency issues to consider.
+
+\begin{itemize}
+    \item For 'all' and 'none' selections, no operations performed by their 'serial\_size' callbacks
+          appear to be problematic for concurrency.
+    \item For point selections, the callback function \texttt{H5S\_\_point\_serial\_size()} eventually
+          calls the function \texttt{H5CX\_get\_libver\_bounds()}, which will need to be dealt with
+          until the H5CX interface can be made thread-safe.
+    \item For hyperslab selections, the callback function \texttt{H5S\_\_hyper\_serial\_size()} can
+          encounter the issue described in section \ref{h5s_op_gen}. The function also eventually
+          calls \texttt{H5CX\_get\_libver\_bounds()}, which will need to be dealt with until the H5CX
+          interface can be made thread-safe.
+\end{itemize}
+
+\texttt{H5S\_encode()} then calls \texttt{H5S\_select\_serialize()} to perform the actual
+encoding operation. Each selection type's 'serialize' callback has essentially the same concurrency
+issues as their 'serial\_size' callbacks above, so fixing the issues will address both cases.
+
+Finally, unexpected results could occur if the dataspace is concurrently modified while it is being
+encoded into the buffer.
+
+\subsection{\texttt{H5Sextent\_copy()}}
+\label{apdx:h5s_func_h5sextent_copy}
+
+\begin{minted}{C}
+herr_t
+H5Sextent_copy(hid_t dst_id, hid_t src_id);
+\end{minted}
+
+Copies the extent of a dataspace object to another dataspace object.
+
+\textbf{Concurrency notes:} Unexpected results could occur if the source dataspace's extent is
+concurrently modified while copying of its extent is taking place.
+
+Unexpected results could also occur if multiple threads attempt to copy an extent into the
+same destination dataspace object. This case seems unlikely to be of much use or interest
+and should likely be documented as an invalid operation.
+
+\subsection{\texttt{H5Sextent\_equal()}}
+\label{apdx:h5s_func_h5sextent_equal}
+
+\begin{minted}{C}
+htri_t
+H5Sextent_equal(hid_t space1_id, hid_t space2_id);
+\end{minted}
+
+Compares the extents of two dataspace objects and determines if they are equal.
+
+\textbf{Concurrency notes:} Unexpected results could occur if the extent of either dataspace
+object is concurrently modified during the compare operation.
+
+\subsection{\texttt{H5Sget\_regular\_hyperslab()}}
+\label{apdx:h5s_func_h5sget_regular_hyperslab}
+
+\begin{minted}{C}
+htri_t
+H5Sget_regular_hyperslab(hid_t spaceid, hsize_t start[],
+                         hsize_t stride[], hsize_t count[],
+                         hsize_t block[]);
+\end{minted}
+
+Retrieves the parameters for a regular hyperslab selection set on a dataspace object.
+
+\textbf{Concurrency notes:} Unexpected results could occur if the dataspace is concurrently
+modified while retrieval of the selection within it is taking place.
+
+\subsection{\texttt{H5Sget\_select\_bounds()}}
+\label{apdx:h5s_func_h5sget_select_bounds}
+
+\begin{minted}{C}
+herr_t
+H5Sget_select_bounds(hid_t spaceid, hsize_t start[], hsize_t end[]);
+\end{minted}
+
+Retrieves the parameters of a bounding box containing the current selection within a
+dataspace object.
+
+\textbf{Concurrency notes:} Unexpected results could occur if the dataspace is concurrently modified
+while retrieval of the bounds of the selection within it is taking place.
+
+\subsection{\texttt{H5Sget\_select\_elem\_npoints()}}
+\label{apdx:h5s_func_h5sget_select_elem_npoints}
+
+\begin{minted}{C}
+hssize_t
+H5Sget_select_elem_npoints(hid_t spaceid);
+\end{minted}
+
+Retrieves the number of element points selected in the dataspace object. The dataspace object
+must have a point selection within it.
+
+\textbf{Concurrency notes:} Unexpected results could occur if the dataspace is concurrently modified
+while retrieval of the number of selected points is taking place.
+
+\subsection{\texttt{H5Sget\_select\_elem\_pointlist()}}
+\label{apdx:h5s_func_h5sget_select_elem_pointlist}
+
+\begin{minted}{C}
+herr_t
+H5Sget_select_elem_pointlist(hid_t spaceid, hsize_t startpoint,
+                             hsize_t numpoints, hsize_t buf[]);
+\end{minted}
+
+Retrieves a list of the element points selected in the dataspace object. The dataspace object
+must have a point selection within it.
+
+\textbf{Concurrency notes:} Unexpected results could occur if the dataspace is concurrently
+modified while retrieval of the list of selected points is taking place.
+
+This function has additional concurrency issues described in \ref{h5s_concurrency_point}.
+
+\subsection{\texttt{H5Sget\_select\_hyper\_blocklist()}}
+\label{apdx:h5s_func_h5sget_select_hyper_blocklist}
+
+\begin{minted}{C}
+herr_t
+H5Sget_select_hyper_blocklist(hid_t spaceid, hsize_t startblock,
+                              hsize_t numblocks, hsize_t buf[]);
+\end{minted}
+
+Retrieves a list of hyperslab blocks selected in the dataspace object. The dataspace object
+must have a hyperslab selection within it.
+
+\textbf{Concurrency notes:} Unexpected results could occur if the dataspace is concurrently
+modified while retrieval of the list of hyperslab blocks is taking place.
+
+\subsection{\texttt{H5Sget\_select\_hyper\_nblocks()}}
+\label{apdx:h5s_func_h5sget_select_hyper_nblocks}
+
+\begin{minted}{C}
+hssize_t
+H5Sget_select_hyper_nblocks(hid_t spaceid);
+\end{minted}
+
+Retrieves the number of hyperslab blocks selected in the dataspace object. The dataspace
+object must have a hyperslab selection within it.
+
+\textbf{Concurrency notes:} Unexpected results could occur if the dataspace is concurrently
+modified while retrieval of the number of selected hyperslab blocks is taking place. This
+function can also encounter the issue described in section \ref{h5s_op_gen}.
+
+\subsection{\texttt{H5Sget\_select\_npoints()}}
+\label{apdx:h5s_func_h5sget_select_npoints}
+
+\begin{minted}{C}
+hssize_t
+H5Sget_select_npoints(hid_t spaceid);
+\end{minted}
+
+Retrieves the number of elements selected in a dataspace object.
+
+\textbf{Concurrency notes:} Unexpected results could occur if the dataspace is concurrently
+modified while retrieval of the number of selected elements is taking place.
+
+\subsection{\texttt{H5Sget\_select\_type()}}
+\label{apdx:h5s_func_h5sget_select_type}
+
+\begin{minted}{C}
+H5S_sel_type
+H5Sget_select_type(hid_t spaceid);
+\end{minted}
+
+Returns the type of selection within a dataspace object.
+
+\textbf{Concurrency notes:} Unexpected results could occur if the dataspace is concurrently
+modified while retrieval of the type of selection is taking place.
+
+\subsection{\texttt{H5Sget\_simple\_extent\_dims()}}
+\label{apdx:h5s_func_h5sget_simple_extent_dims}
+
+\begin{minted}{C}
+int
+H5Sget_simple_extent_dims(hid_t space_id, hsize_t dims[],
+                          hsize_t maxdims[]);
+\end{minted}
+
+Retrieves the current and maximum sizes of each dimension in a dataspace object's extent and also
+returns the number of dimensions in the dataspace object's extent. An initial call with both
+\texttt{dims} and \texttt{maxdims} specified as \texttt{NULL} can be made to determine how large
+each array must be before making a second call to populate those arrays.
+
+\textbf{Concurrency notes:} Unexpected results could occur if the dataspace is concurrently modified
+while retrieval of the dimensionality information is taking place.
+
+\subsection{\texttt{H5Sget\_simple\_extent\_ndims()}}
+\label{apdx:h5s_func_h5sget_simple_extent_ndims}
+
+\begin{minted}{C}
+int
+H5Sget_simple_extent_ndims(hid_t space_id);
+\end{minted}
+
+Retrieves the number of dimensions in a dataspace object's extent.
+
+\textbf{Concurrency notes:} Unexpected results could occur if the dataspace is concurrently modified
+while retrieval of the dimensionality information is taking place.
+
+\subsection{\texttt{H5Sget\_simple\_extent\_npoints()}}
+\label{apdx:h5s_func_h5sget_simple_extent_npoints}
+
+\begin{minted}{C}
+hssize_t
+H5Sget_simple_extent_npoints(hid_t space_id);
+\end{minted}
+
+Retrieves the number of elements in a dataspace object's extent.
+
+\textbf{Concurrency notes:} Unexpected results could occur if the dataspace is concurrently modified
+while retrieval of the dataspace information is taking place.
+
+\subsection{\texttt{H5Sget\_simple\_extent\_type()}}
+\label{apdx:h5s_func_h5sget_simple_extent_type}
+
+\begin{minted}{C}
+H5S_class_t
+H5Sget_simple_extent_type(hid_t space_id);
+\end{minted}
+
+Retrieves the type of extent within a dataspace object (currently, scalar, simple, null).
+
+\textbf{Concurrency notes:} Unexpected results could occur if the dataspace is concurrently modified
+while retrieval of the dataspace information is taking place.
+
+\subsection{\texttt{H5Sis\_regular\_hyperslab()}}
+\label{apdx:h5s_func_h5sis_regular_hyperslab}
+
+\begin{minted}{C}
+htri_t
+H5Sis_regular_hyperslab(hid_t spaceid);
+\end{minted}
+
+Returns whether or not the selection in the specified dataspace object represents a regular
+hyperslab selection. The dataspace object must have a hyperslab selection within it.
+
+\textbf{Concurrency notes:} Unexpected results could occur if the dataspace is concurrently modified
+while retrieval of the dataspace information is taking place.
+
+\subsection{\texttt{H5Sis\_simple()}}
+\label{apdx:h5s_func_h5sis_simple}
+
+\begin{minted}{C}
+htri_t
+H5Sis_simple(hid_t space_id);
+\end{minted}
+
+Returns whether or not the extent of the specified dataspace object is "simple".
+
+\textbf{Concurrency notes:} Unexpected results could occur if the dataspace is concurrently modified
+while retrieval of the dataspace information is taking place.
+
+\subsection{\texttt{H5Smodify\_select()}}
+\label{apdx:h5s_func_h5smodify_select}
+
+\begin{minted}{C}
+herr_t
+H5Smodify_select(hid_t space1_id, H5S_seloper_t op, hid_t space2_id);
+\end{minted}
+
+Refines an existing hyperslab selection in the dataspace object \texttt{space1\_id} by operating
+on it with the hyperslab selection in the dataspace object \texttt{space2\_id} according to the
+selection operation specified by \texttt{op}.
+
+\textbf{Concurrency notes:} Unexpected results could occur if either dataspace is concurrently
+modified while the selection modification operation is taking place. Further, this function is
+affected by the issues described in section \ref{h5s_concurrent_manipulation} if multiple threads
+call \texttt{H5Smodify\_select()} on the same dataspace \texttt{space1\_id}. Specifically, if a 
+dataspace object is shared among multiple threads then concurrently updating the selection in
+the dataspace object will be problematic. Regardless of the chosen selection operator, the
+resulting selection could be indeterminate as each thread attempts to replace some or all of
+the existing selection with its own.
+
+\subsection{\texttt{H5Soffset\_simple()}}
+\label{apdx:h5s_func_h5soffset_simple}
+
+\begin{minted}{C}
+herr_t
+H5Soffset_simple(hid_t space_id, const hssize_t *offset);
+\end{minted}
+
+Changes the offset which the current selection in a dataspace object starts at. This function
+essentially allows moving around of a selection in a dataspace object without having to
+redefine the selection.
+
+\textbf{Concurrency notes:} Unexpected results could occur if the dataspace is concurrently
+modified while the selection modification operation is taking place. Further, concurrent use
+of this function can be affected by both of the issues described in section 
+\ref{h5s_concurrent_manipulation}.
+
+\subsection{\texttt{H5Ssel\_iter\_close()}}
+\label{apdx:h5s_func_h5ssel_iter_close}
+
+\begin{minted}{C}
+herr_t
+H5Ssel_iter_close(hid_t sel_iter_id);
+\end{minted}
+
+Closes the ID for and terminates access to a dataspace selection iterator object.
+
+\textbf{Concurrency notes:} With the general assumptions made at the beginning of this
+appendix, this function should be thread-safe. However, note that locking may need to
+temporarily be performed around the call to \texttt{H5I\_dec\_app\_ref()} to deal with
+issues with an ID being closed by one thread while already having been removed by another
+thread. Further investigation is needed to determine if this will actually be an issue.
+
+\subsection{\texttt{H5Ssel\_iter\_create()}}
+\label{apdx:h5s_func_h5ssel_iter_create}
+
+\begin{minted}{C}
+hid_t
+H5Ssel_iter_create(hid_t spaceid, size_t elmt_size, unsigned flags);
+\end{minted}
+
+Creates a dataspace selection iterator object and returns an ID for it.
+
+\textbf{Concurrency notes:} With the general assumptions made at the beginning of this
+appendix, this function should be thread-safe as long as the dataspace is not concurrently
+modified while the selection iterator is being created. However, if the value
+\texttt{H5S\_SEL\_ITER\_SHARE\_WITH\_DATASPACE} is passed in for the \texttt{flags} parameter,
+the selection iterator object will have shared state with the source dataspace object, which
+could be problematic for concurrent execution, as described in section \ref{h5s_state_sharing}.
+For point selections, the list of points will be uncopied and directly used. For hyperslab
+selections, the span information will be uncopied and directly used.
+
+Dataspace selection iterator objects have additional concurrency issues noted in section
+\ref{h5s_sel_iter}.
+
+\subsection{\texttt{H5Ssel\_iter\_get\_seq\_list()}}
+\label{apdx:h5s_func_h5ssel_iter_get_seq_list}
+
+\begin{minted}{C}
+herr_t
+H5Ssel_iter_get_seq_list(hid_t sel_iter_id, size_t maxseq,
+                         size_t maxelmts, size_t *nseq,
+                         size_t *nelmts, hsize_t *off,
+                         size_t *len);
+\end{minted}
+
+Retrieves the next set of offset / length sequences for the elements in a dataspace selection
+iterator object.
+
+\textbf{Concurrency notes:} Unexpected results could occur if the dataspace is concurrently
+modified while retrieval of a sequence list operation is taking place, or even in between
+calls to this function. This function would also be affected by the concurrency issues noted
+in \ref{h5s_sel_iter}.
+
+\subsection{\texttt{H5Ssel\_iter\_reset()}}
+\label{apdx:h5s_func_h5ssel_iter_reset}
+
+\begin{minted}{C}
+herr_t
+H5Ssel_iter_reset(hid_t sel_iter_id, hid_t space_id);
+\end{minted}
+
+Resets a dataspace selection iterator object back to its initial state so that it may be
+used once again without needing to create another selection iterator object.
+
+\textbf{Concurrency notes:} Unexpected results could occur if the dataspace is concurrently
+modified while the selection iterator object is being reset. This function would also be
+affected by the concurrency issues noted in \ref{h5s_sel_iter}. Finally, this function has a
+few additional concurrency issues specific to it:
+
+\begin{itemize}
+    \item This function releases the current selection on the dataspace iterator object, posing
+          further concurrency issues if the same iterator object is used by multiple threads.
+    \item This function allows the caller to change the dataspace object that the iterator object
+          will iterate over by providing the ID of a different dataspace object than the iterator
+          object was created with in \texttt{H5Ssel\_iter\_create()}. If the iterator object is
+          being used by multiple threads, this is another piece of shared state that has to be
+          handled to prevent threads from having out of date information.
+\end{itemize}
+
+\subsection{\texttt{H5Sselect\_adjust()}}
+\label{apdx:h5s_func_h5sselect_adjust}
+
+\begin{minted}{C}
+herr_t
+H5Sselect_adjust(hid_t spaceid, const hssize_t *offset);
+\end{minted}
+
+Adjusts the selection within a dataspace object by subtracting an offset. Essentially a counterpart
+to \texttt{H5Soffset\_simple()}, this function allows moving around of a selection in a dataspace
+object without having to redefine the selection.
+
+\textbf{Concurrency notes:} This function is affected by all the concurrency issues described in
+sections \ref{h5s_concurrent_manipulation}, \ref{h5s_state_sharing} and \ref{h5s_op_gen}.
+
+\subsection{\texttt{H5Sselect\_all()}}
+\label{apdx:h5s_func_h5sselect_all}
+
+\begin{minted}{C}
+herr_t
+H5Sselect_all(hid_t spaceid);
+\end{minted}
+
+Changes the selection in a dataspace object so that all of the elements in its extent are selected.
+
+\textbf{Concurrency notes:} Unexpected results could occur if the dataspace is concurrently
+modified while the selection in the dataspace is being updated. Further, this function releases
+the previous selection in the dataspace before updating to an 'all' selection, which could cause
+the dataspace to be in a problematic intermediate state if it is shared by multiple threads.
+
+\subsection{\texttt{H5Sselect\_copy()}}
+\label{apdx:h5s_func_h5sselect_copy}
+
+\begin{minted}{C}
+herr_t
+H5Sselect_copy(hid_t dst_id, hid_t src_id);
+\end{minted}
+
+Copies the selection in the dataspace object \texttt{src\_id} into the dataspace object \texttt{dst\_id}.
+
+\textbf{Concurrency notes:} Unexpected results could occur if the source dataspace's selection is
+concurrently modified while copying of its selection is taking place.
+
+Unexpected results could also occur if multiple threads attempt to copy a selection into the
+same destination dataspace object. This case seems unlikely to be of much use or interest and
+should likely be documented as an invalid operation.
+
+\subsection{\texttt{H5Sselect\_elements()}}
+\label{apdx:h5s_func_h5sselect_elements}
+
+\begin{minted}{C}
+herr_t
+H5Sselect_elements(hid_t space_id, H5S_seloper_t op, size_t num_elem,
+                   const hsize_t *coord);
+\end{minted}
+
+Selects individual elements in a dataspace object, resulting in a point selection.
+
+\textbf{Concurrency notes:} Unexpected results could occur if the dataspace is concurrently
+modified while the selection modification operation is taking place. Further, this function is
+affected by the issues described in section \ref{h5s_concurrent_manipulation}. Specifically,
+if a dataspace object is shared among multiple threads then concurrently selecting points in the
+dataspace object will be problematic; the linked list of points will need to be updated atomically.
+
+\subsection{\texttt{H5Sselect\_hyperslab()}}
+\label{apdx:h5s_func_h5sselect_hyperslab}
+
+\begin{minted}{C}
+herr_t
+H5Sselect_hyperslab(hid_t space_id, H5S_seloper_t op,
+                    const hsize_t start[],
+                    const hsize_t stride[],
+                    const hsize_t count[], 
+                    const hsize_t block[]);
+\end{minted}
+
+Selects a hyperslab region within a dataspace object and either replaces the existing selection
+or refines it according to the selection operator specified in \texttt{op}.
+
+\textbf{Concurrency notes:} Unexpected results could occur if the dataspace is concurrently
+modified while the selection modification operation is taking place. Further, this function is
+affected by the issues described in section \ref{h5s_concurrent_manipulation}. Specifically,
+if a dataspace object is shared among multiple threads then concurrently selecting a hyperslab in
+the dataspace object will be problematic. Regardless of the chosen selection operator, the 
+resulting selection could be indeterminate as each thread attempts to replace some or all of the
+existing selection with its own.
+
+This function can also encounter the issue described in section \ref{h5s_op_gen}.
+
+\subsection{\texttt{H5Sselect\_intersect\_block()}}
+\label{apdx:h5s_func_h5sselect_intersect_block}
+
+\begin{minted}{C}
+htri_t
+H5Sselect_intersect_block(hid_t space_id, const hsize_t *start,
+                          const hsize_t *end);
+\end{minted}
+
+Returns whether or not the selection within a dataspace object intersects with the block described by
+the coordinates specified in \texttt{start} and \texttt{end}.
+
+\textbf{Concurrency notes:} Unexpected results could occur if the source dataspace is concurrently
+modified while the intersection information is being determined.
+
+This function can also encounter the issue described in section \ref{h5s_op_gen}.
+
+\subsection{\texttt{H5Sselect\_none()}}
+\label{apdx:h5s_func_h5sselect_none}
+
+\begin{minted}{C}
+herr_t
+H5Sselect_none(hid_t spaceid);
+\end{minted}
+
+Changes the selection in a dataspace object so that none of the elements in its extent are selected.
+
+\textbf{Concurrency notes:} Unexpected results could occur if the dataspace is concurrently
+modified while the selection in the dataspace is being updated. Further, this function releases
+the previous selection in the dataspace before updating to a 'none' selection, which could cause
+the dataspace to be in a problematic intermediate state if it is shared by multiple threads.
+
+\subsection{\texttt{H5Sselect\_project\_intersection()}}
+\label{apdx:h5s_func_h5sselect_project_intersection}
+
+\begin{minted}{C}
+hid_t
+H5Sselect_project_intersection(hid_t src_space_id, hid_t dst_space_id,
+                               hid_t src_intersect_space_id);
+\end{minted}
+
+Computes the intersection between the selections within two dataspace objects and then projects
+that intersection into a third dataspace object, then returns an ID of the newly-created dataspace
+object. This function is primarily a helper function for VOL connector authors implementing chunked
+or virtual datasets.
+
+\textbf{Concurrency notes:} Unexpected results could occur if any of the provided dataspaces are
+concurrently modified while the selection projection operation is taking place. Further, this function
+has, at minimum, the issues described in \ref{h5s_state_sharing} and \ref{h5s_op_gen}. This function
+also uses the internal versions of several of the other functions listed in this appendix and likely
+inherits any concurrency issues specific to them as well.
+
+\subsection{\texttt{H5Sselect\_shape\_same()}}
+\label{apdx:h5s_func_h5sselect_shape_same}
+
+\begin{minted}{C}
+htri_t
+H5Sselect_shape_same(hid_t space1_id, hid_t space2_id);
+\end{minted}
+
+Returns whether or not the selections within two dataspace objects are the same shape as each other.
+
+\textbf{Concurrency notes:} Unexpected results could occur if either of the source dataspaces are
+concurrently modified while the comparisons between the two selections are being made.
+
+For hyperslab selections, this function can also encounter the issue described in section
+\ref{h5s_op_gen}.
+
+\subsection{\texttt{H5Sselect\_valid()}}
+\label{apdx:h5s_func_h5sselect_valid}
+
+\begin{minted}{C}
+htri_t
+H5Sselect_valid(hid_t spaceid);
+\end{minted}
+
+Returns whether or not the current selection in a dataspace object is valid, given its current extent.
+
+\textbf{Concurrency notes:} Unexpected results could occur if the source dataspace is concurrently
+modified while the validity of its selection is being determined.
+
+\subsection{\texttt{H5Sset\_extent\_none()}}
+\label{apdx:h5s_func_h5sset_extent_none}
+
+\begin{minted}{C}
+herr_t
+H5Sset_extent_none(hid_t space_id);
+\end{minted}
+
+Changes the extent of a dataspace object to a null extent type.
+
+\textbf{Concurrency notes:} Unexpected results could occur if the dataspace is concurrently
+modified while the extent in the dataspace is being updated. Further, this function releases
+the previous extent in the dataspace before updating to a null extent, which could cause the
+dataspace to be in a problematic intermediate state if it is shared by multiple threads.
+
+\subsection{\texttt{H5Sset\_extent\_simple()}}
+\label{apdx:h5s_func_h5sset_extent_simple}
+
+\begin{minted}{C}
+herr_t
+H5Sset_extent_simple(hid_t space_id, int rank, const hsize_t dims[],
+                     const hsize_t max[]);
+\end{minted}
+
+Changes the extent of a dataspace object to a simple extent.
+
+\textbf{Concurrency notes:} Unexpected results could occur if the dataspace is concurrently
+modified while the extent in the dataspace is being updated. Further, this function releases
+the previous extent in the dataspace before updating to a simple extent, which could cause the
+dataspace to be in a problematic intermediate state if it is shared by multiple threads.
+
+\end{document}

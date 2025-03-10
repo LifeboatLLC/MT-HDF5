@@ -1,0 +1,247 @@
+\documentclass[../HDF5_RFC.tex]{subfiles}
+ 
+\begin{document}
+
+\section{Issues with concurrency in the H5S interface}
+\label{h5s_concurrency}
+
+The following sections detail the general concurrency issues observed in HDF5's H5S
+interface. Concurrency issues specific to a particular public API function are listed in
+Appendix \ref{apdx:h5s_functions}. Concurrency issues specific to a particular internal
+H5S function are listed in Appendix \ref{apdx:h5s_int_functions}. Concurrency issues
+specific to a particular data structure in the H5S interface are listed in Appendix
+\ref{apdx:h5s_data_structures}.
+
+Note that requiring HDF5 dataspace objects to be thread-local provides a solution to
+nearly all of the concurrency issues covered in the following sections. However, that
+approach has trade-offs, such as: minimal benefit beyond thread-safety, increased memory
+usage and the potential for bad performance if dataspaces need to be copied to each
+thread. Therefore, this document is written with the assumption that some level of
+concurrent access to dataspace objects is desired.
+
+\subsection{Concurrent manipulation of dataspace objects}
+\label{h5s_concurrent_manipulation}
+
+If the chosen approach to concurrency in the H5S interface allows multiple threads to
+act on the same dataspace object, then there are two primary concerns around concurrent
+manipulation of dataspace objects. One concern is determining how to handle modifications
+to a dataspace object while that dataspace is being used by another thread for a read-like
+operation. Another concern is determining how to handle the ordering of operations when
+multiple threads wish to perform modifications to the same dataspace object concurrently.
+
+\subsubsection{Concurrent read-write operations on shared dataspace object}
+\label{h5s_concurrent_readwrite}
+
+When a dataspace object is being accessed concurrently, there is currently the potential for
+the dataspace object's extent or selection to change while the dataspace is being used by
+another thread. For a first estimation, this use case doesn't appear as though it would
+be that interesting, so a more heavy-handed solution, such as a reader-writer lock, may be
+acceptable for controlling concurrent access to these components of a dataspace. However,
+other solutions should be explored here.
+
+One issue with allowing this behavior is that certain combinations of manipulations may
+be fundamentally incompatible with each other when concurrency is involved and these
+cases may be too numerous to enumerate. For example, consider this sequence of operations:
+
+\begin{enumerate}
+    \item Thread 1 calls \nameref{apdx:h5s_func_h5sget_select_type} to determine what type
+          of selection is set on a dataspace object and is returned the value
+          \texttt{H5S\_SEL\_POINTS}, signifying that a point selection is set on the dataspace.
+    \item Thread 1 is preempted and Thread 2 calls \nameref{apdx:h5s_func_h5sselect_hyperslab},
+          changing the selection in the dataspace object from a point selection to a hyperslab
+          selection.
+    \item Thread 2 is preempted and Thread 1 calls \nameref{apdx:h5s_func_h5sget_select_elem_npoints}
+          to retrieve the number of points selected in the dataspace object, but receives
+          an error due to the selection in the dataspace object not being a point selection
+\end{enumerate}
+
+Without a re-design of some H5S API routines to perform various combinations of H5S operations
+atomically, it appears that either these situations will have to be documented as invalid to
+perform concurrently or some user-level coordination ability may be needed.
+
+\subsubsection{Concurrent write modifications to shared dataspace object}
+\label{h5s_concurrent_write}
+
+When a dataspace object is being modified concurrently, there is currently the potential
+for conflicting accesses to result in an indeterminate extent or selection for the dataspace,
+depending on the manipulation being performed.
+
+For the selection portion of a dataspace object, there are essentially two cases to be dealt
+with. The first case is multiple threads attempting to set different types of selections on
+a dataspace object. Initial thoughts suggest that this is an unreasonable use case and should
+be prevented or documented against. The second case is multiple threads attempting to set or
+refine the same type of selection on a dataspace object with their own selection parameters.
+In this case, it seems that some order of operations may need to be imposed to retain a
+coherent view of the selection. Further, some coordination between threads will likely be
+needed to ensure that all modifications on the dataspace selection have been performed before
+that dataspace is used for a following data operation. Similar to what was considered for
+HDF5's H5P interface, it may make sense to have a "finalize" type of operation for this case.
+Note that this second case results in every thread having the same selection in the dataspace,
+so the data operations performed by threads will be similar. Therefore, this may primarily be
+useful as a way of parallelizing the formation of the overall selection in the dataspace.
+
+Though it is estimated that this will not be a very common use case, concurrent modifications
+to a dataspace's extent presents a dangerous situation to be protected against. If a dataspace's
+extent changes between threads, this presents the opportunity for buffer overflows if the
+dataspace cannot be both changed \textbf{and} used in an atomic manner together before another
+thread "takes control" of the dataspace. Note that this is assuming that the dataspace object
+is to be used in separate data operations on each thread. If the dataspace is only to be
+eventually used for a single data operation on one or multiple threads simultaneously, then
+initial thoughts suggest that modifications to the dataspace's extent by any thread other than
+the "last" are effectively useless.
+
+\subsection{Sharing of internal selection information between dataspace objects}
+\label{h5s_state_sharing}
+
+When making an internal copy of a dataspace object with \texttt{H5S\_copy()}, the caller
+must pass \texttt{true} or \texttt{false} for its boolean parameter \texttt{share\_selection}.
+If specified as \texttt{true}, this signifies to the function that the selection in the
+source dataspace being copied can be directly shared with the destination dataspace. This
+flag is utilized by hyperslab and point selections and, to the best of knowledge at the time of
+writing, this is simply an optimization that allows skipping of a potentially very expensive
+copying operation. The \texttt{H5S\_copy()} function mentions that the only time \texttt{true}
+should be passed for this parameter is in the case where the selection in the new dataspace
+will immediately be changed to a new selection after copying the source dataspace. However,
+investigation shows that there are some places in the library's code where this may not always
+happen as intended.
+
+For point selections, the information that is shared is the entire structure containing
+information about the selected points in the dataspace (see \ref{apdx:h5s_struct_h5s_pnt_list_t}).
+For hyperslab selections, the information that is shared is the span tree information for
+the hyperslab, which is used by the library when the selection in the hyperslab is irregular.
+However, the span tree information may also be used by the library in certain cases for
+regular hyperslabs. The structure for the span tree information also contains a reference
+count specifying how many shared references there are to the structure, which would need to
+be protected from concurrent modification if the span tree information is allowed to be shared
+among multiple threads. See \ref{apdx:h5s_struct_h5s_hyper_span_info_t} for the structure
+that is shared for hyperslab selections.
+
+While the effects of selection information being shared between multiple threads is not yet
+fully understood, attention is brought to this situation as it results in shared state between
+multiple threads. This could cause operations on distinct dataspace IDs in different threads
+to update both of the underlying dataspace objects and result in unintended behavior. From the
+perspective of the HDF5 public API, most of the methods for obtaining a new dataspace ID from
+copying an existing dataspace all use \texttt{H5S\_copy()} while providing \texttt{false} for
+the parameter. However, there are a few exceptions to this case listed below among the functions
+which return an ID from a copied dataspace object.
+
+\begin{itemize}
+    \item \texttt{H5Aget\_space()}
+    \item \texttt{H5Dget\_space()}
+    \item \texttt{H5Dget\_space\_async()}
+    \item \texttt{H5Pget\_virtual\_vspace()}
+    \item \texttt{H5Pget\_virtual\_srcspace()}
+    \item \texttt{H5Scopy()}
+    \item \textbf{\nameref{apdx:h5s_func_h5scombine_select}}
+    \item \textbf{\nameref{apdx:h5s_func_h5scombine_hyperslab}}
+    \item \textbf{\nameref{apdx:h5s_func_h5ssel_iter_create}}
+\end{itemize}
+
+For the \nameref{apdx:h5s_func_h5scombine_select} and \nameref{apdx:h5s_func_h5scombine_hyperslab}
+functions, there appear to be some cases where the new dataspace object returned could end up
+sharing hyperslab span lists with the original dataspace objects passed in as parameters. This
+generally appears to be the case when adding to an existing dataspace object using selection
+operations other  than the \texttt{H5S\_SELECT\_SET} operation. However, the
+\nameref{apdx:h5s_func_h5scombine_select} and \nameref{apdx:h5s_func_h5scombine_hyperslab}
+functions are generally less used, as the same effect can usually be achieved with repeated
+calls to \nameref{apdx:h5s_func_h5sselect_hyperslab} to refine an existing hyperslab selection.
+Therefore, consideration should be given toward how much effort should go into addressing this
+issue. An easy solution may be to simply force selections in the dataspaces to not be shared
+by making an extra copy of the dataspace to be returned with \texttt{H5S\_copy(..., false, ...)}.
+
+\nameref{apdx:h5s_func_h5ssel_iter_create} is a more interesting case, as dataspace selection
+iterator objects are useful for VOL connectors to process dataspace selections during I/O. See
+section \ref{h5s_sel_iter} for information on dataspace selection iterator objects.
+
+From the perspective of internal HDF5 code, there are several other opportunities for
+selection information to be shared among dataspaces. This information is covered in the
+descriptions for internal functions in Appendix \ref{apdx:h5s_int_functions}.
+
+\subsection{Dataspace selection iterators}
+\label{h5s_sel_iter}
+
+In order to get a list of the offset / length pairs that make up a selection within a
+dataspace object, an HDF5 application may first create a dataspace selection iterator object
+with \nameref{apdx:h5s_func_h5ssel_iter_create}. Then, the application can repeatedly call
+\nameref{apdx:h5s_func_h5ssel_iter_get_seq_list} on that iterator object to retrieve offset /
+length pairs until all pairs have been retrieved, at which point the application should
+release the iterator object with \nameref{apdx:h5s_func_h5ssel_iter_close}. This mechanism
+is often used by VOL connectors to process a dataspace selection during I/O. The \texttt{flags}
+parameter to this function can be specified as \texttt{H5S\_SEL\_ITER\_SHARE\_WITH\_DATASPACE},
+in which case the selection information from the source dataspace is shared with the selection
+iterator object, as described in section \ref{h5s_state_sharing}. Sharing of this internal
+state could make concurrent use of iterator objects (even distinct iterator objects) by 
+multiple threads problematic. While the solution to this could be to simply require that
+each thread create its own dataspace selection iterator while not specifying the
+\texttt{H5S\_SEL\_ITER\_SHARE\_WITH\_DATASPACE} flag, this could be very expensive for
+point and hyperslab selections due to the information that has to be copied for each
+thread.
+
+Refer to \ref{apdx:h5s_struct_h5s_sel_iter_t} for more information on the internal state
+that is problematic for concurrent use of selection iterator objects.
+
+\subsection{Usage of free lists in the H5S interface}
+\label{h5s_free_lists}
+
+As the free list (H5FL) interface is not yet safe for multi-threaded environments, several
+memory management calls in the H5S interface will need to be converted to regular standard
+C memory management calls until the H5FL interface can be made thread-safe. At the time of
+writing, H5FL operations are used in the following files: \textbf{H5S.c}, \textbf{H5Shyper.c},
+\textbf{H5Smpio.c}, \textbf{H5Spoint.c} and \textbf{H5Sselect.c}.
+
+\subsection{Concurrency issues specific to 'All' selections}
+\label{h5s_concurrency_all}
+
+No particular concurrency issues specific to 'All' selections were noted.
+
+\subsection{Concurrency issues specific to 'None' selections}
+\label{h5s_concurrency_none}
+
+No particular concurrency issues specific to 'None' selections were noted. 
+
+\subsection{Concurrency issues specific to hyperslab selections}
+\label{h5s_concurrency_hyper}
+
+\subsubsection{Concurrent updates of hyperslab selection span 'op generations count'}
+\label{h5s_op_gen}
+
+The hyperslab selection implementation file, H5Shyper.c, contains a global variable
+\texttt{H5S\_hyper\_op\_gen\_g} which begins at 1 and is incremented whenever a hyperslab
+operation needs to retrieve an 'operation generation value'. While not documented, the
+apparent intent of this value is to serve as an optimization flag that allows code to
+skip repeated operations on a hyperslab selection's span tree. The relevant code generally
+does this by performing an operation once, setting the 'operation generation value' in 
+a field in the span tree's information, then comparing the span tree's 'operation generation
+value' against a value passed as a parameter in the next hyperslab operation that occurs.
+If the value passed in is the same value as was set in the field in the span tree's
+information, the code for the operation can assume that operation was already performed
+before and can skip some unnecessary work. This might involve reusing a cached value for
+the number of blocks calculated in a span tree, avoiding making an adjustment to the offset
+for a span tree when it was already done previously, etc.
+
+Since multiple threads could be performing operations in H5Shyper.c code concurrently, this
+value must be protected either through locking or by making it atomic. However, if multiple
+threads \textbf{are} performing operations in H5Shyper.c code concurrently, there's still
+the possibility that concurrent updates to this value could eliminate any optimizations
+since the value may be changed by another thread during a thread's execution. Further
+investigation is needed, but this optimization appears to rely on serial execution of
+hyperslab operations.
+
+\subsection{Concurrency issues specific to point selections}
+\label{h5s_concurrency_point}
+
+The main data structure for point selections, \texttt{H5S\_pnt\_list\_t}
+(\ref{apdx:h5s_struct_h5s_pnt_list_t}), contains two fields, \texttt{last\_idx} (\texttt{hsize\_t})
+and \texttt{last\_idx\_pnt} (\texttt{struct H5S\_pnt\_node\_t *}). These fields keep track of the
+index value of, as well as a pointer to the structure for, the next point in the point list that
+would have been visited if iteration over the list had continued. These fields are used for
+optimizing calls to the \nameref{apdx:h5s_func_h5sget_select_elem_pointlist} function so that if
+one were to, for example, retrieve subsets of the selected points in a dataspace in a loop,
+iteration over the list could continue at the saved location rather than having to iterate through
+list elements until arriving at the starting location each time. This optimization was presumably
+added due to the implementation of point selections currently using a linked list. If multiple
+threads were to call \nameref{apdx:h5s_func_h5sget_select_elem_pointlist} on the same dataspace
+object, or on dataspace objects that have shared selection information, these cached values would
+likely not be coherent.
+
+\end{document}
