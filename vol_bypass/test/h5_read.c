@@ -214,7 +214,7 @@ void* read_partial_dset_with_hdf5(void* arg)
 
     H5Sclose(memspace);
     H5Sclose(dataspace);
-
+    free(data);
     return NULL;
 }
 
@@ -621,6 +621,8 @@ void* read_multiple_files_with_hdf5_multi(void* arg)
 
     if (data)
         free(data);
+    if (rbufs)
+        free(rbufs);
     if (file)
         free(file);
     if (dataset)
