@@ -1692,7 +1692,7 @@ get_dset_name_helper(H5VL_bypass_t *dset, char *name, void **req)
     args.args.get_name.buf      = name;
     args.args.get_name.name_len = &dset_name_len;
 
-    if (H5VL_bypass_object_get(dset, &loc_params, &args, H5P_DATASET_XFER_DEFAULT, req) < 0) {
+    if (H5VLobject_get(dset->under_object, &loc_params, dset->under_vol_id, &args, H5P_DATASET_XFER_DEFAULT, req) < 0) {
         printf("In %s of %s at line %d: H5VL_bypass_object_get failed\n", __func__, __FILE__, __LINE__);
         ret_value = -1;
         goto done;
