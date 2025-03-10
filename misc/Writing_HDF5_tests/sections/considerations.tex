@@ -54,14 +54,15 @@ it may also \textbf{need} to be changed, as the default value is a 20 minute tim
 noted further on, it may be desirable to allow 30 minutes for a test} (and sometimes is, for certain HPC machines), allowing misbehaving parallel/multi-threaded tests to consume more testing time unnecessarily. Further, Autotools (which doesn't implement this functionality) will need to continue being supported for
 the foreseeable future. The value of this variable can be retrieved by calling either
 \nameref{apdx:testframe_gettestexpress} (for 'testframe' tests) or \nameref{apdx:h5test_h5gettestexpress}
-(for 'h5test' tests).
+(for 'h5test' tests). For 'testframe' tests, the value of this variable can be changed at runtime
+by passing one of the below values to the \texttt{-testexpress} command-line option.
 
 The meanings for the different values of the \texttt{TestExpress} variable are as follows:
 
 \begin{itemize}
 
     \item 0 - Tests should take as long as necessary
-    \item 1 - Tests should take no more than 30 minutes
+    \item 1 - Tests should take no more than 20 minutes
     \item 2 - Tests should take no more than 10 minutes
     \item 3 (or higher) - Tests should take no more than 1 minute (default in HDF5)
 
@@ -77,7 +78,8 @@ sub-tests. This implies that test programs should:
           program exits in a timely fashion according to the value of \texttt{TextExpress}. Note that
           HDF5's testing framework has the \nameref{apdx:testframe_testalarmon} / \nameref{apdx:testframe_testalarmoff} functions, but these currently use a compile-time value
           for the timer that can only be overridden by an environment variable
-          (\texttt{HDF5\_ALARM\_SECONDS}). They also depend on the availability of the \texttt{alarm(2)} function, which shouldn't generally be an issue at this point but may be problematic for MinGW builds as commented on in \texttt{testframe.c}.
+          (\texttt{HDF5\_ALARM\_SECONDS}). They also depend on the availability of the \texttt{alarm(2)} function, which shouldn't generally be an issue at this point but may be problematic for MinGW builds as commented on in \texttt{testframe.c}. Some more discussion on portable timers for
+          testing is discussed in section \ref{sec:testing_timeouts}.
     \item Keep track of the number of sub-tests that will be performed and divide the total allowed
           runtime among sub-tests to ensure that they all run to some degree of completion, even for more
           restrictive values of \texttt{TestExpress}. Note that some margin may need to be included in
@@ -92,6 +94,10 @@ sub-tests. This implies that test programs should:
           \texttt{TestExpress} runtime limit as the number of processes/threads involved increases
 
 \end{itemize}
+
+While some of the above items may not be applicable to tests in general, authors of parallel and
+multi-threaded test programs should be especially mindful of how long their test program runs and
+should be aware of the potential for hangs during execution of their test program.
 
 \subsection{Be VOL connector and VFD aware}
 

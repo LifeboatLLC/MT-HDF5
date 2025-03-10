@@ -8,7 +8,16 @@
 \subsection{Error checking and handling in serial tests}
 
 Serial HDF5 tests can make use of the \texttt{TESTING()}, \texttt{H5\_FAILED()}, \texttt{TEST\_ERROR()},
-etc. macros for error handling if they include the \texttt{h5test.h} header. Tests that are part of the \texttt{testhdf5} test program should avoid this and instead only use the macros from the
-\texttt{testhdf5.h} header to prevent problems that can occur when mixing and matching the sets of macros.
+etc. macros for error handling if they include the \texttt{h5test.h} header from the 'h5test' framework.
+For compatibility reasons, the 'testframe' framework has a similarly-named set of macros
+(e.g., \texttt{TESTFRAME\_TEST\_ERROR()}) in the \texttt{testframe.h} header to help when porting an
+'h5test' test program over to the 'testframe' framework. Note that 'testframe' tests rely on the testing
+framework for certain portions of output, so specific macros like \texttt{H5\_FAILED()} do not have a
+counterpart in the 'testframe' framework. Generally speaking, tests that integrate with the 'testframe'
+framework should only use the set of macros in \texttt{testframe.h}, if need be, while other tests should
+use the set of macros in \texttt{h5test.h}, if need be. Mixing and matching the two should be avoided.
+Further, any tests that are part of the \texttt{testhdf5} test program should avoid both sets of macros
+and instead only use the macros from the \texttt{testhdf5.h} header to prevent problems that can occur
+when mixing and matching the sets of macros.
 
 \end{document}

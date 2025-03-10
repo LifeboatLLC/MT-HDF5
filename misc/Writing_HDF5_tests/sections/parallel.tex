@@ -26,11 +26,15 @@ thought towards problem size growth rate.
 Parallel HDF5 tests often only make use of the \texttt{VRFY()} macro from the \texttt{testpar.h} header
 for error handling. Parallel tests can make use of the \texttt{TESTING()}, \texttt{H5\_FAILED()},
 \texttt{TEST\_ERROR()}, etc. macros if they include the \texttt{h5test.h} header, but these macros
-don't account for multiple processes and also use problematic \texttt{goto}-style error handling.
-Therefore, these macros are usually only used from a single process in parallel tests, if at all.
+don't account for output from multiple processes and also use problematic \texttt{goto}-style error
+handling, which can lead to hangs in parallel tests. Therefore, these macros are usually only used
+from a single process in parallel tests, if at all. Parallel tests that are properly integrated with
+the 'testframe' framework can make use of the macros in the \texttt{testframe.h} header, as these
+deal with output from multiple processes. However, some of them also still use problematic
+\texttt{goto}-style error handling, so a test author must take caution with them.
 
 HDF5 tests are often written to use \texttt{goto}-style error handling, where the test skips to a
-labelled section to perform cleanup when a part of the test fails. In a parallel HDF5 test, this
+labeled section to perform cleanup when a part of the test fails. In a parallel HDF5 test, this
 can result in a hang if the part of the test that failed was a collective MPI operation, or if any
 collective MPI operation occurs in any following part of the test, and the failure occurred on only
 one MPI process or a subset of the MPI processes involved. When a failure occurs in a parallel HDF5

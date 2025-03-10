@@ -10,7 +10,8 @@
 
 The following sections give an overview of HDF5's 'h5test' testing framework which is contained
 within the \texttt{test/h5test.h} and \texttt{test/h5test.c} files. Details are only given for the
-types, functions, etc. that appear in the relevant header files.
+types, functions, etc. that appear in the relevant header files, while implementation details
+in the relevant \texttt{.c} files are not generally given.
 
 \subsection{Macros}
 
@@ -73,48 +74,6 @@ the global variable \texttt{n\_tests\_failed\_g} is incremented.
 Macro to print the file name, line number and function name where usage of the macro occurs.
 
 \begin{minted}{C}
-#define TESTING_MULTIPART(WHAT)
-#define TESTING_2(WHAT)
-#define BEGIN_MULTIPART
-#define END_MULTIPART
-#define PART_BEGIN(part_name)
-#define PART_END(part_name)
-#define PART_ERROR(part_name)
-#define PART_TEST_ERROR(part_name)
-#define PART_EMPTY(part_name)
-\end{minted}
-
-Counterpart to some of the above macros for tests which contain multiple sub-tests.
-
-\texttt{TESTING\_MULTIPART(WHAT)} prints out the word "Testing" followed by the string specified in \texttt{WHAT} and a newline.
-
-The \texttt{TESTING\_2()} macro is used to print out a slightly-indented "Testing" for each sub-test
-that is run. As a side effect, the global variable \texttt{n\_tests\_run\_g} is incremented. This macro
-does not print a newline and should therefore always be followed by a usage of the \texttt{PASSED()} or
-\texttt{SKIPPED()} macros on success, or the \texttt{PART\_ERROR()} or \texttt{PART\_TEST\_ERROR()}
-macros on failure.
-
-\texttt{BEGIN\_MULTIPART} and \texttt{END\_MULTIPART} should surround all the sub-tests for a multi-part
-test. These macros keep track of whether any of the sub-tests failed and will use \texttt{goto} to skip
-to the "error" label statement when a failure does occur.
-
-\texttt{PART\_BEGIN(part\_name)} and \texttt{PART\_END(part\_name)} should surround each individual
-sub-test in a multi-part test. These macros setup a label statement based on the name specified in
-\texttt{part\_name}. When a failure occurs in a sub-test, the \texttt{PART\_ERROR(part\_name)} or
-\texttt{PART\_TEST\_ERROR(part\_name)} macro will use \texttt{goto} to skip to the label statement
-that was setup, effectively moving on to the next sub-test instead of skipping the rest of the test.
-
-\texttt{PART\_ERROR(part\_name)} uses \texttt{goto} to skip to the label statement with the name
-specified in the \texttt{part\_name} parameter. As a side effect, the global variable \texttt{n\_tests\_failed\_g}
-is incremented.
-
-\texttt{PART\_TEST\_ERROR(part\_name)} prints out "*FAILED*", as well as the file name, line number and function name where usage of the macro occurred and then uses \texttt{goto} to skip to the label statement with the name specified in \texttt{part\_name}. As a side effect, the global variable
-\texttt{n\_tests\_failed\_g} is incremented.
-
-\texttt{PART\_EMPTY(part\_name)} uses \texttt{goto} to skip to the label statement with the name specified
-in the \texttt{part\_name} parameter. This macro is mostly used for skipping an unimplemented sub-test in a multi-part test.
-
-\begin{minted}{C}
 #define H5_FILEACCESS_VFD    0x01
 #define H5_FILEACCESS_LIBVER 0x02
 \end{minted}
@@ -136,6 +95,15 @@ Utility macro to fill a 2-dimensional array \texttt{BUF} with increasing values 
 \texttt{BUF} should point to a \texttt{struct \{ TYPE arr[...][...]; \}}.
 
 \begin{minted}{C}
+#define H5_TEST_EXPRESS_EXHAUSTIVE 0
+#define H5_TEST_EXPRESS_FULL       1
+#define H5_TEST_EXPRESS_QUICK      2
+#define H5_TEST_EXPRESS_SMOKE_TEST 3
+\end{minted}
+
+Macros for the different TestExpress level settings.
+
+\begin{minted}{C}
 #define h5_free_const(mem) free((void *)(uintptr_t)mem)
 \end{minted}
 
@@ -151,16 +119,6 @@ None defined
 None defined
 
 \subsection{Global variables}
-
-\begin{minted}{C}
-size_t n_tests_run_g;
-size_t n_tests_passed_g;
-size_t n_tests_failed_g;
-size_t n_tests_skipped_g;
-\end{minted}
-
-Global variables for tracking the number of tests run and how many of those tests passed, had 
-failures or were skipped. Used for statistics and information printed at the end of test programs.
 
 \begin{minted}{C}
 uint64_t vol_cap_flags_g;
