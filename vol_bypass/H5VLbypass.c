@@ -3435,6 +3435,8 @@ error:
             H5VL_bypass_free_obj(file);
         if (under_fapl_id > 0)
             H5Pclose(under_fapl_id);
+        if (info)
+            H5VLfree_connector_info(info->under_vol_id, info);
     } H5E_END_TRY;
 
     return NULL;
