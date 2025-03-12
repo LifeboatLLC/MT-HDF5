@@ -2346,6 +2346,12 @@ process_chunk_cb(const hsize_t *chunk_offsets, unsigned filter_mask,
 
     assert(cb_info);
 
+    if (H5Sset_extent_simple(cb_info->file_space_copy, cb_info->dset_dim_rank, cb_info->dset_dims, NULL) < 0) {
+        fprintf(stderr, "unable to set the extent of the file space\n");
+        ret_value = H5_ITER_STOP;
+        goto done;
+    }
+
     /* Reset the file space copy to initial selection/extent */
     // TBD - This may only be necessary if the selection is a hyperslab
     if (H5Sselect_copy(cb_info->file_space_copy, cb_info->file_space) < 0) {
@@ -2364,12 +2370,6 @@ process_chunk_cb(const hsize_t *chunk_offsets, unsigned filter_mask,
             ret_value = H5_ITER_STOP;
             goto done;
         }
-    }
-
-    if (H5Sset_extent_simple(cb_info->file_space_copy, cb_info->dset_dim_rank, cb_info->dset_dims, NULL) < 0) {
-        fprintf(stderr, "unable to set the extent of the file space\n");
-        ret_value = H5_ITER_STOP;
-        goto done;
     }
 
     /* Get the intersection between file space selection and this chunk. In other words,
