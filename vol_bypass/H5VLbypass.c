@@ -250,6 +250,9 @@ static herr_t release_dset_info(Bypass_dataset_t *dset);
 /* Release the structures associated with the file object */
 static herr_t release_file_info(Bypass_file_t *file);
 
+/* Release the structures associated with the group object */
+static herr_t release_group_info(Bypass_group_t *group);
+
 /* Retrieve the in-file location of the dataset, if any */
 static herr_t get_dset_location(H5VL_bypass_t *dset_obj, hid_t dxpl_id, void **req, haddr_t *location);
 
@@ -440,8 +443,8 @@ H5VL_bypass_new_obj(void *under_obj, hid_t under_vol_id)
     new_obj->type = H5I_BADID;
 
     if (H5Iinc_ref(new_obj->under_vol_id) < 0) {
-        fprintf(stderr, "failed to increment ref count of underlying vol connector\n");
-        goto error;
+        fprintf(stderr, "unable to increment ref count of underlying VOL object\n");
+        return NULL;
     }
 
     return new_obj;
@@ -473,39 +476,82 @@ H5VL_bypass_free_obj(H5VL_bypass_t *obj)
 {
     hid_t err_id = H5I_INVALID_HID;
     herr_t ret_value = 0;
-
     assert(obj);
 
+    pthread_mutex_lock(&mutex_local);
     err_id = H5Eget_current_stack();
-
-    if (H5Idec_ref(obj->under_vol_id) < 0) {
-        fprintf(stderr, "failed to decrement reference count on underlying VOL connector\n");
-        ret_value = -1;
-        goto done;
-    }
 
     switch(obj->type) {
         case (H5I_DATASET): {
+            if (H5Idec_ref(obj->under_vol_id) < 0) {
+                fprintf(stderr, "failed to decrement reference count on underlying VOL connector\n");
+                ret_value = -1;
+                goto done;
+            }
+
             if (release_dset_info(&obj->u.dataset) < 0) {
                 fprintf(stderr, "failed to release dataset-specific bypass object\n");
                 ret_value = -1;
                 goto done;
             }
 
+            free(obj);
             break;
         }
 
         case (H5I_FILE): {
-            if (release_file_info(&obj->u.file) < 0) {
-                fprintf(stderr, "failed to release file-specific bypass object\n");
+            if (obj->u.file.ref_count <= 0) {
+                fprintf(stderr, "file object has no references\n");
                 ret_value = -1;
                 goto done;
+            }
+
+            obj->u.file.ref_count--;
+
+            /* Only release underlying info once ref count reaches zero */
+            if (obj->u.file.ref_count == 0) {
+                if (H5Idec_ref(obj->under_vol_id) < 0) {
+                    fprintf(stderr, "failed to decrement reference count on underlying VOL connector\n");
+                    ret_value = -1;
+                    goto done;
+                }
+
+                if (release_file_info(&obj->u.file) < 0) {
+                    fprintf(stderr, "failed to release file-specific bypass object\n");
+                    /* Continue on failure in order to release memory*/
+                    ret_value = -1;
+                }
+
+                free(obj);
             }
 
             break;
         }
 
+        case (H5I_GROUP): {
+            if (H5Idec_ref(obj->under_vol_id) < 0) {
+                fprintf(stderr, "failed to decrement reference count on underlying VOL connector\n");
+                ret_value = -1;
+                goto done;
+            }
+
+            if (release_group_info(&obj->u.group) < 0) {
+                fprintf(stderr, "failed to release group-specific bypass object\n");
+                ret_value = -1;
+                goto done;
+            }
+
+            free(obj);
+            break;
+        }
         default: {
+            if (H5Idec_ref(obj->under_vol_id) < 0) {
+                fprintf(stderr, "failed to decrement reference count on underlying VOL connector\n");
+                ret_value = -1;
+                goto done;
+            }
+
+            free(obj);
             break;
         }
     }
@@ -513,7 +559,7 @@ H5VL_bypass_free_obj(H5VL_bypass_t *obj)
     H5Eset_current_stack(err_id);
 
 done:
-    free(obj);
+    pthread_mutex_unlock(&mutex_local);
 
     return ret_value;
 } /* end H5VL_bypass_free_obj() */
@@ -618,8 +664,7 @@ H5VL_bypass_init(hid_t vipl_id)
     pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
     pthread_mutex_init(&mutex_local, &attr);
 
-    pthread_cond_init(&cond_local, NULL);
-    pthread_cond_init(&continue_local, NULL);
+    pthread_cond_init(&cond_queue_not_empty, NULL);
     pthread_cond_init(&cond_read_finished, NULL);
 
     /* Start threads for the thread pool to process the data */
@@ -671,7 +716,9 @@ H5VL_bypass_term(void)
      * loop for pthread_cond_wait in thread pool. */
     all_tasks_enqueued = true;
 
-    pthread_cond_broadcast(&cond_local);
+    pthread_mutex_lock(&mutex_local);
+    pthread_cond_broadcast(&cond_queue_not_empty);
+    pthread_mutex_unlock(&mutex_local);
 
     for (i = 0; i < nthreads_tpool; i++) {
         if (pthread_join(th[i], &thread_ret) != 0)
@@ -683,9 +730,8 @@ H5VL_bypass_term(void)
     }
 
     pthread_mutex_destroy(&mutex_local);
-    pthread_cond_destroy(&cond_local);
+    pthread_cond_destroy(&cond_queue_not_empty);
     pthread_cond_destroy(&cond_read_finished);
-    pthread_cond_destroy(&continue_local);
 
     /* Open the log file and output the following info:
      * - file name
@@ -1531,12 +1577,16 @@ H5VL_bypass_dataset_create(void *obj, const H5VL_loc_params_t *loc_params, const
 {
     H5VL_bypass_t *dset = NULL;
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
+    H5VL_bypass_t *parent_file = NULL;
     void          *under = NULL;
     bool req_created = false;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL DATASET Create\n");
 #endif
+
+    // TBD - Lock around potentially shared file operations 
+    pthread_mutex_lock(&mutex_local);
 
     if ((under = H5VLdataset_create(o->under_object, loc_params, o->under_vol_id, name,
         lcpl_id, type_id, space_id, dcpl_id, dapl_id, dxpl_id, req)) == NULL) {
@@ -1551,10 +1601,20 @@ H5VL_bypass_dataset_create(void *obj, const H5VL_loc_params_t *loc_params, const
 
     dset->type = H5I_DATASET;
 
-    assert(o->type == H5I_FILE);
-    assert(o->u.file.ref_count > 0);
-    o->u.file.ref_count++;
-    dset->u.dataset.file = o;
+    if (o->type == H5I_FILE) {
+        parent_file = o;
+    } else if (o->type == H5I_GROUP) {
+        parent_file = o->u.group.file;
+    } else {
+        fprintf(stderr, "invalid object type\n");
+        goto error;
+    }
+
+    assert(parent_file->type == H5I_FILE);
+    assert(parent_file->u.file.ref_count > 0);
+
+    parent_file->u.file.ref_count++;
+    dset->u.dataset.file = parent_file;
 
     if (dset_open_helper(dset, dxpl_id, req) < 0) {
         fprintf(stderr, "failed to get dataset info\n");
@@ -1566,16 +1626,23 @@ H5VL_bypass_dataset_create(void *obj, const H5VL_loc_params_t *loc_params, const
         *req = H5VL_bypass_new_obj(*req, o->under_vol_id);
         req_created = true;
     }
-    
+
+    // TBD - Lock around potentially shared file operations 
+    pthread_mutex_unlock(&mutex_local);
+
     return (void *)dset;
 
 error:
+
     if (dset) {
         H5VL_bypass_free_obj(dset);
 
         if (req && *req && req_created)
             H5VL_bypass_free_obj(*req);
     }
+
+    // TBD - Lock around potentially shared file operations 
+    pthread_mutex_unlock(&mutex_local);
 
     return NULL;
 } /* end H5VL_bypass_dataset_create() */
@@ -1596,6 +1663,7 @@ H5VL_bypass_dataset_open(void *obj, const H5VL_loc_params_t *loc_params, const c
 {
     H5VL_bypass_t *dset = NULL;
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
+    H5VL_bypass_t *parent_file = NULL;
     void          *under = NULL;
     bool req_created = false;
 
@@ -1603,23 +1671,35 @@ H5VL_bypass_dataset_open(void *obj, const H5VL_loc_params_t *loc_params, const c
     printf("------- BYPASS  VOL DATASET Open\n");
 #endif
 
+    // TBD - Lock around potentially shared file operations 
+    pthread_mutex_lock(&mutex_local);
     
     if ((under = H5VLdataset_open(o->under_object, loc_params, o->under_vol_id, name, dapl_id, dxpl_id, req)) == NULL) {
         fprintf(stderr, "unable to open dataset in underlying connector\n");
         goto error;
     }
 
-    if ((dset = H5VL_bypass_new_obj(under, o->under_vol_id)) < 0) {
+    if ((dset = H5VL_bypass_new_obj(under, o->under_vol_id)) == NULL) {
         fprintf(stderr, "failed to create bypass object\n");
         goto error;
     }
 
     dset->type = H5I_DATASET;
 
-    assert(o->type == H5I_FILE);
-    assert(o->u.file.ref_count > 0);
-    o->u.file.ref_count++;
-    dset->u.dataset.file = o;
+    if (o->type == H5I_FILE) {
+        parent_file = o;
+    } else if (o->type == H5I_GROUP) {
+        parent_file = o->u.group.file;
+    } else {
+        fprintf(stderr, "invalid object type\n");
+        goto error;
+    }
+
+    assert(parent_file->type == H5I_FILE);
+    assert(parent_file->u.file.ref_count > 0);
+
+    parent_file->u.file.ref_count++;
+    dset->u.dataset.file = parent_file;
 
     if (dset_open_helper(dset, dxpl_id, req) < 0) {
         fprintf(stderr, "failed to get dataset info\n");
@@ -1632,9 +1712,15 @@ H5VL_bypass_dataset_open(void *obj, const H5VL_loc_params_t *loc_params, const c
         req_created = true;
     }
 
+    // TBD - Lock around potentially shared file operations 
+    pthread_mutex_unlock(&mutex_local);
+
     return (void *)dset;
 
 error:
+    // TBD - Lock around potentially shared file operations 
+    pthread_mutex_unlock(&mutex_local);
+
     if (under) {
         H5E_BEGIN_TRY {
             H5VLdataset_close(under, o->under_vol_id, dxpl_id, req);
@@ -1875,6 +1961,7 @@ start_thread_for_pool(void *args)
     H5VL_bypass_t **files_local = NULL;
     int      local_count = 0;
     int      i;
+    bool     locked = false;
 
     // fprintf(stderr, "In start_thread_for_pool: %d\n", thread_id);
 
@@ -1909,9 +1996,11 @@ start_thread_for_pool(void *args)
             goto done;
         }
 
+        locked = true;
+
         /* If no tasks are available to work on, then wait. */
         while (tasks_in_queue == 0 && !stop_tpool) {
-            pthread_cond_wait(&cond_local, &mutex_local);
+            pthread_cond_wait(&cond_queue_not_empty, &mutex_local);
         }
 
         // fprintf(stderr, "after wait\n");
@@ -1923,6 +2012,10 @@ start_thread_for_pool(void *args)
         local_count = MIN(tasks_in_queue, nsteps_tpool);
 
         for (i = 0; i < local_count; i++) {;
+            assert(md_for_thread.files[info_pointer] != NULL);
+
+            /* Ref count of file was increased at queue insertion time,
+             * so no need to increase it here */
             files_local[i]        = md_for_thread.files[info_pointer];
             addrs_local[i]        = md_for_thread.addrs[info_pointer];
             sizes_local[i]        = md_for_thread.sizes[info_pointer];
@@ -1930,9 +2023,6 @@ start_thread_for_pool(void *args)
 
             info_pointer++;
             tasks_in_queue--;
-
-            files_local[i]->u.file.num_reads++;
-            files_local[i]->u.file.read_started = true;
         }
 
         // fprintf(stderr, "thread %d: 1. local_count = %d, tasks_in_queue = %d,
@@ -1940,12 +2030,11 @@ start_thread_for_pool(void *args)
         // %d\n", thread_id, local_count, tasks_in_queue, info_pointer - 1,
         // addrs_local[0], sizes_local[0], vec_bufs_local[0],
         // md_for_thread.vec_arr_nused);
-
         if (pthread_mutex_unlock(&mutex_local) != 0) {
+            locked = false;
             fprintf(stderr, "failed to unlock mutex\n");
-            ret_value = (void*) -1;
-            goto done;
         }
+        locked = false;
 
         // fprintf(stderr, "before reading data\n");
         for (i = 0; i < local_count; i++) {
@@ -1967,34 +2056,33 @@ start_thread_for_pool(void *args)
                 ret_value = (void*) -1;
                 goto done;
             }
-
-            files_local[i]->u.file.num_reads--;
-
-            /* When there is no task left in the queue and all the reads finish for
-             * the current file, signal the main process that this file can be closed.
-             */
-            if ((tasks_in_queue == 0) && all_tasks_enqueued && 
-                files_local[i]->u.file.num_reads == 0) {
-                // fprintf(stderr, "thread %d: file name = %s, signal close_ready\n", thread_id,
-                // files_local[i]->name);
-                /* There are currently no reads active on this file - it may be closed */
-                files_local[i]->u.file.read_started = false;
-                pthread_cond_signal(&(files_local[i]->u.file.close_ready));
-            }
-
+            locked = true;
             tasks_unfinished--;
             pthread_cond_signal(&cond_read_finished);
+
+            /* Release this task's reference to the file */
+            if (H5VL_bypass_free_obj(files_local[i]) < 0) {
+                fprintf(stderr, "failed to decrement ref count of file\n");
+                ret_value = (void*) -1;
+                goto done;
+            }
+
 
             if (pthread_mutex_unlock(&mutex_local) != 0) {
                 fprintf(stderr, "failed to unlock mutex\n");
                 ret_value = (void*) -1;
                 goto done;
             }
+            locked = false;
         }
 
     }
 
 done:
+    if (locked)
+        pthread_mutex_unlock(&mutex_local);
+    locked = false;
+
     if (ret_value == (void*) -1) {
         fprintf(stderr, "thread idx %d in pool failed\n", thread_id);
     }
@@ -2020,6 +2108,7 @@ process_vectors(void *rbuf, sel_info_t *selection_info)
     size_t     io_len;
     int        local_count_for_signal = 0;
     herr_t     ret_value = 0;
+    bool       locked = false;
 
     /* Contiguous is treated as a single chunk */
     if ((hss_nelmts = H5Sget_select_npoints(selection_info->file_space_id)) < 0) {
@@ -2123,6 +2212,7 @@ process_vectors(void *rbuf, sel_info_t *selection_info)
             ret_value = -1;
             goto done;
         }
+        locked = true;
 
         if (md_for_thread.vec_arr_nused == md_for_thread.vec_arr_nalloc) {
             /* Check if we're using the static arrays */
@@ -2218,6 +2308,9 @@ process_vectors(void *rbuf, sel_info_t *selection_info)
         }
 
         /* Add this segment to vector read list */
+        assert(selection_info->file);
+            
+        selection_info->file->u.file.ref_count++;
         md_for_thread.files[md_for_thread.vec_arr_nused] = selection_info->file;
         md_for_thread.addrs[md_for_thread.vec_arr_nused] =
             selection_info->chunk_addr + file_off[file_seq_i]; /* Add the base offset of the dataset to the
@@ -2239,19 +2332,19 @@ process_vectors(void *rbuf, sel_info_t *selection_info)
 
         local_count_for_signal++;
 
+        /* Let the queue accumulate nsteps_tpool entries then signal the thread pool
+         * to read them */
+        if (local_count_for_signal >= nsteps_tpool) {
+            pthread_cond_broadcast(&cond_queue_not_empty);
+            local_count_for_signal = 0;
+        }
+
         if (pthread_mutex_unlock(&mutex_local) != 0) {
             fprintf(stderr, "failed to unlock local mutex\n");
             ret_value = -1;
             goto done;
         }
-
-        /* Let the queue accumulate nsteps_tpool entries then signal the thread pool
-         * to read them */
-        if (local_count_for_signal >= nsteps_tpool) {
-            pthread_cond_broadcast(&cond_local);
-            local_count_for_signal = 0;
-        }
-
+        locked = false;
         /* Save the info for the C log file */
         {
             /* Enlarge the size of the info for C and Re-allocate the memory if
@@ -2302,8 +2395,11 @@ process_vectors(void *rbuf, sel_info_t *selection_info)
 
     /* If there is any leftover entries in the queue, signal the thread pool to
      * read them */
-    if (local_count_for_signal > 0 && local_count_for_signal < nsteps_tpool)
-        pthread_cond_broadcast(&cond_local);
+    pthread_mutex_lock(&mutex_local);
+    if (local_count_for_signal > 0 && local_count_for_signal < nsteps_tpool) {
+        pthread_cond_broadcast(&cond_queue_not_empty);
+    }
+    pthread_mutex_unlock(&mutex_local);
 
     if (H5Ssel_iter_close(file_iter_id) < 0) {
         fprintf(stderr, "failed to close file sel iterator\n");
@@ -2318,6 +2414,9 @@ process_vectors(void *rbuf, sel_info_t *selection_info)
     }
 
 done:
+    if (locked)
+        pthread_mutex_unlock(&mutex_local);
+    locked = false;
     return ret_value;
 } /* end process_vectors() */
 
@@ -2531,6 +2630,7 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
     int        num_ext_files     = 0;
     bool       read_use_native   = false;
     bool       external_link_access = false;
+    bool       file_rc_increased = false;
     H5S_sel_type mem_sel_type = H5S_SEL_ERROR;
     H5S_sel_type file_sel_type = H5S_SEL_ERROR;
     bool types_equal = false;
@@ -2542,6 +2642,8 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL DATASET Read\n");
 #endif
+    // TBD - Lock around potentially shared file operations 
+    pthread_mutex_lock(&mutex_local);
 
     /* Loop through all datasets and process them individually */
     for (j = 0; j < count; j++) {
@@ -2565,6 +2667,7 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
         }
 
         bypass_dset = (Bypass_dataset_t*)&bypass_obj->u.dataset;
+        assert(bypass_dset->file->u.file.name);
         // printf("\n%s: %d, count=%lu, dset_name = %s, file_name = %s, dtype_id = %llu, H5T_STD_REF_DSETREG =
         // %llu, H5T_NATIVE_INT = %llu, dcpl_id = %llu, H5I_INVALID_HID = %d\n", __func__, __LINE__, count,
         // dset_name, file_name, dset_dtype_id, H5T_STD_REF_DSETREG, H5T_NATIVE_INT, dcpl_id,
@@ -2578,7 +2681,10 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
             goto done;
         }
 
+        bypass_dset->file->u.file.ref_count++;
         selection_info.file = bypass_dset->file;
+        /* Track RC status to allow for error handling */
+        file_rc_increased = true;
 
         // fprintf(stderr, "%s at %d: file_name = %s\n", __func__, __LINE__, file_name);
         if ((num_ext_files = H5Pget_external_count(bypass_dset->dcpl_id)) < 0) {
@@ -2675,7 +2781,8 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
             }
 
             /* Reset for the next H5Dread */
-            pthread_mutex_lock(&mutex_local);
+            // TODO - double locking with first lock
+            //pthread_mutex_lock(&mutex_local);
 
             /* Future optimization: Only flush when a write has been performed */
             if (flush_containing_file((H5VL_bypass_t *)dset[j]) < 0) {
@@ -2685,7 +2792,7 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
             }
 
             all_tasks_enqueued = false;
-            pthread_mutex_unlock(&mutex_local);
+            // pthread_mutex_unlock(&mutex_local);
 
             /* Initialize data selection info */
             if (get_dset_name_helper((H5VL_bypass_t *)(dset[j]), selection_info.dset_name, req) < 0) {
@@ -2736,6 +2843,14 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
             }
         }
 
+        /* Selection info is finished with the file */
+        if (H5VL_bypass_free_obj(bypass_dset->file) < 0) {
+            fprintf(stderr, "failed to decrease ref count of file\n");
+            ret_value = -1;
+            goto done;
+        }
+
+        file_rc_increased = false;
     }
 
     /* Check for async request */
@@ -2744,33 +2859,46 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
 
 
     /* Signal the thread pool to finish this read. Notify the thread pool that it finished putting tasks in the queue. */
-    pthread_mutex_lock(&mutex_local);
+    //pthread_mutex_lock(&mutex_local);
     all_tasks_enqueued = true;
-    pthread_cond_broadcast(&cond_local);  /* Why do this signal/broadcast? */
-    pthread_mutex_unlock(&mutex_local);
+    pthread_cond_broadcast(&cond_queue_not_empty);  /* Why do this signal/broadcast? */
+    //pthread_mutex_unlock(&mutex_local);
     
     /* Do not return until the thread pool finishes the read */
     /* TBD: Enforcing this will become more complicated once multiple
      * application threads making concurrent H5Dread() calls is supported. */
+    // TBD - Lock is at start of dataset read
+    /*
     if (pthread_mutex_lock(&mutex_local) < 0) {
-        printf("In %s of %s at line %d: pthread_mutex_lock failed\n", __func__, __FILE__, __LINE__);
+        printf("In %s of %s at line %d: lock failed\n", __func__, __FILE__, __LINE__);
         ret_value = -1;
         goto done;
     }
-
+    */
     while (tasks_unfinished > 0) {
         pthread_cond_wait(&cond_read_finished, &mutex_local);
     }
 
+    // TBD - Lock is at end
+    /*
     if (pthread_mutex_unlock(&mutex_local) < 0) {
-        printf("In %s of %s at line %d: pthread_mutex_unlock failed\n", __func__, __FILE__, __LINE__);
+        printf("In %s of %s at line %d: unlock failed\n", __func__, __FILE__, __LINE__);
         ret_value = -1;
         goto done;
     }
-
+    */
     assert(tasks_unfinished == 0);
 
 done:
+    if (ret_value < 0) {
+        if (file_rc_increased && bypass_dset) {
+            /* Don't check for error since a failure has already occurred*/
+            H5VL_bypass_free_obj(bypass_dset->file);
+        }
+    }
+
+    // TBD - Lock around potentially shared file operations 
+    pthread_mutex_unlock(&mutex_local);
 
     return ret_value;
 } /* end H5VL_bypass_dataset_read() */
@@ -2972,6 +3100,9 @@ H5VL_bypass_dataset_close(void *dset, hid_t dxpl_id, void **req)
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL DATASET Close\n");
 #endif
+    assert(o->type == H5I_DATASET);
+    assert(o->u.dataset.file);
+    assert(o->u.dataset.file->u.file.ref_count > 0);
 
     if (H5VLdataset_close(o->under_object, o->under_vol_id, dxpl_id, req) < 0) {
         fprintf(stderr, "Failed to close dataset in underlying connectors\n");
@@ -3224,12 +3355,6 @@ c_file_open_helper(H5VL_bypass_t *obj, const char *name)
     file->ref_count = 1;
 
     strcpy(file->name, name);
-
-    file->num_reads    = 0;
-    file->read_started = false;
-    /* Initialize the condition variable for file closing */
-    pthread_cond_init(&(file->close_ready), NULL);
-
 done:
 
     return ret_value;
@@ -3257,6 +3382,8 @@ H5VL_bypass_file_create(const char *name, unsigned flags, hid_t fcpl_id, hid_t f
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL FILE Create\n");
 #endif
+    // TBD - Lock around potentially shared file operations 
+    pthread_mutex_lock(&mutex_local);
 
     /* Get copy of our VOL info from FAPL */
     if (H5Pget_vol_info(fapl_id, (void **)&info) < 0) {
@@ -3265,8 +3392,10 @@ H5VL_bypass_file_create(const char *name, unsigned flags, hid_t fcpl_id, hid_t f
     }
 
     /* Make sure we have info about the underlying VOL to be used */
-    if (!info)
-        return NULL;
+    if (!info) {
+        fprintf(stderr, "VOL info not found in FAPL\n");
+        goto error;
+    }
 
     /* Copy the FAPL */
     if ((under_fapl_id = H5Pcopy(fapl_id)) < 0) {
@@ -3286,14 +3415,14 @@ H5VL_bypass_file_create(const char *name, unsigned flags, hid_t fcpl_id, hid_t f
         goto error;
     }
 
-    if ((file = H5VL_bypass_new_obj(under, info->under_vol_id)) < 0) {
+    if ((file = H5VL_bypass_new_obj(under, info->under_vol_id)) == NULL) {
         fprintf(stderr, "error while creating bypass file object\n");
         goto error;
     }
 
     /* Check for async request */
     if (req && *req)
-        if ((*req = H5VL_bypass_new_obj(*req, info->under_vol_id)) < 0) {
+        if ((*req = H5VL_bypass_new_obj(*req, info->under_vol_id)) == NULL) {
             fprintf(stderr, "error while creating bypass async request\n");
             goto error;
         }
@@ -3314,7 +3443,6 @@ H5VL_bypass_file_create(const char *name, unsigned flags, hid_t fcpl_id, hid_t f
     
     info = NULL;
 
-
     file->type = H5I_FILE;
 
     if (c_file_open_helper(file, name) < 0) {
@@ -3322,9 +3450,15 @@ H5VL_bypass_file_create(const char *name, unsigned flags, hid_t fcpl_id, hid_t f
         goto error;
     }
 
+    // TBD - Lock around potentially shared file operations 
+    pthread_mutex_unlock(&mutex_local);
+
     return (void *)file;
 
 error:
+    // TBD - Lock around potentially shared file operations 
+    pthread_mutex_unlock(&mutex_local);
+
     H5E_BEGIN_TRY {
         if (under)
             H5VLfile_close(under, under_fapl_id, dxpl_id, req);
@@ -3381,6 +3515,8 @@ H5VL_bypass_file_open(const char *name, unsigned flags, hid_t fapl_id, hid_t dxp
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL FILE Open\n");
 #endif
+    // TBD - Lock around potentially shared file operations 
+    pthread_mutex_lock(&mutex_local);
 
     /* Get copy of our VOL info from FAPL */
     if (H5Pget_vol_info(fapl_id, (void **)&info) < 0) {
@@ -3390,7 +3526,7 @@ H5VL_bypass_file_open(const char *name, unsigned flags, hid_t fapl_id, hid_t dxp
 
     /* Make sure we have info about the underlying VOL to be used */
     if (!info) {
-        fprintf(stderr, "retrieved VOL info was empty\n");
+        fprintf(stderr, "VOL info not found in FAPL\n");
         goto error;
     }
 
@@ -3407,25 +3543,20 @@ H5VL_bypass_file_open(const char *name, unsigned flags, hid_t fapl_id, hid_t dxp
     }
 
     /* Open the file with the underlying VOL connector */
-    if ((under = H5VLfile_open(name, flags, under_fapl_id, dxpl_id, req)) < 0) {
-        fprintf(stderr, "unable to open file with underlying VOL\n");
+    if ((under = H5VLfile_open(name, flags, under_fapl_id, dxpl_id, req)) == NULL) {
+        fprintf(stderr, "error while opening file with underlying VOL\n");
         goto error;
     }
 
-    if (under) {
-        if ((file = H5VL_bypass_new_obj(under, info->under_vol_id)) == NULL) {
-            fprintf(stderr, "unable to create bypass file object\n");
-            goto error;
-        }
+    
+    if ((file = H5VL_bypass_new_obj(under, info->under_vol_id)) == NULL) {
+        fprintf(stderr, "error while creating bypass file object\n");
+        goto error;
+    }
 
-        /* Check for async request */
-        if (req && *req) {
-            *req = H5VL_bypass_new_obj(*req, info->under_vol_id);
-            req_created = true;
-        }
-    } /* end if */
-    else
-        file = NULL;
+    /* Check for async request */
+    if (req && *req)
+        *req = H5VL_bypass_new_obj(*req, info->under_vol_id);
 
     /* Close underlying FAPL */
     if (H5Pclose(under_fapl_id) < 0) {
@@ -3451,6 +3582,9 @@ H5VL_bypass_file_open(const char *name, unsigned flags, hid_t fapl_id, hid_t dxp
     }
 
 done:
+    // TBD - Lock around potentially shared file operations 
+    pthread_mutex_unlock(&mutex_local);
+
     return (void *)file;
 
 error:
@@ -3464,6 +3598,8 @@ error:
         if (req && *req && req_created)
             H5VL_bypass_free_obj(*req);
     } H5E_END_TRY;
+    // TBD - Lock around potentially shared file operations 
+    pthread_mutex_unlock(&mutex_local);
 
     return NULL;
 } /* end H5VL_bypass_file_open() */
@@ -3527,11 +3663,13 @@ H5VL_bypass_file_specific(void *file, H5VL_file_specific_args_t *args, hid_t dxp
     H5VL_file_specific_args_t *new_args;
     H5VL_bypass_info_t        *info;
     hid_t                      under_vol_id = -1;
-    herr_t                     ret_value;
+    herr_t                     ret_value = 0;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL FILE Specific\n");
 #endif
+
+    assert(o == NULL || o->type == H5I_FILE);
 
     /* Check for 'is accessible' operation */
     if (args->op_type == H5VL_FILE_IS_ACCESSIBLE) {
@@ -3625,12 +3763,32 @@ H5VL_bypass_file_specific(void *file, H5VL_file_specific_args_t *args, hid_t dxp
         H5VL_bypass_info_free(info);
     } /* end else-if */
     else if (args->op_type == H5VL_FILE_REOPEN) {
+        assert(o->type == H5I_FILE);
+
         /* Wrap reopened file struct pointer, if we reopened one */
-        if (ret_value >= 0 && args->args.reopen.file)
-            *args->args.reopen.file = H5VL_bypass_new_obj(*args->args.reopen.file, o->under_vol_id);
+        if (args->args.reopen.file) {
+            new_o = H5VL_bypass_new_obj(*args->args.reopen.file, o->under_vol_id);
+            new_o->type = H5I_FILE;
+
+            *args->args.reopen.file = new_o;
+
+            assert(o->u.file.name);
+
+            if (c_file_open_helper(new_o, o->u.file.name) < 0) {
+                fprintf(stderr, "error while opening c file\n");
+                goto error;
+            }
+
+        }
     } /* end else */
 
     return ret_value;
+
+error:
+    if (new_o)
+        H5VL_bypass_free_obj(new_o);
+
+    return -1;
 } /* end H5VL_bypass_file_specific() */
 
 /*-------------------------------------------------------------------------
@@ -3678,7 +3836,6 @@ H5VL_bypass_file_close(void *file, hid_t dxpl_id, void **req)
     H5VL_bypass_t *o = (H5VL_bypass_t *)file;
     herr_t         ret_value;
     int            i;
-    bool           locked = false;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL FILE Close\n");
@@ -3688,31 +3845,25 @@ H5VL_bypass_file_close(void *file, hid_t dxpl_id, void **req)
 
     /* Release our wrapper, if underlying file was closed */
     pthread_mutex_lock(&mutex_local);
-    locked = true;
-    o->u.file.ref_count--;
 
-    if (o->u.file.ref_count == 0) {
-        /* Pass close request to underlying VOL connector */
-        if ((ret_value = H5VLfile_close(o->under_object, o->under_vol_id, dxpl_id, req)) < 0) {
-            fprintf(stderr, "Failed to close file in underlying VOL connectors\n");
-            goto done;
-        }
+    /* Pass close request to underlying VOL connector */
+    if ((ret_value = H5VLfile_close(o->under_object, o->under_vol_id, dxpl_id, req)) < 0) {
+        fprintf(stderr, "Failed to close file in underlying VOL connectors\n");
+        goto done;
+    }
 
-        /* Check for async request */
-        if (req && *req)
-            *req = H5VL_bypass_new_obj(*req, o->under_vol_id);
+    /* Check for async request */
+    if (req && *req)
+        *req = H5VL_bypass_new_obj(*req, o->under_vol_id);
 
-
-        if (H5VL_bypass_free_obj(o) < 0) {
-            fprintf(stderr, "Unable to free file object on close\n");
-            ret_value = -1;
-            goto done;
-        }
+    if (H5VL_bypass_free_obj(o) < 0) {
+        fprintf(stderr, "Unable to free file object on close\n");
+        ret_value = -1;
+        goto done;
     }
 
 done:
-    if (locked)
-        pthread_mutex_unlock(&mutex_local);
+    pthread_mutex_unlock(&mutex_local);
 
     return ret_value;
 
@@ -3735,24 +3886,52 @@ H5VL_bypass_group_create(void *obj, const H5VL_loc_params_t *loc_params, const c
     H5VL_bypass_t *group = NULL;
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
     void          *under = NULL;
-
+    H5VL_bypass_t *parent_file = NULL;
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL GROUP Create\n");
 #endif
 
-    under = H5VLgroup_create(o->under_object, loc_params, o->under_vol_id, name, lcpl_id, gcpl_id, gapl_id,
-                             dxpl_id, req);
-    if (under) {
-        group = H5VL_bypass_new_obj(under, o->under_vol_id);
+    // TBD - Lock around potentially shared file operations 
+    pthread_mutex_lock(&mutex_local);
 
-        /* Check for async request */
-        if (req && *req)
-            *req = H5VL_bypass_new_obj(*req, o->under_vol_id);
-    } /* end if */
-    else
-        group = NULL;
+    if ((under = H5VLgroup_create(o->under_object, loc_params,
+         o->under_vol_id, name, lcpl_id, gcpl_id, gapl_id, dxpl_id, req)) == NULL) {
+        fprintf(stderr, "Failed to create group in underlying VOL connectors\n");
+        goto error;
+    }
+
+    group = H5VL_bypass_new_obj(under, o->under_vol_id);
+
+    /* Check for async request */
+    if (req && *req)
+        *req = H5VL_bypass_new_obj(*req, o->under_vol_id);
+
+    group->type = H5I_GROUP;
+
+    if (o->type == H5I_FILE) {
+        parent_file = o;
+    } else if (o->type == H5I_GROUP) {
+        parent_file = o->u.group.file;
+    } else {
+        fprintf(stderr, "invalid object type\n");
+        goto error;
+    }
+
+    assert(parent_file->type == H5I_FILE);
+    assert(parent_file->u.file.ref_count > 0);
+
+    parent_file->u.file.ref_count++;
+    group->u.group.file = parent_file;
+
+    // TBD - Lock around potentially shared file operations 
+    pthread_mutex_unlock(&mutex_local);
 
     return (void *)group;
+error:
+    // TBD - Lock around potentially shared file operations 
+    pthread_mutex_unlock(&mutex_local);
+
+    return NULL;
 } /* end H5VL_bypass_group_create() */
 
 /*-------------------------------------------------------------------------
@@ -3772,23 +3951,51 @@ H5VL_bypass_group_open(void *obj, const H5VL_loc_params_t *loc_params, const cha
     H5VL_bypass_t *group = NULL;
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
     void          *under = NULL;
-
+    H5VL_bypass_t *parent_file = NULL;
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL GROUP Open\n");
 #endif
+    // TBD - Lock around potentially shared file operations 
+    pthread_mutex_lock(&mutex_local);
 
-    under = H5VLgroup_open(o->under_object, loc_params, o->under_vol_id, name, gapl_id, dxpl_id, req);
-    if (under) {
-        group = H5VL_bypass_new_obj(under, o->under_vol_id);
+    if ((under = H5VLgroup_open(o->under_object,
+        loc_params, o->under_vol_id, name, gapl_id, dxpl_id, req)) == NULL) {
+        fprintf(stderr, "Failed to open group in underlying VOL connectors\n");
+        goto error;
+    }
+    
+    group = H5VL_bypass_new_obj(under, o->under_vol_id);
 
-        /* Check for async request */
-        if (req && *req)
-            *req = H5VL_bypass_new_obj(*req, o->under_vol_id);
-    } /* end if */
-    else
-        group = NULL;
+    /* Check for async request */
+    if (req && *req)
+        *req = H5VL_bypass_new_obj(*req, o->under_vol_id);
+
+    group->type = H5I_GROUP;
+
+    if (o->type == H5I_FILE) {
+        parent_file = o;
+    } else if (o->type == H5I_GROUP) {
+        parent_file = o->u.group.file;
+    } else {
+        fprintf(stderr, "invalid object type\n");
+        goto error;
+    }
+
+    assert(parent_file->type == H5I_FILE);
+    assert(parent_file->u.file.ref_count > 0);
+
+    parent_file->u.file.ref_count++;
+    group->u.group.file = parent_file;
+
+    // TBD - Lock around potentially shared file operations 
+    pthread_mutex_unlock(&mutex_local);
 
     return (void *)group;
+error:
+    // TBD - Lock around potentially shared file operations 
+    pthread_mutex_unlock(&mutex_local);
+
+    return NULL;
 } /* end H5VL_bypass_group_open() */
 
 /*-------------------------------------------------------------------------
@@ -3919,6 +4126,9 @@ H5VL_bypass_group_close(void *grp, hid_t dxpl_id, void **req)
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL GROUP Close\n");
 #endif
+    assert(o->type == H5I_GROUP);
+    assert(o->u.group.file);
+    assert(o->u.group.file->u.file.ref_count > 0);
 
     ret_value = H5VLgroup_close(o->under_object, o->under_vol_id, dxpl_id, req);
 
@@ -4195,12 +4405,12 @@ H5VL_bypass_object_open(void *obj, const H5VL_loc_params_t *loc_params, H5I_type
 {
     H5VL_bypass_t *new_obj = false;
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
+    H5VL_bypass_t *parent_file = NULL;
     void          *under = NULL;
     bool           req_created = false;
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL OBJECT Open\n");
 #endif
-    assert(o->type == H5I_FILE);
 
     if ((under = H5VLobject_open(o->under_object, loc_params, o->under_vol_id, opened_type, dxpl_id, req)) == NULL) {
         fprintf(stderr, "failed to open object in underlying connector\n");
@@ -4214,15 +4424,40 @@ H5VL_bypass_object_open(void *obj, const H5VL_loc_params_t *loc_params, H5I_type
 
     new_obj->type = *opened_type;
 
-    /* If the object is a dataset, populate the underlying bypass object */
-    
-    if (new_obj->type == H5I_DATASET) {
-        if (dset_open_helper(new_obj, dxpl_id, req) < 0) {
-            fprintf(stderr, "failed to populate bypass object\n");
-            goto error;
+    if (o->type == H5I_FILE) {
+        parent_file = o;
+    } else if (o->type == H5I_GROUP) {
+        parent_file = o->u.group.file;
+    } else {
+        fprintf(stderr, "invalid object type\n");
+        goto error;
+    }
+
+    assert(parent_file->u.file.ref_count > 0);
+
+    switch (new_obj->type) {
+        case H5I_DATASET: {
+            if (dset_open_helper(new_obj, dxpl_id, req) < 0) {
+                fprintf(stderr, "failed to populate bypass object\n");
+                goto error;
+            }
+        
+            fprintf(stderr, "Bypass VOL file up due to object (dset) open: %d -> %d\n", parent_file->u.file.ref_count, parent_file->u.file.ref_count + 1);
+            parent_file->u.file.ref_count++;
+            new_obj->u.dataset.file = parent_file;
+            break;
+        }
+        
+        case H5I_GROUP: {
+            fprintf(stderr, "Bypass VOL file up due to object (group) open: %d -> %d\n", parent_file->u.file.ref_count, parent_file->u.file.ref_count + 1);
+            parent_file->u.file.ref_count++;
+            new_obj->u.group.file = parent_file;
+            break;
         }
 
-        new_obj->u.dataset.file = o;
+        default: {
+            break;
+        }
     }
         
     /* Check for async request */
@@ -4871,7 +5106,7 @@ release_dset_info(Bypass_dataset_t *dset) {
     assert(dset);
 
     /* Decrement the ref count of the corresponding Bypass VOL file object */
-    if (H5VL_bypass_file_close((void*) dset->file, H5P_DEFAULT, NULL) < 0) {
+    if (H5VL_bypass_free_obj(dset->file) < 0) {
         fprintf(stderr, "Failed to close parent file object\n");
         ret_value = -1;
         goto done;
@@ -5078,12 +5313,11 @@ release_file_info(Bypass_file_t *file) {
         * closing the C file */
     pthread_mutex_lock(&mutex_local);
 
-    if (file->read_started) {
-        while (file->num_reads)
-            pthread_cond_wait(&(file->close_ready), &mutex_local);
-        pthread_mutex_unlock(&mutex_local);
+    if (file->ref_count > 0) {
+        fprintf(stderr, "file object was released while references still exist\n");
+        ret_value = -1;
+        goto done;
     }
-    pthread_mutex_unlock(&mutex_local);
 
     /* Clean up the file object */
     if (close(file->fd) < 0) {
@@ -5094,7 +5328,26 @@ release_file_info(Bypass_file_t *file) {
 
     file->fd = -1;
     // H5FDclose(bp_file->vfd_file_handle);
-    pthread_cond_destroy(&(file->close_ready));
+
+done:
+    pthread_mutex_unlock(&mutex_local);
+
+    return ret_value;
+}
+
+static herr_t
+release_group_info(Bypass_group_t *group) {
+    herr_t ret_value = 0;
+
+    assert(group);
+
+    /* Decrement the ref count of the corresponding Bypass VOL file object */
+    if (H5VL_bypass_free_obj(group->file) < 0) {
+        fprintf(stderr, "Failed to close parent file object\n");
+        ret_value = -1;
+        goto done;
+    }
+
 done:
     return ret_value;
 }

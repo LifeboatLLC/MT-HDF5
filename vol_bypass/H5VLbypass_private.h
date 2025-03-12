@@ -41,9 +41,8 @@
 #define MB (1024 * 1024)
 
 pthread_mutex_t mutex_local;
-pthread_cond_t  cond_local;
+pthread_cond_t  cond_queue_not_empty;
 pthread_cond_t  cond_read_finished;
-pthread_cond_t  continue_local;
 
 int  nthreads_tpool       = NUM_LOCAL_THREADS;
 int  nsteps_tpool         = THREAD_STEP;
@@ -83,9 +82,6 @@ typedef struct Bypass_file_t {
     int  fd;                /* C file descriptor  */
     /* void *vfd_file_handle;  Currently not used */
     unsigned ref_count;     /* Reference count    */
-    int  num_reads;         /* Number of reads still left undone */
-    bool read_started;      /* Flag to indicate reads have started */
-    pthread_cond_t close_ready;    /* Condition variable to indicate all reads are finished and the file can be close */
 } Bypass_file_t;
 
 /* Forward declaration of the bypass VOL connector's object */
@@ -100,6 +96,10 @@ typedef struct Bypass_dataset_t {
     struct H5VL_bypass_t *file;  /* Use the forward-declared type */
 } Bypass_dataset_t;
 
+typedef struct Bypass_group_t {
+    struct H5VL_bypass_t *file; /* File containing the group */
+} Bypass_group_t;
+
 /* The bypass VOL connector's object */
 typedef struct H5VL_bypass_t {
     hid_t under_vol_id; /* ID for underlying VOL connector */
@@ -107,9 +107,9 @@ typedef struct H5VL_bypass_t {
     H5I_type_t type; /* Type of this object. */
 
     union {
-        /* Only dataset objects are needed for now */
         Bypass_dataset_t dataset;
         Bypass_file_t file;
+        Bypass_group_t group;
     } u;
 } H5VL_bypass_t;
 
@@ -135,7 +135,7 @@ typedef struct {
 typedef struct {
     size_t  counter;
 
-    char    dset_name[64];
+    char    dset_name[BYPASS_NAME_SIZE_LONG];
 
     hid_t   file_space_id;
     hid_t   mem_space_id;
