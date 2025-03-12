@@ -1376,7 +1376,7 @@ get_filename_helper(H5VL_bypass_t *obj, char *file_name, H5I_type_t obj_type, vo
 
     args.op_type                     = H5VL_FILE_GET_NAME;
     args.args.get_name.type          = obj_type;
-    args.args.get_name.buf_size      = 1024;
+    args.args.get_name.buf_size      = BYPASS_NAME_SIZE_LONG;
     args.args.get_name.buf           = file_name;
     args.args.get_name.file_name_len = &name_len;
 
@@ -3392,7 +3392,7 @@ done:
                     on open failure, error: %s\n", strerror(errno));
             }
             file_stuff[file_stuff_count].fd = -1;
-            memset(file_stuff[file_stuff_count].name, 0, 1024);
+            memset(file_stuff[file_stuff_count].name, 0, BYPASS_NAME_SIZE_LONG);
         }
     }
 
@@ -3852,7 +3852,7 @@ remove_file_info_helper(unsigned index)
         }
 
         /* Zero out the last entry to avoid leaving duplicate information */
-        memset(file_stuff[file_stuff_count - 1].name, 0, 1024);
+        memset(file_stuff[file_stuff_count - 1].name, 0, BYPASS_NAME_SIZE_LONG);
         file_stuff[file_stuff_count - 1].fd = -1;
         file_stuff[file_stuff_count - 1].ref_count = 0;
         file_stuff[file_stuff_count - 1].num_reads = 0;
@@ -3883,7 +3883,7 @@ static herr_t
 H5VL_bypass_file_close(void *file, hid_t dxpl_id, void **req)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)file;
-    char           file_name[1024];
+    char           file_name[BYPASS_NAME_SIZE_LONG];
     herr_t         ret_value = 0;
     int            i;
 
@@ -3962,7 +3962,8 @@ H5VL_bypass_file_close(void *file, hid_t dxpl_id, void **req)
 
     /* Release our wrapper, if underlying file was closed */
     if (ret_value >= 0)
-        H5VL_bypass_free_obj(o);
+        if (H5VL_bypass_free_obj(o) < 0)
+            ret_value = -1;
 
 done:
     return ret_value;
