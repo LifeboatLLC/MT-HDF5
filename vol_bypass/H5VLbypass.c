@@ -468,9 +468,17 @@ H5VL_bypass_new_obj(void *under_obj, hid_t under_vol_id)
     new_obj->type = H5I_BADID;
     new_obj->file_name[0] = '\0';
 
-    H5Iinc_ref(new_obj->under_vol_id);
+    if (H5Iinc_ref(new_obj->under_vol_id) < 0) {
+        fprintf(stderr, "failed to increment ref count of underlying vol connector\n");
+        goto error;
+    }
 
     return new_obj;
+error:
+    if (new_obj)
+        free(new_obj);
+
+    return NULL;
 } /* end H5VL_bypass_obj() */
 
 /*-------------------------------------------------------------------------
@@ -1381,6 +1389,10 @@ get_filename_helper(H5VL_bypass_t *obj, char *file_name, H5I_type_t obj_type, vo
     size_t               name_len  = 0; /* Length of file name */
     ssize_t              ret_value = -1;
 
+    assert(obj);
+    assert(obj->under_object);
+    assert(file_name);
+
     args.op_type                     = H5VL_FILE_GET_NAME;
     args.args.get_name.type          = obj_type;
     args.args.get_name.buf_size      = BYPASS_NAME_SIZE_LONG;
@@ -1388,7 +1400,19 @@ get_filename_helper(H5VL_bypass_t *obj, char *file_name, H5I_type_t obj_type, vo
     args.args.get_name.file_name_len = &name_len;
 
     if (H5VL_bypass_file_get(obj, &args, H5P_DEFAULT, req) < 0) {
-        printf("In %s of %s at line %d: H5VL_bypass_file_get failed\n", __func__, __FILE__, __LINE__);
+        fprintf(stderr, "In %s of %s at line %d: H5VL_bypass_file_get failed\n", __func__, __FILE__, __LINE__);
+        ret_value = -1;
+        goto done;
+    }
+
+    if (name_len == 0) {
+        fprintf(stderr, "filename was unexpectedly empty\n");
+        ret_value = -1;
+        goto done;
+    }
+
+    if ((size_t)name_len != name_len) {
+        fprintf(stderr, "filename length was too large\n");
         ret_value = -1;
         goto done;
     }
@@ -1674,7 +1698,20 @@ get_dset_name_helper(H5VL_bypass_t *dset, char *name, void **req)
         goto done;
     }
 
+    if (dset_name_len == 0) {
+        fprintf(stderr, "dataset name length is unexpectedly zero\n");
+        ret_value = -1;
+        goto done;
+    }
+
+    if ((ssize_t)dset_name_len != dset_name_len) {
+        fprintf(stderr, "dataset name length is unexpectedly large\n");
+        ret_value = -1;
+        goto done;
+    }
+
     ret_value = (ssize_t)dset_name_len;
+
 done:
     return ret_value;
 } /* get_dset_name_helper */
@@ -1740,6 +1777,7 @@ check_dspaces_helper(hid_t dset_space_id, hid_t file_space_id, hid_t *file_space
                      hid_t *mem_space_id_copy)
 {
     herr_t ret_value = 0;
+    htri_t select_valid = 0;
 
     /* Settle the file data space */
     if (H5S_ALL == file_space_id)
@@ -1757,19 +1795,30 @@ check_dspaces_helper(hid_t dset_space_id, hid_t file_space_id, hid_t *file_space
         /* Use the original data space passed in from H5Dread or H5Dread_multi */
         *mem_space_id_copy = mem_space_id;
 
-    /* Make sure the selection + offset is within the extent of the dataspaces in
-     * file and memory */
-    if (H5Sselect_valid(*file_space_id_copy) <= 0) {
-        printf("In %s of %s at line %d: file data space selection isn't valid or "
-               "H5Sselect_valide failed\n",
+    /* Make sure the selection + offset is within the extent of the dataspaces in file and memory */
+    if ((select_valid = H5Sselect_valid(*file_space_id_copy)) < 0) {
+        printf("In %s of %s at line %d: H5Sselect_valid failed for file space\n",
                __func__, __FILE__, __LINE__);
         ret_value = -1;
         goto done;
     }
 
-    if (H5Sselect_valid(*mem_space_id_copy) <= 0) {
-        printf("In %s of %s at line %d: memory data space selection isn't valid or "
-               "H5Sselect_valide failed\n",
+    if (select_valid == 0) {
+        printf("In %s of %s at line %d: file data space selection isn't valid\n",
+               __func__, __FILE__, __LINE__);
+        ret_value = -1;
+        goto done;
+    }
+
+    if ((select_valid = H5Sselect_valid(*mem_space_id_copy)) < 0) {
+        printf("In %s of %s at line %d: H5Sselect_valid failed for mem space\n",
+               __func__, __FILE__, __LINE__);
+        ret_value = -1;
+        goto done;
+    }
+
+    if (select_valid == 0) {
+        printf("In %s of %s at line %d: memory data space selection isn't valid\n",
                __func__, __FILE__, __LINE__);
         ret_value = -1;
         goto done;
@@ -3251,6 +3300,9 @@ c_file_open_helper(const char *name)
 {
     herr_t ret_value = 0;
 
+    /* Initial value */
+    file_stuff[file_stuff_count].fd = -1;
+
     /* Enlarge the size of the file stuff for C and Re-allocate the memory if necessary */
     if (file_stuff_count == file_stuff_size) {
         file_stuff_size *= 2;
@@ -3281,23 +3333,36 @@ c_file_open_helper(const char *name)
         goto done;
     }
 
-    /* Increment the reference count for this file */
-    file_stuff[file_stuff_count].ref_count++;
-
-    strcpy(file_stuff[file_stuff_count].name, name);
-
-    file_stuff[file_stuff_count].num_reads    = 0;
-    file_stuff[file_stuff_count].read_started = false;
-    pthread_cond_init(&(file_stuff[file_stuff_count].close_ready),
-                      NULL); /* Initialize the condition variable for file closing */
-    /*printf("%s: name = %s, file_stuff_count = %d, file_stuff[%d].name = %s, file_stuff[%d].fp = %d\n",
-     * __func__, name, file_stuff_count, file_stuff_count, file_stuff[file_stuff_count].name,
-     * file_stuff_count, file_stuff[file_stuff_count].fp);*/
-
-    /* Increment the number of files being opened with C */
-    file_stuff_count++;
-
 done:
+    if (ret_value == 0) {
+        /* Success */
+        /* Increment the reference count for this file */
+        file_stuff[file_stuff_count].ref_count++;
+
+        strcpy(file_stuff[file_stuff_count].name, name);
+
+        file_stuff[file_stuff_count].num_reads    = 0;
+        file_stuff[file_stuff_count].read_started = false;
+        pthread_cond_init(&(file_stuff[file_stuff_count].close_ready),
+                        NULL); /* Initialize the condition variable for file closing */
+        /*printf("%s: name = %s, file_stuff_count = %d, file_stuff[%d].name = %s, file_stuff[%d].fp = %d\n",
+        * __func__, name, file_stuff_count, file_stuff_count, file_stuff[file_stuff_count].name,
+        * file_stuff_count, file_stuff[file_stuff_count].fp);*/
+
+        /* Increment the number of files being opened with C */
+        file_stuff_count++;
+    } else {
+        /* Clean up on failure */
+        if (file_stuff[file_stuff_count].fd >= 0) {
+            if (close(file_stuff[file_stuff_count].fd) < 0) {
+                fprintf(stderr, "failed to clean up file descriptor\
+                    on open failure, error: %s\n", strerror(errno));
+            }
+            file_stuff[file_stuff_count].fd = -1;
+            memset(file_stuff[file_stuff_count].name, 0, BYPASS_NAME_SIZE_LONG);
+        }
+    }
+
     return ret_value;
 }
 
@@ -3433,46 +3498,77 @@ get_vfd_handle_helper(H5VL_bypass_t *obj, void **file_handle, void **req)
 static void *
 H5VL_bypass_file_open(const char *name, unsigned flags, hid_t fapl_id, hid_t dxpl_id, void **req)
 {
-    H5VL_bypass_info_t *info;
-    H5VL_bypass_t      *file;
-    hid_t               under_fapl_id;
-    void               *under;
+    H5VL_bypass_info_t *info = NULL;
+    H5VL_bypass_t      *file = NULL;
+    hid_t               under_fapl_id = H5I_INVALID_HID;
+    void               *under = NULL;
     unsigned            i;
+    bool                req_created = false;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL FILE Open\n");
 #endif
 
     /* Get copy of our VOL info from FAPL */
-    H5Pget_vol_info(fapl_id, (void **)&info);
+    if (H5Pget_vol_info(fapl_id, (void **)&info) < 0) {
+        fprintf(stderr, "unable to retrieve vol info\n");
+        goto error;
+    }
 
     /* Make sure we have info about the underlying VOL to be used */
-    if (!info)
-        return NULL;
+    if (!info) {
+        fprintf(stderr, "retrieved VOL info was empty\n");
+        goto error;
+    }
 
     /* Copy the FAPL */
-    under_fapl_id = H5Pcopy(fapl_id);
+    if ((under_fapl_id = H5Pcopy(fapl_id)) < 0) {
+        fprintf(stderr, "unable to copy FAPL\n");
+        goto error;
+    }
 
     /* Set the VOL ID and info for the underlying FAPL */
-    H5Pset_vol(under_fapl_id, info->under_vol_id, info->under_vol_info);
+    if (H5Pset_vol(under_fapl_id, info->under_vol_id, info->under_vol_info) < 0) {
+        fprintf(stderr, "unable to set VOL info in FAPL\n");
+        goto error;
+    }
 
     /* Open the file with the underlying VOL connector */
-    under = H5VLfile_open(name, flags, under_fapl_id, dxpl_id, req);
+    if ((under = H5VLfile_open(name, flags, under_fapl_id, dxpl_id, req)) < 0) {
+        fprintf(stderr, "unable to open file with underlying VOL\n");
+        goto error;
+    }
+
     if (under) {
-        file = H5VL_bypass_new_obj(under, info->under_vol_id);
+        if ((file = H5VL_bypass_new_obj(under, info->under_vol_id)) == NULL) {
+            fprintf(stderr, "unable to create bypass file object\n");
+            goto error;
+        }
 
         /* Check for async request */
-        if (req && *req)
+        if (req && *req) {
             *req = H5VL_bypass_new_obj(*req, info->under_vol_id);
+            req_created = true;
+        }
     } /* end if */
     else
         file = NULL;
 
     /* Close underlying FAPL */
-    H5Pclose(under_fapl_id);
+    if (H5Pclose(under_fapl_id) < 0) {
+        fprintf(stderr, "unable to closed underlying FAPL\n");
+        goto error;
+    }
+
+    under_fapl_id = H5I_INVALID_HID;
 
     /* Release copy of our VOL info */
-    H5VL_bypass_info_free(info);
+    if (H5VL_bypass_info_free(info) < 0) {
+        fprintf(stderr, "unable to free underlying VOL info\n");
+        goto error;
+    }
+
+    info = NULL;
 
     /* If the file has already been opened, only increment the reference count of
      * this file and finish */
@@ -3485,10 +3581,27 @@ H5VL_bypass_file_open(const char *name, unsigned flags, hid_t fapl_id, hid_t dxp
     }
 
     /* Open the C file and set the fields for the file_t structure */
-    c_file_open_helper(name);
+    if (c_file_open_helper(name) < 0) {
+        fprintf(stderr, "unable to open c file\n");
+        goto error;
+    }
 
 done:
     return (void *)file;
+
+error:
+    H5E_BEGIN_TRY {
+        if (under_fapl_id != H5I_INVALID_HID)
+            H5Pclose(under_fapl_id);
+        if (under)
+            H5VLfile_close(under, under_fapl_id, dxpl_id, req);
+        if (file)
+            H5VL_bypass_free_obj(file);
+        if (req && *req && req_created)
+            H5VL_bypass_free_obj(*req);
+    } H5E_END_TRY;
+
+    return NULL;
 } /* end H5VL_bypass_file_open() */
 
 /*-------------------------------------------------------------------------
@@ -3505,18 +3618,29 @@ static herr_t
 H5VL_bypass_file_get(void *file, H5VL_file_get_args_t *args, hid_t dxpl_id, void **req)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)file;
-    herr_t         ret_value;
+    herr_t         ret_value = 0;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL FILE Get\n");
 #endif
+    assert(o->under_object);
 
-    ret_value = H5VLfile_get(o->under_object, o->under_vol_id, args, dxpl_id, req);
+    if (H5VLfile_get(o->under_object, o->under_vol_id, args, dxpl_id, req) < 0) {
+        fprintf(stderr, "unable to get file info\n");
+        ret_value = -1;
+        goto done;
+    }
 
     /* Check for async request */
-    if (req && *req)
-        *req = H5VL_bypass_new_obj(*req, o->under_vol_id);
+    if (req && *req) {
+        if ((*req = H5VL_bypass_new_obj(*req, o->under_vol_id)) == NULL) {
+            fprintf(stderr, "unable to create bypass file object\n");
+            ret_value = -1;
+            goto done;
+        }
+    }
 
+done:
     return ret_value;
 } /* end H5VL_bypass_file_get() */
 
@@ -3693,6 +3817,20 @@ remove_file_info_helper(unsigned index)
             file_stuff[i].read_started = file_stuff[i + 1].read_started;
             file_stuff[i].close_ready  = file_stuff[i + 1].close_ready;
         }
+
+        /* Zero out the last entry to avoid leaving duplicate information */
+        memset(file_stuff[file_stuff_count - 1].name, 0, BYPASS_NAME_SIZE_LONG);
+        file_stuff[file_stuff_count - 1].fd = -1;
+        file_stuff[file_stuff_count - 1].ref_count = 0;
+        file_stuff[file_stuff_count - 1].num_reads = 0;
+        file_stuff[file_stuff_count - 1].read_started = 0;
+    } else {
+        /* Just zero out the entry itself */
+        memset(file_stuff[index].name, 0, 1024);
+        file_stuff[index].fd = -1;
+        file_stuff[index].ref_count = 0;
+        file_stuff[index].num_reads = 0;
+        file_stuff[index].read_started = 0;
     }
 
     file_stuff_count--;
@@ -3712,18 +3850,25 @@ static herr_t
 H5VL_bypass_file_close(void *file, hid_t dxpl_id, void **req)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)file;
-    char           file_name[1024];
-    herr_t         ret_value;
+    char           file_name[BYPASS_NAME_SIZE_LONG];
+    herr_t         ret_value = 0;
     int            i;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL FILE Close\n");
 #endif
 
+    assert(o);
+    assert(o->under_object);
+
     /* Find the name of this file */
-    get_filename_helper((H5VL_bypass_t *)file, file_name, H5I_FILE, req);
-    // fprintf(stderr, "%s at %d: file_name = %s\n", __func__, __LINE__,
-    // file_name);
+    if (get_filename_helper((H5VL_bypass_t *)file, file_name, H5I_FILE, req) < 0) {
+        fprintf(stderr, "unable to retrieve filename during file close\n");
+        ret_value = -1;
+        goto done;
+    }
+
+    // fprintf(stderr, "%s at %d: file_name = %s\n", __func__, __LINE__, file_name);
 
     /* Close the file opened with C.  Remove the file structure from the list when
      * the reference count drops to zero */
@@ -3754,7 +3899,12 @@ H5VL_bypass_file_close(void *file, hid_t dxpl_id, void **req)
 
             /* When the reference count drops to zero, close the file */
             if (!file_stuff[i].ref_count) {
-                close(file_stuff[i].fd);
+                if (close(file_stuff[i].fd) < 0) {
+                    fprintf(stderr, "failed to close file descriptor for file %s\n", file_name);
+                    /* Indicate failure but try to complete file cleanup */
+                    ret_value = -1;
+                }
+
                 file_stuff[i].fd = -1;
                 // H5FDclose(file_stuff[i].vfd_file_handle);
                 pthread_cond_destroy(&(file_stuff[i].close_ready));
@@ -3767,19 +3917,24 @@ H5VL_bypass_file_close(void *file, hid_t dxpl_id, void **req)
 
     if ((ret_value = H5VLfile_close(o->under_object, o->under_vol_id, dxpl_id, req)) < 0) {
         fprintf(stderr, "Failed to close file in underlying VOL connectors\n");
-        goto done;
+        ret_value = -1;
     }
 
     /* Check for async request */
-    if (req && *req)
-        *req = H5VL_bypass_new_obj(*req, o->under_vol_id);
+    if (ret_value >= 0 && req && *req)
+        if ((*req = H5VL_bypass_new_obj(*req, o->under_vol_id)) == NULL) {
+            fprintf(stderr, "Failed to create async request\n");
+            ret_value = -1;
+        }
 
     /* Release our wrapper, if underlying file was closed */
     if (ret_value >= 0)
-        H5VL_bypass_free_obj(o);
+        if (H5VL_bypass_free_obj(o) < 0)
+            ret_value = -1;
 
 done:
     return ret_value;
+
 } /* end H5VL_bypass_file_close() */
 
 /*-------------------------------------------------------------------------
