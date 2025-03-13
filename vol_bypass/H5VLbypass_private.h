@@ -77,11 +77,17 @@ typedef struct dtype_info_t {
     H5T_order_t order; /* Bit order */
 } dtype_info_t;
 
-typedef struct Bypass_file_t {
-    char name[BYPASS_NAME_SIZE_LONG];
+typedef struct task_file_t {
+    char name[BYPASS_NAME_SIZE_LONG]; /* TBD - Can be removed once log file is no longer needed */
     int  fd;                /* C file descriptor  */
     /* void *vfd_file_handle;  Currently not used */
+    unsigned rc;            /* Reference count    */
+} task_file_t;
+
+typedef struct Bypass_file_t {
+    char name[BYPASS_NAME_SIZE_LONG];
     unsigned ref_count;     /* Reference count    */
+    task_file_t *task_file;
 } Bypass_file_t;
 
 /* Forward declaration of the bypass VOL connector's object */
@@ -105,6 +111,7 @@ typedef struct H5VL_bypass_t {
     hid_t under_vol_id; /* ID for underlying VOL connector */
     void *under_object; /* Underlying VOL connector's object */
     H5I_type_t type; /* Type of this object. */
+    bool top_only;
 
     union {
         Bypass_dataset_t dataset;
@@ -120,12 +127,12 @@ typedef struct {
     haddr_t  *addrs;
     size_t   *sizes;
     void     **vec_bufs;
-    H5VL_bypass_t **files;
+    task_file_t **files;
 
     haddr_t    addrs_local[LOCAL_VECTOR_LEN];
     size_t     sizes_local[LOCAL_VECTOR_LEN];
     void       *vec_bufs_local[LOCAL_VECTOR_LEN];
-    H5VL_bypass_t *files_local[LOCAL_VECTOR_LEN];
+    task_file_t *files_local[LOCAL_VECTOR_LEN];
 
     size_t     vec_arr_nalloc;
     size_t     vec_arr_nused;
@@ -141,7 +148,7 @@ typedef struct {
     hid_t   mem_space_id;
     haddr_t chunk_addr;
 
-    H5VL_bypass_t *file; // TODO: Replace this and names above with dset ptr
+    task_file_t *task_file;
     int     dtype_size;
 
     bool    memory_allocated;
