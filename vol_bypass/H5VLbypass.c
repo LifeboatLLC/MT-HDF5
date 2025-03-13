@@ -2591,6 +2591,7 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
     bool       read_use_native   = false;
     bool       external_link_access = false;
     bool       must_block        = false;
+    bool       locked = false;
     H5S_sel_type mem_sel_type = H5S_SEL_ERROR;
     H5S_sel_type file_sel_type = H5S_SEL_ERROR;
     bool types_equal = false;
@@ -2753,6 +2754,7 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
 
             /* Reset for the next H5Dread */
             pthread_mutex_lock(&mutex_local);
+            locked = true;
 
             /* Future optimization: Only flush when a write has been performed */
             if (flush_containing_file((H5VL_bypass_t *)dset[j]) < 0) {
@@ -2770,6 +2772,7 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
              * so we should block until all tasks are complete */
             must_block = true;
             pthread_mutex_unlock(&mutex_local);
+            locked = false;
 
             /* Initialize data selection info */
             strcpy(selection_info.file_name, bypass_obj->file_name);
@@ -2843,6 +2846,8 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
         goto done;
     }
 
+    locked = true;
+
     /* Only finish H5Dread() once all threads are inactive and no tasks are undone */
     /* Only block here if Bypass VOL was used for the read */
     if (must_block) {
@@ -2875,9 +2880,13 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
         goto done;
     }
 
+    locked = false;
+
     assert(thread_task_count == 0);
 
 done:
+    if (locked)
+        pthread_mutex_unlock(&mutex_local);
 
     return ret_value;
 } /* end H5VL_bypass_dataset_read() */
@@ -3511,6 +3520,7 @@ H5VL_bypass_file_open(const char *name, unsigned flags, hid_t fapl_id, hid_t dxp
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL FILE Open\n");
 #endif
+    pthread_mutex_lock(&mutex_local);
 
     /* Get copy of our VOL info from FAPL */
     if (H5Pget_vol_info(fapl_id, (void **)&info) < 0) {
@@ -3575,8 +3585,6 @@ H5VL_bypass_file_open(const char *name, unsigned flags, hid_t fapl_id, hid_t dxp
 
     /* If the file has already been opened, only increment the reference count of
      * this file and finish */
-    pthread_mutex_lock(&mutex_local);
-
     for (i = 0; i < file_stuff_count; i++) {
         if (!strcmp(file_stuff[i].name, name) && file_stuff[i].fd) {
             file_stuff[i].ref_count++;
@@ -3585,8 +3593,6 @@ H5VL_bypass_file_open(const char *name, unsigned flags, hid_t fapl_id, hid_t dxp
         }
     }
 
-    pthread_mutex_unlock(&mutex_local);
-
     /* Open the C file and set the fields for the file_t structure */
     if (c_file_open_helper(name) < 0) {
         fprintf(stderr, "unable to open c file\n");
@@ -3594,6 +3600,8 @@ H5VL_bypass_file_open(const char *name, unsigned flags, hid_t fapl_id, hid_t dxp
     }
 
 done:
+    pthread_mutex_unlock(&mutex_local);
+
     return (void *)file;
 
 error:
@@ -3607,6 +3615,8 @@ error:
         if (req && *req && req_created)
             H5VL_bypass_free_obj(*req);
     } H5E_END_TRY;
+
+    pthread_mutex_unlock(&mutex_local);
 
     return NULL;
 } /* end H5VL_bypass_file_open() */
@@ -3868,6 +3878,7 @@ H5VL_bypass_file_close(void *file, hid_t dxpl_id, void **req)
 
     assert(o);
     assert(o->under_object);
+    pthread_mutex_lock(&mutex_local);
 
     /* Find the name of this file */
     if (get_filename_helper((H5VL_bypass_t *)file, file_name, H5I_FILE, req) < 0) {
@@ -3881,7 +3892,6 @@ H5VL_bypass_file_close(void *file, hid_t dxpl_id, void **req)
     /* Close the file opened with C.  Remove the file structure from the list when
      * the reference count drops to zero */
     for (i = 0; i < file_stuff_count; i++) {
-        pthread_mutex_lock(&mutex_local);
         if (!strcmp(file_stuff[i].name, file_name) && file_stuff[i].fd) {
             /* Wait until all thread in the thread pool finish reading the data before closing the C file */
             while (file_stuff[i].num_reads > 0)
@@ -3905,7 +3915,6 @@ H5VL_bypass_file_close(void *file, hid_t dxpl_id, void **req)
                 remove_file_info_helper(i);
             }
         }
-        pthread_mutex_unlock(&mutex_local);
     }
 
     if ((ret_value = H5VLfile_close(o->under_object, o->under_vol_id, dxpl_id, req)) < 0) {
@@ -3926,6 +3935,7 @@ H5VL_bypass_file_close(void *file, hid_t dxpl_id, void **req)
             ret_value = -1;
 
 done:
+    pthread_mutex_unlock(&mutex_local);
     return ret_value;
 
 } /* end H5VL_bypass_file_close() */
