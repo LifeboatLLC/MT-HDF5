@@ -2590,6 +2590,7 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
     bool       any_thread_active = false;
     bool       read_use_native   = false;
     bool       external_link_access = false;
+    bool       must_block        = false;
     H5S_sel_type mem_sel_type = H5S_SEL_ERROR;
     H5S_sel_type file_sel_type = H5S_SEL_ERROR;
     bool types_equal = false;
@@ -2765,6 +2766,9 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
 
             thread_task_finished = false;
             thread_loop_finish   = false;
+            /* At least one read is being done through the Bypass VOL,
+             * so we should block until all tasks are complete */
+            must_block = true;
             pthread_mutex_unlock(&mutex_local);
 
             /* Initialize data selection info */
@@ -2841,21 +2845,23 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
 
     /* Only finish H5Dread() once all threads are inactive and no tasks are undone */
     /* Only block here if Bypass VOL was used for the read */
-    while (!read_use_native) {
-        any_thread_active = false;
+    if (must_block) {
+        while (true) {
+            any_thread_active = false;
 
-        if (is_any_thread_active(&any_thread_active) < 0) {
-            fprintf(stderr, "Unable to query thread active status\n");
-            /* Prevent deadlock on error */
-            pthread_mutex_unlock(&mutex_local);
-            ret_value = -1;
-            goto done;
+            if (is_any_thread_active(&any_thread_active) < 0) {
+                fprintf(stderr, "Unable to query thread active status\n");
+                /* Prevent deadlock on error */
+                pthread_mutex_unlock(&mutex_local);
+                ret_value = -1;
+                goto done;
+            }
+
+            if (!any_thread_active && thread_task_count == 0)
+                break;
+
+            pthread_cond_wait(&cond_read_finished, &mutex_local);
         }
-
-        if (!any_thread_active && thread_task_count == 0)
-            break;
-
-        pthread_cond_wait(&cond_read_finished, &mutex_local);
     }
 
     if (ret_value < 0) {
