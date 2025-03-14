@@ -1476,7 +1476,7 @@ dset_open_helper(H5VL_bypass_t *obj, hid_t dxpl_id, void **req) {
     get_args.op_type               = H5VL_DATASET_GET_DCPL;
     get_args.args.get_dcpl.dcpl_id = H5I_INVALID_HID;
 
-    if (H5VL_bypass_dataset_get(obj, &get_args, dxpl_id, req) < 0) {
+    if (H5VLdataset_get(obj->under_object, obj->under_vol_id, &get_args, dxpl_id, req) < 0) {
         fprintf(stderr, "unable to get opened dataset's DCPL\n");
         ret_value = -1;
         goto done;
@@ -1496,7 +1496,7 @@ dset_open_helper(H5VL_bypass_t *obj, hid_t dxpl_id, void **req) {
     get_args.args.get_space.space_id = H5I_INVALID_HID;
 
     /* Retrieve the dataset's dataspace ID */
-    if (H5VL_bypass_dataset_get(obj, &get_args, dxpl_id, req) < 0) {
+    if (H5VLdataset_get(obj->under_object, obj->under_vol_id, &get_args, dxpl_id, req) < 0) {
         fprintf(stderr, "unable to get opened dataset's dataspace\n");
         ret_value = -1;
         goto done;
@@ -1692,7 +1692,7 @@ get_dset_name_helper(H5VL_bypass_t *dset, char *name, void **req)
     args.args.get_name.buf      = name;
     args.args.get_name.name_len = &dset_name_len;
 
-    if (H5VL_bypass_object_get(dset, &loc_params, &args, H5P_DATASET_XFER_DEFAULT, req) < 0) {
+    if (H5VLobject_get(dset->under_object, &loc_params, dset->under_vol_id, &args, H5P_DATASET_XFER_DEFAULT, req) < 0) {
         printf("In %s of %s at line %d: H5VL_bypass_object_get failed\n", __func__, __FILE__, __LINE__);
         ret_value = -1;
         goto done;
@@ -1744,7 +1744,7 @@ get_num_chunks_helper(H5VL_bypass_t *dset, hid_t file_space_id, hsize_t *nchunks
     vol_cb_args.args                      = &dset_opt_args;
 
     /* Get the number of written chunks */
-    if (H5VL_bypass_dataset_optional(dset, &vol_cb_args, H5P_DEFAULT, req) < 0) {
+    if (H5VLdataset_optional(dset->under_object, dset->under_vol_id, &vol_cb_args, H5P_DEFAULT, req) < 0) {
         printf("In %s of %s at line %d: H5VL_bypass_dataset_optional failed\n", __func__, __FILE__, __LINE__);
         ret_value = -1;
         goto done;
@@ -3003,7 +3003,7 @@ H5VL_bypass_dataset_specific(void *obj, H5VL_dataset_specific_args_t *args, hid_
         get_args.args.get_space.space_id = H5I_INVALID_HID;
 
         /* Retrieve the dataset's dataspace ID */
-        if (H5VL_bypass_dataset_get(obj, &get_args, dxpl_id, req) < 0) {
+        if (H5VLdataset_get(o->under_object, o->under_vol_id, &get_args, dxpl_id, req) < 0) {
             fprintf(stderr, "unable to get opened dataset's dataspace\n");
             ret_value = -1;
             goto done;
@@ -5164,7 +5164,7 @@ get_dset_location(H5VL_bypass_t *dset_obj, hid_t dxpl_id, void **req, haddr_t *l
     opt_args.op_type                = H5VL_NATIVE_DATASET_GET_OFFSET;
     opt_args.args                   = &dset_opt_args;
 
-    if (H5VL_bypass_dataset_optional(dset_obj, &opt_args, dxpl_id, req) < 0) {
+    if (H5VLdataset_optional(dset_obj->under_object, dset_obj->under_vol_id, &opt_args, dxpl_id, req) < 0) {
         fprintf(stderr, "unable to get opened dataset's location\n");
         ret_value = -1;
         goto done;
@@ -5188,7 +5188,7 @@ get_dtype_info(H5VL_bypass_t *dset_obj, hid_t dxpl_id, void **req) {
     get_args.op_type               = H5VL_DATASET_GET_TYPE;
     get_args.args.get_type.type_id = H5I_INVALID_HID;
 
-    if (H5VL_bypass_dataset_get(dset_obj, &get_args, dxpl_id, req) < 0) {
+    if (H5VLdataset_get(dset_obj->under_object, dset_obj->under_vol_id, &get_args, dxpl_id, req) < 0) {
         fprintf(stderr, "unable to get dataset's datatype\n");
         ret_value = -1;
         goto done;
@@ -5281,7 +5281,7 @@ get_dset_space_status(H5VL_bypass_t *dset_obj, hid_t dxpl_id, void **req) {
     get_args.op_type               = H5VL_DATASET_GET_SPACE_STATUS;
     get_args.args.get_space_status.status = &ret_value;
 
-    if (H5VL_bypass_dataset_get(dset_obj, &get_args, dxpl_id, req) < 0) {
+    if (H5VLdataset_get(dset_obj->under_object, dset_obj->under_vol_id, &get_args, dxpl_id, req) < 0) {
         fprintf(stderr, "unable to get dataset's space status\n");
         ret_value = H5D_SPACE_STATUS_ERROR;
         goto done;
