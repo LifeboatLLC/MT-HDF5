@@ -5108,6 +5108,12 @@ should_dset_use_native(const Bypass_dataset_t* dset, bool *should_use_native) {
         goto done;
     }
 
+    /* For now, the Bypass VOL only supports signed integers */
+    if (dset->dtype_info.sign != H5T_SGN_2) {
+        *should_use_native = true;
+        goto done;
+    }
+
     if (dset->layout == H5D_COMPACT) {
         *should_use_native = true;
         goto done;
