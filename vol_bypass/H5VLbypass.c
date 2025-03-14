@@ -3616,6 +3616,7 @@ H5VL_bypass_file_get(void *file, H5VL_file_get_args_t *args, hid_t dxpl_id, void
         goto done;
     }
 
+done:
     return ret_value;
 } /* end H5VL_bypass_file_get() */
 
@@ -3803,7 +3804,7 @@ H5VL_bypass_file_close(void *file, hid_t dxpl_id, void **req)
     printf("------- BYPASS  VOL FILE Close\n");
 #endif
     assert(o->type == H5I_FILE);
-    assert(o->u.file.ref_count > 0);
+    assert(o->top_only || o->u.file.ref_count > 0);
 
     /* Release our wrapper, if underlying file was closed */
     pthread_mutex_lock(&mutex_local);
@@ -4394,8 +4395,12 @@ H5VL_bypass_object_get(void *obj, const H5VL_loc_params_t *loc_params, H5VL_obje
     printf("------- BYPASS  VOL OBJECT Get\n");
 #endif
 
-    ret_value = H5VLobject_get(o->under_object, loc_params, o->under_vol_id, args, dxpl_id, req);
+    if ((ret_value = H5VLobject_get(o->under_object, loc_params, o->under_vol_id, args, dxpl_id, req)) < 0) {
+        fprintf(stderr, "failed to get object from underlying connector\n");
+        goto done;
+    }
 
+done:
     return ret_value;
 } /* end H5VL_bypass_object_get() */
 
