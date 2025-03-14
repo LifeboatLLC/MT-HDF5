@@ -2314,7 +2314,7 @@ process_vectors(void *rbuf, sel_info_t *selection_info)
                 }
 
                 /* Copy the existing data */
-                (void)memcpy(md_for_thread.files, md_for_thread.files,
+                (void)memcpy(md_for_thread.files, md_for_thread.files_local,
                              sizeof(md_for_thread.files_local));
                 (void)memcpy(md_for_thread.addrs, md_for_thread.addrs_local,
                              sizeof(md_for_thread.addrs_local));
