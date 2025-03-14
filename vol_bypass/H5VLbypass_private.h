@@ -48,9 +48,9 @@ pthread_cond_t  continue_local;
 int  nthreads_tpool       = NUM_LOCAL_THREADS;
 int  nsteps_tpool         = THREAD_STEP;
 int  info_pointer         = 0;
-int  thread_task_count    = 0;
-bool thread_task_finished = false;                   /* Flag for H5Dread to notify the thread pool that it finished putting tasks in the queue */
-bool thread_loop_finish   = false;
+int  tasks_in_queue    = 0;
+int  tasks_unfinished  = 0;
+bool all_tasks_enqueued = false;                   /* Flag for H5Dread to notify the thread pool that it finished putting tasks in the queue */
 bool stop_tpool           = false;                   /* Flag to tell the thread pool to terminate, turned on in H5VL_bypass_term */
 pthread_t th[NTHREADS_MAX];
 
@@ -119,8 +119,6 @@ typedef struct {
     size_t     vec_arr_nalloc;
     size_t     vec_arr_nused;
     bool       free_memory;
-
-    bool       *thread_is_active; /* Array of active status for each tpool thread */
 } info_for_tpool_t;
 
 static info_t *info_stuff;
