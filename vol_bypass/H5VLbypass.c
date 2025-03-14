@@ -460,7 +460,7 @@ static void *start_thread_for_pool(void *args);
 static H5VL_bypass_t *
 H5VL_bypass_new_obj(void *under_obj, hid_t under_vol_id)
 {
-    H5VL_bypass_t *new_obj;
+    H5VL_bypass_t *new_obj = NULL;
 
     new_obj               = (H5VL_bypass_t *)calloc(1, sizeof(H5VL_bypass_t));
     new_obj->under_object = under_obj;
@@ -500,7 +500,7 @@ error:
 static herr_t
 H5VL_bypass_free_obj(H5VL_bypass_t *obj)
 {
-    hid_t err_id;
+    hid_t err_id = H5I_INVALID_HID;
     herr_t ret_value = 0;
 
     assert(obj);
@@ -771,7 +771,7 @@ static void *
 H5VL_bypass_info_copy(const void *_info)
 {
     const H5VL_bypass_info_t *info = (const H5VL_bypass_info_t *)_info;
-    H5VL_bypass_info_t       *new_info;
+    H5VL_bypass_info_t       *new_info = NULL;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL INFO Copy\n");
@@ -847,7 +847,7 @@ static herr_t
 H5VL_bypass_info_free(void *_info)
 {
     H5VL_bypass_info_t *info = (H5VL_bypass_info_t *)_info;
-    hid_t               err_id;
+    hid_t               err_id = H5I_INVALID_HID;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL INFO Free\n");
@@ -930,10 +930,10 @@ H5VL_bypass_info_to_str(const void *_info, char **str)
 static herr_t
 H5VL_bypass_str_to_info(const char *str, void **_info)
 {
-    H5VL_bypass_info_t *info;
+    H5VL_bypass_info_t *info = NULL;
     unsigned            under_vol_value;
     const char         *under_vol_info_start, *under_vol_info_end;
-    hid_t               under_vol_id;
+    hid_t               under_vol_id = H5I_INVALID_HID;
     void               *under_vol_info = NULL;
 
 #ifdef ENABLE_BYPASS_LOGGING
@@ -1006,7 +1006,7 @@ static herr_t
 H5VL_bypass_get_wrap_ctx(const void *obj, void **wrap_ctx)
 {
     const H5VL_bypass_t    *o = (const H5VL_bypass_t *)obj;
-    H5VL_bypass_wrap_ctx_t *new_wrap_ctx;
+    H5VL_bypass_wrap_ctx_t *new_wrap_ctx = NULL;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL WRAP CTX Get\n");
@@ -1040,7 +1040,7 @@ static void *
 H5VL_bypass_wrap_object(void *obj, H5I_type_t obj_type, void *_wrap_ctx)
 {
     H5VL_bypass_wrap_ctx_t *wrap_ctx = (H5VL_bypass_wrap_ctx_t *)_wrap_ctx;
-    H5VL_bypass_t          *new_obj;
+    H5VL_bypass_t          *new_obj = NULL;
     void                   *under;
 
 #ifdef ENABLE_BYPASS_LOGGING
@@ -1104,7 +1104,7 @@ static herr_t
 H5VL_bypass_free_wrap_ctx(void *_wrap_ctx)
 {
     H5VL_bypass_wrap_ctx_t *wrap_ctx = (H5VL_bypass_wrap_ctx_t *)_wrap_ctx;
-    hid_t                   err_id;
+    hid_t                   err_id = H5I_INVALID_HID;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL WRAP CTX Free\n");
@@ -1139,9 +1139,9 @@ static void *
 H5VL_bypass_attr_create(void *obj, const H5VL_loc_params_t *loc_params, const char *name, hid_t type_id,
                         hid_t space_id, hid_t acpl_id, hid_t aapl_id, hid_t dxpl_id, void **req)
 {
-    H5VL_bypass_t *attr;
+    H5VL_bypass_t *attr = NULL;
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
-    void          *under;
+    void          *under = NULL;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL ATTRIBUTE Create\n");
@@ -1176,9 +1176,9 @@ static void *
 H5VL_bypass_attr_open(void *obj, const H5VL_loc_params_t *loc_params, const char *name, hid_t aapl_id,
                       hid_t dxpl_id, void **req)
 {
-    H5VL_bypass_t *attr;
+    H5VL_bypass_t *attr = NULL;
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
-    void          *under;
+    void          *under = NULL;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL ATTRIBUTE Open\n");
@@ -1212,7 +1212,7 @@ static herr_t
 H5VL_bypass_attr_read(void *attr, hid_t mem_type_id, void *buf, hid_t dxpl_id, void **req)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)attr;
-    herr_t         ret_value;
+    herr_t         ret_value = 0;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL ATTRIBUTE Read\n");
@@ -1241,7 +1241,7 @@ static herr_t
 H5VL_bypass_attr_write(void *attr, hid_t mem_type_id, const void *buf, hid_t dxpl_id, void **req)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)attr;
-    herr_t         ret_value;
+    herr_t         ret_value = 0;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL ATTRIBUTE Write\n");
@@ -1270,7 +1270,7 @@ static herr_t
 H5VL_bypass_attr_get(void *obj, H5VL_attr_get_args_t *args, hid_t dxpl_id, void **req)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
-    herr_t         ret_value;
+    herr_t         ret_value = 0;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL ATTRIBUTE Get\n");
@@ -1300,7 +1300,7 @@ H5VL_bypass_attr_specific(void *obj, const H5VL_loc_params_t *loc_params, H5VL_a
                           hid_t dxpl_id, void **req)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
-    herr_t         ret_value;
+    herr_t         ret_value = 0;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL ATTRIBUTE Specific\n");
@@ -1329,7 +1329,7 @@ static herr_t
 H5VL_bypass_attr_optional(void *obj, H5VL_optional_args_t *args, hid_t dxpl_id, void **req)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
-    herr_t         ret_value;
+    herr_t         ret_value = 0;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL ATTRIBUTE Optional\n");
@@ -1358,7 +1358,7 @@ static herr_t
 H5VL_bypass_attr_close(void *attr, hid_t dxpl_id, void **req)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)attr;
-    herr_t         ret_value;
+    herr_t         ret_value = 0;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL ATTRIBUTE Close\n");
@@ -2895,7 +2895,7 @@ H5VL_bypass_dataset_write(size_t count, void *dset[], hid_t mem_type_id[], hid_t
 {
     void  *o_arr[count]; /* Array of under objects */
     hid_t  under_vol_id; /* VOL ID for all objects */
-    herr_t ret_value;
+    herr_t ret_value = 0;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL DATASET Write\n");
@@ -2932,7 +2932,7 @@ static herr_t
 H5VL_bypass_dataset_get(void *dset, H5VL_dataset_get_args_t *args, hid_t dxpl_id, void **req)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)dset;
-    herr_t         ret_value;
+    herr_t         ret_value = 0;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL DATASET Get\n");
@@ -3041,7 +3041,7 @@ static herr_t
 H5VL_bypass_dataset_optional(void *obj, H5VL_optional_args_t *args, hid_t dxpl_id, void **req)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
-    herr_t         ret_value;
+    herr_t         ret_value = 0;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL DATASET Optional\n");
@@ -3109,9 +3109,9 @@ static void *
 H5VL_bypass_datatype_commit(void *obj, const H5VL_loc_params_t *loc_params, const char *name, hid_t type_id,
                             hid_t lcpl_id, hid_t tcpl_id, hid_t tapl_id, hid_t dxpl_id, void **req)
 {
-    H5VL_bypass_t *dt;
+    H5VL_bypass_t *dt = NULL;
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
-    void          *under;
+    void          *under = NULL;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL DATATYPE Commit\n");
@@ -3146,9 +3146,9 @@ static void *
 H5VL_bypass_datatype_open(void *obj, const H5VL_loc_params_t *loc_params, const char *name, hid_t tapl_id,
                           hid_t dxpl_id, void **req)
 {
-    H5VL_bypass_t *dt;
+    H5VL_bypass_t *dt = NULL;
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
-    void          *under;
+    void          *under = NULL;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL DATATYPE Open\n");
@@ -3182,7 +3182,7 @@ static herr_t
 H5VL_bypass_datatype_get(void *dt, H5VL_datatype_get_args_t *args, hid_t dxpl_id, void **req)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)dt;
-    herr_t         ret_value;
+    herr_t         ret_value = 0;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL DATATYPE Get\n");
@@ -3211,8 +3211,8 @@ static herr_t
 H5VL_bypass_datatype_specific(void *obj, H5VL_datatype_specific_args_t *args, hid_t dxpl_id, void **req)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
-    hid_t          under_vol_id;
-    herr_t         ret_value;
+    hid_t          under_vol_id = H5I_INVALID_HID;
+    herr_t         ret_value = 0;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL DATATYPE Specific\n");
@@ -3245,7 +3245,7 @@ static herr_t
 H5VL_bypass_datatype_optional(void *obj, H5VL_optional_args_t *args, hid_t dxpl_id, void **req)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
-    herr_t         ret_value;
+    herr_t         ret_value = 0;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL DATATYPE Optional\n");
@@ -3274,7 +3274,7 @@ static herr_t
 H5VL_bypass_datatype_close(void *dt, hid_t dxpl_id, void **req)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)dt;
-    herr_t         ret_value;
+    herr_t         ret_value = 0;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL DATATYPE Close\n");
@@ -3953,9 +3953,9 @@ static void *
 H5VL_bypass_group_create(void *obj, const H5VL_loc_params_t *loc_params, const char *name, hid_t lcpl_id,
                          hid_t gcpl_id, hid_t gapl_id, hid_t dxpl_id, void **req)
 {
-    H5VL_bypass_t *group;
+    H5VL_bypass_t *group = NULL;
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
-    void          *under;
+    void          *under = NULL;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL GROUP Create\n");
@@ -3990,9 +3990,9 @@ static void *
 H5VL_bypass_group_open(void *obj, const H5VL_loc_params_t *loc_params, const char *name, hid_t gapl_id,
                        hid_t dxpl_id, void **req)
 {
-    H5VL_bypass_t *group;
+    H5VL_bypass_t *group = NULL;
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
-    void          *under;
+    void          *under = NULL;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL GROUP Open\n");
@@ -4026,7 +4026,7 @@ static herr_t
 H5VL_bypass_group_get(void *obj, H5VL_group_get_args_t *args, hid_t dxpl_id, void **req)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
-    herr_t         ret_value;
+    herr_t         ret_value = 0;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL GROUP Get\n");
@@ -4056,9 +4056,9 @@ H5VL_bypass_group_specific(void *obj, H5VL_group_specific_args_t *args, hid_t dx
 {
     H5VL_bypass_t              *o = (H5VL_bypass_t *)obj;
     H5VL_group_specific_args_t  my_args;
-    H5VL_group_specific_args_t *new_args;
-    hid_t                       under_vol_id;
-    herr_t                      ret_value;
+    H5VL_group_specific_args_t *new_args = NULL;
+    hid_t                       under_vol_id = H5I_INVALID_HID;
+    herr_t                      ret_value = 0;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL GROUP Specific\n");
@@ -4106,7 +4106,7 @@ static herr_t
 H5VL_bypass_group_optional(void *obj, H5VL_optional_args_t *args, hid_t dxpl_id, void **req)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
-    herr_t         ret_value;
+    herr_t         ret_value = 0;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL GROUP Optional\n");
@@ -4135,7 +4135,7 @@ static herr_t
 H5VL_bypass_group_close(void *grp, hid_t dxpl_id, void **req)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)grp;
-    herr_t         ret_value;
+    herr_t         ret_value = 0;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL GROUP Close\n");
@@ -4169,10 +4169,10 @@ H5VL_bypass_link_create(H5VL_link_create_args_t *args, void *obj, const H5VL_loc
                         hid_t lcpl_id, hid_t lapl_id, hid_t dxpl_id, void **req)
 {
     H5VL_link_create_args_t  my_args;
-    H5VL_link_create_args_t *new_args;
+    H5VL_link_create_args_t *new_args = NULL;
     H5VL_bypass_t           *o            = (H5VL_bypass_t *)obj;
     hid_t                    under_vol_id = -1;
-    herr_t                   ret_value;
+    herr_t                   ret_value = 0;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL LINK Create\n");
@@ -4239,7 +4239,7 @@ H5VL_bypass_link_copy(void *src_obj, const H5VL_loc_params_t *loc_params1, void 
     H5VL_bypass_t *o_src        = (H5VL_bypass_t *)src_obj;
     H5VL_bypass_t *o_dst        = (H5VL_bypass_t *)dst_obj;
     hid_t          under_vol_id = -1;
-    herr_t         ret_value;
+    herr_t         ret_value = 0;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL LINK Copy\n");
@@ -4286,7 +4286,7 @@ H5VL_bypass_link_move(void *src_obj, const H5VL_loc_params_t *loc_params1, void 
     H5VL_bypass_t *o_src        = (H5VL_bypass_t *)src_obj;
     H5VL_bypass_t *o_dst        = (H5VL_bypass_t *)dst_obj;
     hid_t          under_vol_id = -1;
-    herr_t         ret_value;
+    herr_t         ret_value = 0;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL LINK Move\n");
@@ -4325,7 +4325,7 @@ H5VL_bypass_link_get(void *obj, const H5VL_loc_params_t *loc_params, H5VL_link_g
                      hid_t dxpl_id, void **req)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
-    herr_t         ret_value;
+    herr_t         ret_value = 0;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL LINK Get\n");
@@ -4355,7 +4355,7 @@ H5VL_bypass_link_specific(void *obj, const H5VL_loc_params_t *loc_params, H5VL_l
                           hid_t dxpl_id, void **req)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
-    herr_t         ret_value;
+    herr_t         ret_value = 0;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL LINK Specific\n");
@@ -4385,7 +4385,7 @@ H5VL_bypass_link_optional(void *obj, const H5VL_loc_params_t *loc_params, H5VL_o
                           hid_t dxpl_id, void **req)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
-    herr_t         ret_value;
+    herr_t         ret_value = 0;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL LINK Optional\n");
@@ -4483,7 +4483,7 @@ H5VL_bypass_object_copy(void *src_obj, const H5VL_loc_params_t *src_loc_params, 
 {
     H5VL_bypass_t *o_src = (H5VL_bypass_t *)src_obj;
     H5VL_bypass_t *o_dst = (H5VL_bypass_t *)dst_obj;
-    herr_t         ret_value;
+    herr_t         ret_value = 0;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL OBJECT Copy\n");
@@ -4515,7 +4515,7 @@ H5VL_bypass_object_get(void *obj, const H5VL_loc_params_t *loc_params, H5VL_obje
                        hid_t dxpl_id, void **req)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
-    herr_t         ret_value;
+    herr_t         ret_value = 0;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL OBJECT Get\n");
@@ -4545,8 +4545,8 @@ H5VL_bypass_object_specific(void *obj, const H5VL_loc_params_t *loc_params, H5VL
                             hid_t dxpl_id, void **req)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
-    hid_t          under_vol_id;
-    herr_t         ret_value;
+    hid_t          under_vol_id = H5I_INVALID_HID;
+    herr_t         ret_value = 0;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL OBJECT Specific\n");
@@ -4580,7 +4580,7 @@ H5VL_bypass_object_optional(void *obj, const H5VL_loc_params_t *loc_params, H5VL
                             hid_t dxpl_id, void **req)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
-    herr_t         ret_value;
+    herr_t         ret_value = 0;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL OBJECT Optional\n");
@@ -4608,7 +4608,7 @@ herr_t
 H5VL_bypass_introspect_get_conn_cls(void *obj, H5VL_get_conn_lvl_t lvl, const H5VL_class_t **conn_cls)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
-    herr_t         ret_value;
+    herr_t         ret_value = 0;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL INTROSPECT GetConnCls\n");
@@ -4639,7 +4639,7 @@ herr_t
 H5VL_bypass_introspect_get_cap_flags(const void *_info, uint64_t *cap_flags)
 {
     const H5VL_bypass_info_t *info = (const H5VL_bypass_info_t *)_info;
-    herr_t                    ret_value;
+    herr_t                    ret_value = 0;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL INTROSPECT GetCapFlags\n");
@@ -4668,7 +4668,7 @@ herr_t
 H5VL_bypass_introspect_opt_query(void *obj, H5VL_subclass_t cls, int op_type, uint64_t *flags)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
-    herr_t         ret_value;
+    herr_t         ret_value = 0;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL INTROSPECT OptQuery\n");
@@ -4696,7 +4696,7 @@ static herr_t
 H5VL_bypass_request_wait(void *obj, uint64_t timeout, H5VL_request_status_t *status)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
-    herr_t         ret_value;
+    herr_t         ret_value = 0;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL REQUEST Wait\n");
@@ -4724,7 +4724,7 @@ static herr_t
 H5VL_bypass_request_notify(void *obj, H5VL_request_notify_t cb, void *ctx)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
-    herr_t         ret_value;
+    herr_t         ret_value = 0;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL REQUEST Notify\n");
@@ -4751,7 +4751,7 @@ static herr_t
 H5VL_bypass_request_cancel(void *obj, H5VL_request_status_t *status)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
-    herr_t         ret_value;
+    herr_t         ret_value = 0;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL REQUEST Cancel\n");
@@ -4801,7 +4801,7 @@ static herr_t
 H5VL_bypass_request_optional(void *obj, H5VL_optional_args_t *args)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
-    herr_t         ret_value;
+    herr_t         ret_value = 0;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL REQUEST Optional\n");
@@ -4827,7 +4827,7 @@ static herr_t
 H5VL_bypass_request_free(void *obj)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
-    herr_t         ret_value;
+    herr_t         ret_value = 0;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL REQUEST Free\n");
@@ -4854,7 +4854,7 @@ herr_t
 H5VL_bypass_blob_put(void *obj, const void *buf, size_t size, void *blob_id, void *ctx)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
-    herr_t         ret_value;
+    herr_t         ret_value = 0;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL BLOB Put\n");
@@ -4878,7 +4878,7 @@ herr_t
 H5VL_bypass_blob_get(void *obj, const void *blob_id, void *buf, size_t size, void *ctx)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
-    herr_t         ret_value;
+    herr_t         ret_value = 0;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL BLOB Get\n");
@@ -4902,7 +4902,7 @@ herr_t
 H5VL_bypass_blob_specific(void *obj, void *blob_id, H5VL_blob_specific_args_t *args)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
-    herr_t         ret_value;
+    herr_t         ret_value = 0;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL BLOB Specific\n");
@@ -4926,7 +4926,7 @@ herr_t
 H5VL_bypass_blob_optional(void *obj, void *blob_id, H5VL_optional_args_t *args)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
-    herr_t         ret_value;
+    herr_t         ret_value = 0;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL BLOB Optional\n");
@@ -4952,7 +4952,7 @@ static herr_t
 H5VL_bypass_token_cmp(void *obj, const H5O_token_t *token1, const H5O_token_t *token2, int *cmp_value)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
-    herr_t         ret_value;
+    herr_t         ret_value = 0;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL TOKEN Compare\n");
@@ -4983,7 +4983,7 @@ static herr_t
 H5VL_bypass_token_to_str(void *obj, H5I_type_t obj_type, const H5O_token_t *token, char **token_str)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
-    herr_t         ret_value;
+    herr_t         ret_value = 0;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL TOKEN To string\n");
@@ -5013,7 +5013,7 @@ static herr_t
 H5VL_bypass_token_from_str(void *obj, H5I_type_t obj_type, const char *token_str, H5O_token_t *token)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
-    herr_t         ret_value;
+    herr_t         ret_value = 0;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL TOKEN From string\n");
@@ -5042,7 +5042,7 @@ herr_t
 H5VL_bypass_optional(void *obj, H5VL_optional_args_t *args, hid_t dxpl_id, void **req)
 {
     H5VL_bypass_t *o = (H5VL_bypass_t *)obj;
-    herr_t         ret_value;
+    herr_t         ret_value = 0;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS VOL generic Optional\n");
