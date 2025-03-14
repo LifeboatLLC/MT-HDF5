@@ -5096,7 +5096,20 @@ should_dset_use_native(const Bypass_dataset_t* dset, bool *should_use_native) {
         goto done;
     }
 
-    if (H5T_INTEGER != dset->dtype_info.class && H5T_FLOAT != dset->dtype_info.class) {
+    if (H5T_INTEGER != dset->dtype_info.class) {
+        *should_use_native = true;
+        goto done;
+    }
+
+    /* Some non-numeric library types (e.g. H5T_NATIVE_UCHAR) use the H5T_INTEGER class.
+     * This is a hack to avoid using the Bypass VOL for datatypes that are not equivalent to H5T_NATIVE_INT */
+    if (dset->dtype_info.size != sizeof(int)) {
+        *should_use_native = true;
+        goto done;
+    }
+
+    /* For now, the Bypass VOL only supports signed integers */
+    if (dset->dtype_info.sign != H5T_SGN_2) {
         *should_use_native = true;
         goto done;
     }
