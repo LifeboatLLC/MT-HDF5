@@ -41,33 +41,17 @@
 #define MB (1024 * 1024)
 
 pthread_mutex_t mutex_local;
-pthread_cond_t  cond_local;
+pthread_cond_t  cond_queue_not_empty;
 pthread_cond_t  cond_read_finished;
-pthread_cond_t  continue_local;
 
 int  nthreads_tpool       = NUM_LOCAL_THREADS;
 int  nsteps_tpool         = THREAD_STEP;
 int  info_pointer         = 0;
-int  thread_task_count    = 0;
-bool thread_task_finished = false;                   /* Flag for H5Dread to notify the thread pool that it finished putting tasks in the queue */
-bool thread_loop_finish   = false;
+int  tasks_in_queue    = 0;
+int  tasks_unfinished  = 0;
+bool all_tasks_enqueued = false;                   /* Flag for H5Dread to notify the thread pool that it finished putting tasks in the queue */
 bool stop_tpool           = false;                   /* Flag to tell the thread pool to terminate, turned on in H5VL_bypass_term */
 pthread_t th[NTHREADS_MAX];
-
-/* File info */
-typedef struct {
-    char name[1024];
-    int  fd;                /* C file descriptor  */ 
-    /* void *vfd_file_handle;  Currently not used */
-    unsigned ref_count;     /* Reference count    */
-    int  num_reads;         /* Number of reads still left undone */
-    bool read_started;      /* Flag to indicate reads have started */
-    pthread_cond_t close_ready;    /* Condition variable to indicate all reads are finished and the file can be close */ 
-} file_t;
-
-static file_t *file_stuff;
-static int file_stuff_count = 0;
-static int file_stuff_size = FILE_STUFF_SIZE;
 
 /* Log info to be written out for the C program */
 typedef struct {
@@ -82,46 +66,93 @@ typedef struct {
 } info_t;
 
 typedef struct {
-    size_t  counter;
-
-    char    file_name[BYPASS_NAME_SIZE_LONG];
-    char    dset_name[BYPASS_NAME_SIZE_LONG];
-
-    int     my_file_index;        /* The index of the FILE_T structure for this file */ 
-    hid_t   file_space_id;
-    hid_t   mem_space_id;
-    haddr_t chunk_addr;
-
-    int     dtype_size;
-
-    bool    memory_allocated;
-} sel_info_t;
-
-typedef struct {
     int      thread_id;
     int      fd;
 } info_for_thread_t;
+
+typedef struct dtype_info_t {
+    H5T_class_t class;
+    size_t size;
+    H5T_sign_t sign; /* Signed vs. unsigned */
+    H5T_order_t order; /* Bit order */
+} dtype_info_t;
+
+typedef struct task_file_t {
+    char name[BYPASS_NAME_SIZE_LONG]; /* TBD - Can be removed once log file is no longer needed */
+    int  fd;                /* C file descriptor  */
+    /* void *vfd_file_handle;  Currently not used */
+    unsigned rc;            /* Reference count    */
+} task_file_t;
+
+typedef struct Bypass_file_t {
+    char name[BYPASS_NAME_SIZE_LONG];
+    unsigned ref_count;     /* Reference count    */
+    task_file_t *task_file;
+} Bypass_file_t;
+
+/* Forward declaration of the bypass VOL connector's object */
+struct H5VL_bypass_t;
+
+typedef struct Bypass_dataset_t {
+    hid_t dcpl_id;
+    hid_t space_id;
+    H5D_layout_t layout;
+    int num_filters;
+    dtype_info_t dtype_info;
+    struct H5VL_bypass_t *file;  /* Use the forward-declared type */
+} Bypass_dataset_t;
+
+typedef struct Bypass_group_t {
+    struct H5VL_bypass_t *file; /* File containing the group */
+} Bypass_group_t;
+
+/* The bypass VOL connector's object */
+typedef struct H5VL_bypass_t {
+    hid_t under_vol_id; /* ID for underlying VOL connector */
+    void *under_object; /* Underlying VOL connector's object */
+    H5I_type_t type; /* Type of this object. */
+    bool top_only;
+
+    union {
+        Bypass_dataset_t dataset;
+        Bypass_file_t file;
+        Bypass_group_t group;
+    } u;
+} H5VL_bypass_t;
 
 typedef struct {
     int      thread_id;
     int      fd;            /* Remove this field and use file_indices */
     uint32_t step;
-    int      *file_indices;
     haddr_t  *addrs;
     size_t   *sizes;
     void     **vec_bufs;
+    task_file_t **files;
 
-    int        file_indices_local[LOCAL_VECTOR_LEN];
     haddr_t    addrs_local[LOCAL_VECTOR_LEN];
     size_t     sizes_local[LOCAL_VECTOR_LEN];
     void       *vec_bufs_local[LOCAL_VECTOR_LEN];
+    task_file_t *files_local[LOCAL_VECTOR_LEN];
 
     size_t     vec_arr_nalloc;
     size_t     vec_arr_nused;
     bool       free_memory;
-
-    bool       *thread_is_active; /* Array of active status for each tpool thread */
 } info_for_tpool_t;
+
+typedef struct {
+    size_t  counter;
+
+    char    dset_name[BYPASS_NAME_SIZE_LONG];
+
+    hid_t   file_space_id;
+    hid_t   mem_space_id;
+    haddr_t chunk_addr;
+
+    task_file_t *task_file;
+    int     dtype_size;
+
+    bool    memory_allocated;
+} sel_info_t;
 
 static info_t *info_stuff;
 static int info_count = 0;
