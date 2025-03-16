@@ -87,4 +87,12 @@ function and is used to select individual data elements in the dataspace object'
 Point selections are currently implemented using a simple linked list structure (see
 \ref{apdx:h5s_struct_h5s_pnt_list_t}).
 
+\subsection{Dataspace selection iterators}
+
+The H5S interface also includes functions for creating and using an iterator object which
+iterates over a selection within a dataspace and returns sequences of offset/length pairs.
+Dataspace iterators can be created and manipulated with the functions
+\nameref{apdx:h5s_func_h5ssel_iter_create}, \nameref{apdx:h5s_func_h5ssel_iter_get_seq_list},
+\nameref{apdx:h5s_func_h5ssel_iter_reset} and \nameref{apdx:h5s_func_h5ssel_iter_close}.
+
 \end{document}

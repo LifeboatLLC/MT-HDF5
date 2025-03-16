@@ -10,6 +10,9 @@
 
 The following sections give an overview of the data structures in the H5S interface
 and outline any concurrency issues that will have to be dealt with for each structure.
+Note that initial sketches of revisions proposed in the following sections are based
+off of the approach proposed in section \ref{h5s_concurrency_rcu}, so readers should
+be familiar with those details first.
 
 \subsection{\texttt{H5S\_t}}
 \label{apdx:h5s_struct_h5s_t}
@@ -21,11 +24,35 @@ struct H5S_t {
 };
 \end{minted}
 
-\texttt{H5S\_t} is the main structure representing a dataspace object. As the structure
-simply contains two other structures which are the focus of concurrency issues in H5S
-and which are on the larger side (80 bytes and 288 bytes, respectively), initial effort
-will explore pushing thread-safety down into those structures rather than here, unless
-another approach proves better.
+\nameref{apdx:h5s_struct_h5s_t} is the main structure representing a dataspace object.
+Concurrency issues with the structure lie within the \texttt{extent} and \texttt{select}
+fields; the structure itself doesn't have any inherent concurrency issues at the top
+level. Based on the initial sketch for adopting an RCU-like approach for solving H5S
+concurrency issues, a revised \nameref{apdx:h5s_struct_h5s_t} structure may look like
+the following:
+
+\begin{minted}{C}
+typedef struct H5S_kernel_t {
+    uint32_t reader_count;
+    bool     struct_replaced;
+} H5S_kernel_t;
+
+struct H5S_t {
+    H5S_extent_t extent; /* Dataspace extent (must stay first) */
+    H5S_select_t select; /* Dataspace selection */
+    _Atomic H5S_kernel_t kernel;
+};
+\end{minted}
+
+The new \texttt{H5S\_kernel\_t} structure field would essentially be used to reference count
+an instance of the structure in order to determine when it can be garbage collected. The
+\texttt{reader\_count} field serves as the reference count. When it drops to 0, the structure
+is allowed to be reclaimed/de-allocated. The \texttt{struct\_replaced} field serves as a flag
+that specifies whether the structure has actually been replaced with a new version by a writer.
+If the structure hasn't been replaced (and therefore the original is still the current version),
+then the structure doesn't need to be de-allocated as it is still in use. The flag would
+initially be set to \texttt{false} and would be changed to \texttt{true} when a writer replaces
+a version of \nameref{apdx:h5s_struct_h5s_t} with a new copy.
 
 \subsection{\texttt{H5S\_extent\_t}}
 \label{apdx:h5s_struct_h5s_extent_t}
@@ -52,12 +79,12 @@ meaning that an investigation of HDF5's object header sharing mechanism is likel
 needed to understand the effect of concurrency here.
 
 The \texttt{version} field is set at dataspace object creation time and is only
-ever modified by the \texttt{H5S\_set\_version()} function, which is only called
-on copies of existing dataspaces in \texttt{H5A\_\_create()} and
-\texttt{H5D\_\_init\_space()}.
+ever modified by the function \texttt{H5S\_set\_version()}, which is only called
+on copies of existing dataspaces in \texttt{H5A\_\_create()} and \texttt{H5D\_\_init\_space()}.
 
 All remaining fields are vulnerable to concurrency issues if the extent of a dataspace
-is modified concurrently.
+is modified concurrently. See Appendix \ref{apdx:h5s_fields_modified} for details on
+when these fields might be modified.
 
 \subsection{\texttt{H5S\_select\_t}}
 \label{apdx:h5s_struct_h5s_select_t}
@@ -84,9 +111,9 @@ typedef struct {
 object.
 
 The \texttt{type} field always points to one of the 'class' structures \texttt{H5S\_sel\_all},
-\texttt{H5S\_sel\_none}, \texttt{H5S\_sel\_hyper} or \texttt{H5S\_select\_class\_t}, which
-should be unchanging. However, this pointer can change at any time as the type of selection
-set within a dataspace object changes.
+\texttt{H5S\_sel\_none}, \\
+\texttt{H5S\_sel\_hyper} or \texttt{H5S\_select\_class\_t}, which should be unchanging. However,
+this pointer can change at any time as the type of selection set within a dataspace object changes.
 
 The \texttt{offset} and \texttt{offset\_changed} fields are primarily updated by
 the \nameref{apdx:h5s_func_h5soffset_simple} function, though they are also reset to 0
@@ -101,6 +128,9 @@ object which could end up being shared between dataspaces in the situations desc
 in \ref{h5s_state_sharing}. This field is only valid when the selection in the dataspace
 is either a point or hyperslab selection and is updated if changing between the two,
 or if the selection in the dataspace is being released.
+
+See Appendix \ref{apdx:h5s_fields_modified} for details on when these fields might be
+modified.
 
 \subsection{\texttt{H5S\_hyper\_sel\_t}}
 \label{apdx:h5s_struct_h5s_hyper_sel_t}
@@ -264,9 +294,10 @@ typedef struct H5S_sel_iter_t {
 \texttt{H5S\_sel\_iter\_t} is the data structure used for dataspace selection iterator objects.
 
 The \texttt{type} field always points to one of the 'class' structures \texttt{H5S\_sel\_all},
-\texttt{H5S\_sel\_none}, \texttt{H5S\_sel\_hyper} or \texttt{H5S\_select\_class\_t}, which
-should be unchanging. However, this pointer can change at any time as the dataspace object
-set for a selection iterator changes via \nameref{apdx:h5s_func_h5ssel_iter_reset}.
+\texttt{H5S\_sel\_none}, \\
+\texttt{H5S\_sel\_hyper} or \texttt{H5S\_select\_class\_t}, which should be unchanging. However,
+this pointer can change at any time as the dataspace object set for a selection iterator changes
+via \nameref{apdx:h5s_func_h5ssel_iter_reset}.
 
 The \texttt{rank}, \texttt{dims}, \texttt{sel\_off}, \texttt{elmt\_size} and \texttt{flags}
 fields are generally unchanging after selection iterator creation. However, a concurrent call
@@ -279,9 +310,9 @@ this field will be a point of contention. However, whether or not there is a rea
 for multiple threads to share the same iterator object remains to be seen.
 
 Each of the fields in the \texttt{u} union contain information that is updated during each call to
-\nameref{apdx:h5s_func_h5ssel_iter_get_seq_list} on an iterator object. If multiple threads are
-calling that function on the same iterator object, this information will be a point of contention.
-However,  whether or not there is a reasonable use case for multiple threads to share the same
-iterator object remains to be seen.
+the function \nameref{apdx:h5s_func_h5ssel_iter_get_seq_list} on an iterator object. If multiple
+threads are calling that function on the same iterator object, this information will be a point of
+contention. However,  whether or not there is a reasonable use case for multiple threads to share
+the same iterator object remains to be seen.
 
 \end{document}

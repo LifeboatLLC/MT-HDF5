@@ -96,6 +96,13 @@ described more in section \ref{h5s_state_sharing}.
 
 Finally, this function can encounter the issue described in section \ref{h5s_op_gen}.
 
+\textbf{Miscellaneous recommendations:} This function assumes that the passed in arrays are
+each at least big enough to hold a number of elements equal to the rank value (number of
+dimensions) of the passed in dataspace. This presents an obvious memory safety issue which
+could be made worse in the presence of concurrency. It is recommended that a size parameter
+be added, either a single parameter covering all arrays or individual parameters, to help
+prevent this issue.
+
 \subsection{\texttt{H5Scombine\_select()}}
 \label{apdx:h5s_func_h5scombine_select}
 
@@ -315,6 +322,13 @@ Retrieves the parameters for a regular hyperslab selection set on a dataspace ob
 \textbf{Concurrency notes:} Unexpected results could occur if the dataspace is concurrently
 modified while retrieval of the selection within it is taking place.
 
+\textbf{Miscellaneous recommendations:} This function assumes that the passed in arrays are
+each at least big enough to hold a number of elements equal to the rank value (number of
+dimensions) of the passed in dataspace. This presents an obvious memory safety issue which
+could be made worse in the presence of concurrency. It is recommended that a size parameter
+be added, either a single parameter covering all arrays or individual parameters, to help
+prevent this issue.
+
 \subsection{\texttt{H5Sget\_select\_bounds()}}
 \label{apdx:h5s_func_h5sget_select_bounds}
 
@@ -328,6 +342,13 @@ dataspace object.
 
 \textbf{Concurrency notes:} Unexpected results could occur if the dataspace is concurrently modified
 while retrieval of the bounds of the selection within it is taking place.
+
+\textbf{Miscellaneous recommendations:} This function assumes that the passed in arrays are
+each at least big enough to hold a number of elements equal to the rank value (number of
+dimensions) of the passed in dataspace. This presents an obvious memory safety issue which
+could be made worse in the presence of concurrency. It is recommended that a size parameter
+be added, either a single parameter covering all arrays or individual parameters, to help
+prevent this issue.
 
 \subsection{\texttt{H5Sget\_select\_elem\_npoints()}}
 \label{apdx:h5s_func_h5sget_select_elem_npoints}
@@ -360,6 +381,13 @@ modified while retrieval of the list of selected points is taking place.
 
 This function has additional concurrency issues described in \ref{h5s_concurrency_point}.
 
+\textbf{Miscellaneous recommendations:} It is recommended that a \texttt{buf\_size} parameter
+be added to this function to specify the number of \texttt{hsize\_t} elements that the buffer
+has space for. Without this, the library can easily end up overflowing the \texttt{buf} array,
+especially when the buffer is accidentally allocated with a size of 0 bytes (which can happen
+when a previous call to \nameref{apdx:h5s_func_h5sget_select_elem_npoints} returns 0. This is
+also an easy mistake to make when concurrency is involved with H5S functions.
+
 \subsection{\texttt{H5Sget\_select\_hyper\_blocklist()}}
 \label{apdx:h5s_func_h5sget_select_hyper_blocklist}
 
@@ -374,6 +402,13 @@ must have a hyperslab selection within it.
 
 \textbf{Concurrency notes:} Unexpected results could occur if the dataspace is concurrently
 modified while retrieval of the list of hyperslab blocks is taking place.
+
+\textbf{Miscellaneous recommendations:} It is recommended that a \texttt{buf\_size} parameter
+be added to this function to specify the number of \texttt{hsize\_t} elements that the buffer
+has space for. Without this, the library can easily end up overflowing the \texttt{buf} array,
+especially when the buffer is accidentally allocated with a size of 0 bytes (which can happen
+when a previous call to \nameref{apdx:h5s_func_h5sget_select_hyper_nblocks} returns 0. This is
+also an easy mistake to make when concurrency is involved with H5S functions.
 
 \subsection{\texttt{H5Sget\_select\_hyper\_nblocks()}}
 \label{apdx:h5s_func_h5sget_select_hyper_nblocks}
@@ -432,6 +467,13 @@ each array must be before making a second call to populate those arrays.
 
 \textbf{Concurrency notes:} Unexpected results could occur if the dataspace is concurrently modified
 while retrieval of the dimensionality information is taking place.
+
+\textbf{Miscellaneous recommendations:} This function assumes that the passed in arrays are
+each at least big enough to hold a number of elements equal to the rank value (number of
+dimensions) of the passed in dataspace. This presents an obvious memory safety issue which
+could be made worse in the presence of concurrency. It is recommended that a size parameter
+be added, either a single parameter covering all arrays or individual parameters, to help
+prevent this issue.
 
 \subsection{\texttt{H5Sget\_simple\_extent\_ndims()}}
 \label{apdx:h5s_func_h5sget_simple_extent_ndims}
@@ -537,6 +579,12 @@ modified while the selection modification operation is taking place. Further, co
 of this function can be affected by both of the issues described in section 
 \ref{h5s_concurrent_manipulation}.
 
+\textbf{Miscellaneous recommendations:} This function assumes that the passed in array is
+at least big enough to hold a number of elements equal to the rank value (number of
+dimensions) of the passed in dataspace. This presents an obvious memory safety issue which
+could be made worse in the presence of concurrency. It is recommended that a size parameter
+be added to help prevent this issue.
+
 \subsection{\texttt{H5Ssel\_iter\_close()}}
 \label{apdx:h5s_func_h5ssel_iter_close}
 
@@ -635,6 +683,12 @@ object without having to redefine the selection.
 \textbf{Concurrency notes:} This function is affected by all the concurrency issues described in
 sections \ref{h5s_concurrent_manipulation}, \ref{h5s_state_sharing} and \ref{h5s_op_gen}.
 
+\textbf{Miscellaneous recommendations:} This function assumes that the passed in array is
+at least big enough to hold a number of elements equal to the rank value (number of
+dimensions) of the passed in dataspace. This presents an obvious memory safety issue which
+could be made worse in the presence of concurrency. It is recommended that a size parameter
+be added to help prevent this issue.
+
 \subsection{\texttt{H5Sselect\_all()}}
 \label{apdx:h5s_func_h5sselect_all}
 
@@ -709,6 +763,13 @@ existing selection with its own.
 
 This function can also encounter the issue described in section \ref{h5s_op_gen}.
 
+\textbf{Miscellaneous recommendations:} This function assumes that the passed in arrays are
+each at least big enough to hold a number of elements equal to the rank value (number of
+dimensions) of the passed in dataspace. This presents an obvious memory safety issue which
+could be made worse in the presence of concurrency. It is recommended that a size parameter
+be added, either a single parameter covering all arrays or individual parameters, to help
+prevent this issue.
+
 \subsection{\texttt{H5Sselect\_intersect\_block()}}
 \label{apdx:h5s_func_h5sselect_intersect_block}
 
@@ -725,6 +786,13 @@ the coordinates specified in \texttt{start} and \texttt{end}.
 modified while the intersection information is being determined.
 
 This function can also encounter the issue described in section \ref{h5s_op_gen}.
+
+\textbf{Miscellaneous recommendations:} This function assumes that the passed in arrays are
+each at least big enough to hold a number of elements equal to the rank value (number of
+dimensions) of the passed in dataspace. This presents an obvious memory safety issue which
+could be made worse in the presence of concurrency. It is recommended that a size parameter
+be added, either a single parameter covering all arrays or individual parameters, to help
+prevent this issue.
 
 \subsection{\texttt{H5Sselect\_none()}}
 \label{apdx:h5s_func_h5sselect_none}

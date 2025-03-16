@@ -1,0 +1,417 @@
+\documentclass[../HDF5_RFC.tex]{subfiles}
+ 
+\begin{document}
+
+\section{Current state of concurrency in the H5S interface}
+\label{h5s_concurrency_current_state}
+
+The following sections detail the current state of support for concurrency within the H5S interface of
+HDF5 and discusses design decisions and/or proposals for resolving the concurrency issues encountered and listed in this document.
+
+\subsection{Current state}
+
+Somewhat exhaustive testing for the H5S interface was written first before beginning to adapt the interface
+for concurrency. This testing is in the test program \texttt{test/mt\_h5s\_test.c} (which may be moved
+under \texttt{test/threads} in the future). Currently, this test program has only a few sub-tests. Two
+sub-tests cover the use case of reading from a dataset using multiple threads, both with a dataspace
+shared among the threads and with separate, per-thread dataspaces. The remaining sub-tests essentially
+just perform several random H5S operations on dataspaces, both shared and per-thread, and check for
+expected error cases where concurrency can result in interleaving of H5S operations in ways which are
+invalid from HDF5's perspective, such as calling a point selection-specific function on a dataspace with
+a hyperslab selection. Two sub-tests cover the 'read-only' case where threads only call functions from
+the first list below. Another four sub-tests cover the 'read-write' case where threads can call functions
+from either list below. For the 'read-write' tests where dataspaces are shared between threads, the test
+program tests both the case where only 1 thread is allowed to modify a dataspace concurrently with reader
+threads and the case where multiple threads are allowed to modify a dataspace concurrently. A sub-test still
+needs to be written for the 'write-write' case where threads call only functions from the second list below.
+This test will likely be very similar to the 'read-write' case with multiple writer threads, but may help
+to uncover deeper concurrency issues by allowing for more concurrent modifications to be made to a shared
+dataspace. The idea in testing H5S like this is simply to test as exhaustively as possible while trying to
+bring up concurrency issues in H5S. This interface is well-tested for certain functions, such as
+\nameref{apdx:h5s_func_h5sselect_hyperslab}, but is very poorly tested for many other H5S functions.
+As concurrency within H5S stabilizes, more tests that are catered toward specific use cases will be
+added.
+
+Here, 'read-only' testing means only calling API functions which either retrieve information from a
+dataspace or which return a new dataspace without modifying one that is passed in to the function. This
+list of functions is as follows:
+
+\begin{itemize}
+    \item \nameref{apdx:h5s_func_h5screate}
+    \item \nameref{apdx:h5s_func_h5screate_simple}
+    \item \nameref{apdx:h5s_func_h5scombine_hyperslab}
+    \item \nameref{apdx:h5s_func_h5scombine_select}
+    \item \nameref{apdx:h5s_func_h5sdecode}
+    \item \nameref{apdx:h5s_func_h5sencode2}
+    \item \nameref{apdx:h5s_func_h5sextent_equal}
+    \item \nameref{apdx:h5s_func_h5sselect_intersect_block}
+    \item \nameref{apdx:h5s_func_h5sselect_project_intersection}
+    \item \nameref{apdx:h5s_func_h5scopy}
+    \item \nameref{apdx:h5s_func_h5sget_regular_hyperslab}
+    \item \nameref{apdx:h5s_func_h5sget_select_bounds}
+    \item \nameref{apdx:h5s_func_h5sget_select_elem_npoints}
+    \item \nameref{apdx:h5s_func_h5sget_select_elem_pointlist}
+    \item \nameref{apdx:h5s_func_h5sget_select_hyper_nblocks}
+    \item \nameref{apdx:h5s_func_h5sget_select_hyper_blocklist}
+    \item \nameref{apdx:h5s_func_h5sget_select_npoints}
+    \item \nameref{apdx:h5s_func_h5sget_select_type}
+    \item \nameref{apdx:h5s_func_h5sget_simple_extent_ndims}
+    \item \nameref{apdx:h5s_func_h5sget_simple_extent_dims}
+    \item \nameref{apdx:h5s_func_h5sget_simple_extent_npoints}
+    \item \nameref{apdx:h5s_func_h5sget_simple_extent_type}
+    \item \nameref{apdx:h5s_func_h5sis_regular_hyperslab}
+    \item \nameref{apdx:h5s_func_h5sis_simple}
+    \item \nameref{apdx:h5s_func_h5sselect_shape_same}
+    \item \nameref{apdx:h5s_func_h5sselect_valid}
+\end{itemize}
+
+Testing in a 'read-write' capacity means concurrent, mixed usage of the functions mentioned above with
+functions that modify some portion, the extent or selection or both, of a dataspace. This list of
+'write' functions is as follows:
+
+\begin{itemize}
+    \item \nameref{apdx:h5s_func_h5sclose}
+    \item \nameref{apdx:h5s_func_h5sextent_copy}
+    \item \nameref{apdx:h5s_func_h5smodify_select}
+    \item \nameref{apdx:h5s_func_h5soffset_simple}
+    \item \nameref{apdx:h5s_func_h5sselect_adjust}
+    \item \nameref{apdx:h5s_func_h5sselect_all}
+    \item \nameref{apdx:h5s_func_h5sselect_copy}
+    \item \nameref{apdx:h5s_func_h5sselect_elements}
+    \item \nameref{apdx:h5s_func_h5sselect_hyperslab}
+    \item \nameref{apdx:h5s_func_h5sselect_none}
+    \item \nameref{apdx:h5s_func_h5sset_extent_none}
+    \item \nameref{apdx:h5s_func_h5sset_extent_simple}
+\end{itemize}
+
+Dataspace selection iterator objects have their own concurrency issues which are separate from the H5S
+interface, so they are considered in a separate group here. For reference, the dataspace selection iterator
+functions are:
+
+\begin{itemize}
+    \item \nameref{apdx:h5s_func_h5ssel_iter_create}
+    \item \nameref{apdx:h5s_func_h5ssel_iter_get_seq_list}
+    \item \nameref{apdx:h5s_func_h5ssel_iter_reset}
+    \item \nameref{apdx:h5s_func_h5ssel_iter_close}
+\end{itemize}
+
+Initial testing appears to show that the acquisition of the library's global mutex can be dropped for
+nearly all H5S functions when testing on per-thread dataspaces without further modifications being
+made. The only portion of the H5S interface that hasn't yet been tested for concurrency issues in this
+case is the dataspace selection iterator portion. In the per-thread dataspaces case, there appear to be
+only three relevant issues with shared state, which are listed in sections \ref{h5s_free_lists}, \ref{h5s_op_gen} and \ref{h5s_concurrency_point}. For the first, multi-thread builds of the library
+currently disable free lists entirely. While this isn't an ideal solution, note that \textbf{H5S
+concurrency is currently relying on this fact}. For simplicity, the H5FL-related code in H5S files has
+not been modified. The second issue was resolved by simply making the counter value an atomic variable
+for now, though this effectively eliminates the optimizations that the counter was enabling, so a
+different solution (such as moving the value to be thread-local) should be considered for the future.
+The main initial goal was just to prevent different threads from ever seeing the same value for this
+variable, as it could result in threads returning stale cached data. The third issue remains, but isn't
+dangerous, just problematic from a correctness perspective, and will be resolved as the design for H5S
+concurrency evolves.
+
+Support for H5S concurrency is still being designed for the shared dataspace case, with notes in the
+following sections. Acquisition of the library's global mutex has been pushed below the initial
+\texttt{FUNC\_ENTER} macro for all H5S functions in favor of acquiring it with \texttt{H5\_API\_LOCK} /
+\texttt{H5\_API\_UNLOCK} where currently necessary. This simply allows slightly more concurrency inside
+the H5S functions (which also implicitly involves testing concurrent H5I operations) by reducing the
+duration in which the lock is held and also makes it easier to spot which parts of the H5S code need to
+be focused on. In order to drop acquisition of the lock everywhere, either the library's
+\nameref{apdx:h5s_struct_h5s_t} structure needs to be made atomic, or its two fields, \nameref{apdx:h5s_struct_h5s_extent_t} and \nameref{apdx:h5s_struct_h5s_select_t}, need to be made atomic.
+Without this (and without locking), a dataspace can be left in a bad state when a thread changes either
+the extent of a dataspace or the selection within it. Currently, it is being investigated whether it is
+less complex to mark the entire \nameref{apdx:h5s_struct_h5s_t} structure / its fields as Atomic (in which
+case operations on the fields will likely be implicitly locked around due to the size of the structures) or
+whether the fields of the sub-structures can be grouped into smaller atomic kernel structures. If the
+structures can be split into smaller kernels, operations are more likely to be lock-free and have a smaller
+impact on performance for the per-thread dataspaces case, where there are effectively no concurrency issues
+that have to be dealt with.
+
+Despite this, note that testing in a 'read-only' capacity works well in the shared dataspace case with the global mutex dropped for all 'read-only' functions. Ideally, a solution can be found for cases that involve
+modifications to the dataspaces as well, as copying of dataspaces has historically proven to be a very
+significant source of application overhead, meaning that only supporting per-thread dataspaces could be
+problematic.
+
+\subsection{Concurrent closes on shared dataspace IDs}
+
+Directly associated with a dataspace object ID is a pointer to the underlying \nameref{apdx:h5s_struct_h5s_t}
+structure. With the global mutex pushed down past H5I operations inside H5S functions, concurrently closing a
+dataspace ID could result in segfaults due to a thread freeing the dataspace object pointer out from under
+other threads while they may be trying to access the dataspace object\footnote{Note that this will essentially
+be the case for all concurrent close operations on HDF5 object IDs.} While this issue is currently being
+ignored due to this essentially being an error from the perspective of the application, it would still seem
+important to find a solution to protect against this case. A naive first solution might be to take an
+internal reference on the ID before retrieving the underlying pointer and then decrementing the reference
+count on the way out of the H5S function. However, this has a few issues:
+
+\begin{itemize}
+    \item The constant incrementing and decrementing of reference counts may bring significant overhead.
+    \item By holding internal references on the dataspace ID, the dataspace object remains around even
+          after the application reference count initially hits 0. At that point, multiple threads are
+          able to call the function \texttt{H5I\_dec\_app\_ref()} (in \nameref{apdx:h5s_func_h5sclose})
+          on the ID, decrementing the application reference count for the ID far more than intended. This
+          has the effect of causing the application reference count to wrap around to \texttt{UINT\_MAX}
+          after reaching 0 and triggers the assertion failure:
+          \begin{verbatim}
+H5Iint.c:5318: H5I__dec_ref: Assertion `mod_info_k.count >=
+                             mod_info_k.app_count' failed.
+          \end{verbatim}
+          While this is easily fixed by checking the application reference count before decrementing it,
+          it is not clear that this is a desired solution. Though, it does seem reasonable to protect
+          against this case regardless.
+    \item Decrementing of the reference count on the dataspace ID still needs to be coordinated among
+          threads in \nameref{apdx:h5s_func_h5sclose}. Otherwise, multiple threads can still end up
+          decrementing the regular reference count on the ID to the point that the pointer is freed
+          out from under threads in other H5S functions. Note that locking around decrementing the
+          reference count alone will not suffice here. In between the time that a thread in an H5S
+          function acquires an internal reference to an ID and then uses the underlying dataspace
+          pointer, multiple threads in \nameref{apdx:h5s_func_h5sclose} could acquire the lock,
+          decrement the reference count (eventually down to 0) and drop the lock, resulting in the
+          pointer still being freed out from under other threads. Something such as a thread barrier
+          preceding the locking and decrementing calls would be needed, but this presents a challenge
+          when determining the number of threads that will wait on the barrier.
+\end{itemize}
+
+For now, this issue has been somewhat hacked around by assuming that an ID has already been closed
+externally if the application reference count is 0. Therefore, the code in \nameref{apdx:h5s_func_h5sclose}
+acquires the global mutex, checks the application reference count on the ID (which could potentially be
+done outside the lock, but seemed reasonable to do under the lock for now) and then skips the decrement
+operation if the count is 0. Note that \textbf{this assumes that once the application reference count hits
+0 it will stay at 0}. In theory, this should not be an issue, at least for dataspace IDs, but this is not
+an ideal or general solution. It is being investigated whether the approach in section
+\ref{h5s_concurrent_mods} may be useful here.
+
+\subsection{Concurrent modification of selection or extent in shared dataspace}
+\label{h5s_concurrent_mods}
+
+One of the first concurrency issues encountered during testing was the case where one thread changes
+the type of selection or extent within a dataspace while another thread is operating on it. For example,
+consider a dataspace with a hyperslab selection in it that is shared among threads. One thread calls the
+function \nameref{apdx:h5s_func_h5sget_regular_hyperslab} on the dataspace, while another thread calls
+\nameref{apdx:h5s_func_h5sselect_all} on the dataspace. This presents issues in both serial and
+multi-threaded builds of HDF5. In the serial case (or serialized multi-thread case), depending on the
+order the two calls happen in, this can succeed or fail if the selection type is changed to 'all' before
+\nameref{apdx:h5s_func_h5sget_regular_hyperslab} is called. In that case, the call to
+\nameref{apdx:h5s_func_h5sget_regular_hyperslab} will fail because it will determine that the selection
+within the dataspace object is not a hyperslab selection and will immediately return a failure. Note that
+there are several other combinations of mixing 'get' operations with operations that change the selection
+type or extent within a dataspace which can result in errors.
+
+In the multi-threaded case, this often results in segfaults when acquisition of the library's global mutex
+is removed from H5S functions to open them up for concurrency. This is because operations which modify the
+selection or extent of a dataspace invalidate specific pointer fields within the dataspace object
+\nameref{apdx:h5s_struct_h5s_t} structure. While locking can prevent this, the locking would have to be
+performed around nearly the entirety of every H5S function (at least right before the dataspace pointer
+is retrieved and around all following logic that makes use of the pointer), which generally defeats the
+purpose of initially pushing down acquisition of the global mutex by H5S functions. Another solution might
+be to simply detect concurrent access to shared dataspaces and return an error. But one goal of the
+investigation into H5S concurrency is to determine if a reasonable solution for allowing concurrent access
+to shared dataspaces can be implemented. To that end, it is proposed that the aforementioned RCU approach
+should be considered. This specific approach is recommended because making updates to
+\nameref{apdx:h5s_struct_h5s_t} structures atomically is only one part of the equation. An update to one
+of these structures could occur atomically at any point after a thread has atomically loaded the part of
+the structure they're interested in, still resulting in the same issue. Therefore, a way to signify that
+a specific data structure should not be de-allocated while there are readers is needed. Properly
+implemented, this should at least allow the H5S code to return either new pointers after modifications to
+a dataspace or the old, not yet de-allocated pointers. This would prevent threads from segfaulting due to
+trying to access already freed or otherwise invalid memory.
+
+Note, however, that this still means that stale data could be returned. Depending on exactly what the
+application is attempting to do, it is still likely that the application will encounter the same error
+situations as in the serial case. For the time being, the H5S testing code has chosen to ignore errors
+like this, with the thought being that this should be considered user error. This situation could, in
+theory, be resolved with a versioning approach similar to what was implemented for the H5P interface.
+However, this would involve keeping around copies of old selections within the dataspace, which could be
+problematic for larger dataspace selections. This use case also seems to be less reasonable than the use
+case that resulted in the solution for the H5P interface. It is proposed that this limitation should be
+documented as a programming model issue. The application would be responsible for certain aspects of
+correct concurrent usage of read-write operations on dataspace objects.
+
+\subsection{Miscellaneous bugs in HDF5}
+
+During testing of the H5S interface, multiple bugs were found in HDF5, including:
+
+\begin{itemize}
+    \item Several bugs in the H5S code that would result in assertion failures and were converted
+          into normal error checks.
+    \item A bug in the internal function for retrieving the list of blocks in a hyperslab selection
+          which would result in a segfault or bus error due to over-reading from an array variable
+          on the stack.
+    \item A bug where \nameref{apdx:h5s_func_h5sselect_copy} or the selection copying portion of
+          \nameref{apdx:h5s_func_h5scopy} would release the selection in the destination dataspace,
+          even when the function fails. This would result in segfaults later on when the application
+          attempts to close the dataspace. This was fixed by using a temporary dataspace object and
+          only releasing the selection in the destination dataspace once everything had succeeded.
+\end{itemize}
+
+Many of these bugs were found due to unexpected circumstances in HDF5 after calling the function \nameref{apdx:h5s_func_h5sset_extent_none} on a dataspace. While the issues were generally fixed,
+it is recommended that multi-threaded code completely avoid calling this function as it can result in
+situations that application code may not have predicted, leading to issues such as 0-sized allocations
+and buffer overflows. Due to the issues found, recommendation sections were added to the descriptions of
+some H5S functions in Appendix \ref{apdx:h5s_functions}.
+
+\subsection{RCU-like approach proposal}
+\label{h5s_concurrency_rcu}
+
+To solve the issues in section \ref{h5s_concurrent_mods}, it's been proposed that the multi-thread
+library should adopt an approach similar to \href{https://en.wikipedia.org/wiki/Read-copy-update}{RCU}
+for keeping coherent, concurrent access to certain data structures. The following sections describe the
+general idea and how it can be applied in the context of HDF5.
+
+\subsubsection{Overview}
+
+RCU (read-copy-update) is a technique that allows threads to modify a data structure without causing
+active readers of that data structure to encounter segfaults or other issues due to parts of the data
+structure being invalidated/de-allocated. At a basic level, this is accomplished by having writers make
+a copy of the data structure, modify the copy and then update the canonical pointer to the data structure
+with the modified copy, while retaining the old data structure until all active readers no longer need the
+old copy of the data structure. At that point, the old data structure can safely be de-allocated. In this
+manner, threads always have some valid data structure to refer to, whether it's the old or new version.
+Note that this means readers of the data structure may end up reading data that is stale or no longer
+valid, but, in the context of HDF5, this is fundamentally a matter of managing concurrency correctly at
+the application level.
+
+\subsubsection{Implementation}
+
+For a first cut, this implementation will focus more on ease of implementation than performance. RCU approaches often focus on making readers of data structures fast at the expense of writers of those
+data structures by avoiding the need for writes to any shared variables from the reader side. However,
+this implementation will use reference counting with atomics to keep track of how many readers of a data
+structure exist in order to determine when those structures can be de-allocated. While no official
+investigation into the performance of atomics has been made, a cursory search appears to show that this
+could be problematic from the perspective of reader performance due to the semantics of atomic fetch and
+add/subtract instructions. There are several ways this can be optimized later as needed.
+
+To begin with, a way of denoting a critical section for reader threads is needed. This critical section
+will mark (and unmark) a data structure as protected in some way, signifying to the library that the data
+structure can't be de-allocated as long as there are active reader threads for the data structure.
+Following with traditional naming, the following new functions are initially proposed, pending further
+design investigation:
+
+\begin{minted}{C}
+/*
+ * Enter a reader side critical section. Finds an object pointer
+ * for the specified ID, marks the object as protected for RCU
+ * purposes, verifies that it's in a particular type and returns
+ * the object pointer.
+ */
+void *
+H5I_object_rcu_lock_and_verify(hid_t id, H5I_type_t type);
+
+/*
+ * Exits a reader side critical section. Marks the object pointed
+ * to by the ID as no longer needed by the calling thread. Once
+ * all threads that had RCU protected the object pointed to by the
+ * ID have exited their critical sections by calling this function,
+ * the object will be marked as available for reclamation.
+ */
+herr_t
+H5I_object_rcu_unlock(hid_t id);
+\end{minted}
+
+Note that the function \texttt{H5I\_object\_rcu\_lock\_and\_verify()} is a combination function to perform
+both the RCU object protection and ID lookup similar to \texttt{H5I\_object\_verify()}. This is for two
+reasons:
+
+\begin{itemize}
+    \item Since the RCU approach mandates that no references to an RCU-protected data structure can be held
+          outside of a reader critical section, this enforces the ordering by combining the two operations.
+    \item Due to the way HDF5 hides objects behind IDs, the library will need to look up the underlying ID
+          info structure in order to RCU protect a data structure in the first place. By returning the
+          object pointer from this function, this effectively prevents a caller from having the library
+          look up an ID twice, once to RCU protect a structure and a second time to get the pointer to the
+          structure.
+\end{itemize}
+
+While subject to change, these two functions represent the basic functionality needed by readers of a
+data structure: the ability to mark an object so that it can't be de-allocated, the ability to get a valid
+pointer to that object and the ability to release the hold on the object. When a reader thread wishes to
+access a data structure behind an H5I ID which could be modified by a writer thread, it will:
+
+\begin{itemize}
+    \item Enter a reader critical section on the ID with \texttt{H5I\_object\_rcu\_lock\_and\_verify()}
+    \item Perform any read operations on the data structure pointed to \textbf{only through the pointer
+          returned by \texttt{H5I\_object\_rcu\_lock\_and\_verify()}}
+    \item Exit the reader critical section on the ID with \texttt{H5I\_object\_rcu\_unlock()}
+\end{itemize}
+
+In this case, entering a reader critical section will simply involve incrementing a count of the number
+of readers for the data structure, which will inform subsequent code that there are readers of the
+structure and it can't be de-allocated. Thus, exiting a critical section would involve decrementing
+that count and the trigger for a data structure becoming available for de-allocation would be that
+count reaching 0. The internal details of this count mechanism still largely need to be worked out.
+
+The writer side doesn't necessarily need new functions for implementing the semantics of RCU, but will
+likely need some additional internal pointer maintenance logic. The main mechanism needed by writers is
+the ability to atomically swap a pointer to a new data structure in place of the old one, while retaining
+the old pointer. This can already be accomplished with the version of \texttt{H5I\_subst()} that has been
+re-written for multi-threaded HDF5. Though, an additional \texttt{H5I\_try\_subst()} function might be
+needed to cover the issue discussed in section \ref{h5s_concurrency_serializing_writes}. When a writer
+thread wishes to modify a data structure behind an H5I ID, it will:
+
+\begin{itemize}
+    \item Increment the internal reference count on the ID
+    \item Get the pointer to the object underlying the ID
+    \item Make a copy of the pointed to structure
+    \item Decrement the internal reference count on the ID
+    \item Modify its copy of the structure
+    \item Atomically swap its copy of the structure in place of the old structure with \texttt{H5I\_subst()},
+          removing the ability for new readers to get a reference to the old structure while still
+          retaining its own reference to the structure
+    \item Set up for later garbage collection of the old structure when there are no more readers of that
+          structure
+\end{itemize}
+
+The last step in this process is vague, as additional details will need to be worked out regarding the
+best approach for dealing with the eventual reclamation of the memory for the old structure. While a
+typical RCU approach would be to have the writer side block until all readers are finished, at which
+point it could de-allocate the memory itself, this poses some problems:
+
+\begin{itemize}
+    \item Blocking the writer side is not ideal, especially if there are many concurrent, mixed reads and
+          writes. While there are solutions for performing RCU without the writer side needing to block,
+          the next point could be problematic even in that case.
+    \item Depending on how tracking of the number of readers for a data structure is implemented, there
+          could still exist the possibility of a writer thread de-allocating a structure before a reader
+          has a chance to increment the readers count. This would look something like the following: a
+          reader thread enters \texttt{H5I\_object\_rcu\_lock\_and\_verify()} and gets to the point that
+          the ID type info kernel (\texttt{H5I\_mt\_id\_info\_kernel\_t}) structure is retrieved, at which
+          point the thread is preempted \textbf{before incrementing the readers count}. A writer thread
+          swaps in a new structure that is now pointed to by the ID, sees that there are \textbf{currently}
+          no writers, de-allocates the structure and moves on. The reader thread resumes execution and is
+          returned the now invalid pointer, resulting in badness.
+\end{itemize}
+
+The initial thoughts around this design are to have the reader/reference count be a part of the pointed to
+data structure, presenting the possibility for the thread racing issue in the second point above. A first
+solution discussed for this problem would be to have writer threads always place old references to a
+structure on a free list and use a separate mechanism for garbage collecting the old references once their
+reader count falls to 0. The internal details of this mechanism still largely need to be worked out.
+
+Note that writer threads will make a copy of the entire \nameref{apdx:h5s_struct_h5s_t} structure during
+this process, even though H5S operations generally only modify either the extent or the selection of a
+dataspace, but not both. This is due to the \texttt{extent} and \texttt{select} fields in
+\nameref{apdx:h5s_struct_h5s_t} being structs, rather than pointers-to-structs, inside the overall
+dataspace structure. To keep the old values consistent for a reader thread, writer threads will swap in
+an entirely new structure. While expensive, this is a straightforward way of achieving the RCU goal and
+can be optimized later if need be.
+
+\subsubsection{Note on RCU approach with multiple writers to shared structure}
+\label{h5s_concurrency_serializing_writes}
+
+When multiple writer threads are trying to update a shared \nameref{apdx:h5s_struct_h5s_t} structure
+concurrently, the goal is to make these updates happen in some order, though it may be an unpredictable
+order, without any of the updates being dropped. To handle this, it is proposed that a version number
+should be added to the \nameref{apdx:h5s_struct_h5s_t} structure to keep track of the current version
+pointed to by a dataspace ID. When a writer attempts to update the structure, it will increment the
+version number in its local copy of the structure and use an atomic compare and swap to try to update
+the structure with its modified copy \textbf{as long as the structure matches what is expected, e.g.
+the fields match the old structure and the current version is one less than the version in the structure
+replacing the current one}. If the compare and swap fails, the writer will discard its copy of the
+structure, make another copy, make any modifications it needs, including incrementing the version count
+from what the most recent value was and then try to replace the structure with its copy again. In this
+manner, the concurrent writes will be serialized in some fashion as the atomic compare and swaps from
+various threads succeed in some order and keep incrementing the version number. This will likely be
+very expensive if there are multiple writers to a shared dataspace, but this is again something that
+can be optimized later once a better view of use cases is developed.
+
+\end{document}
