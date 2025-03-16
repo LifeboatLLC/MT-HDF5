@@ -5,6 +5,10 @@
 \section{Introduction}
 \label{intro}
 
-TBD
+To begin adapting HDF5's H5S interface for concurrency, an initial investigation was made into the internals
+of the H5S code to enumerate all of the issues to be addressed. This document lists the issues that were
+found and proposes an RCU-like (\href{https://en.wikipedia.org/wiki/Read-copy-update}{read-copy-update})
+approach for dealing with the majority of the issues. The initial implementation of this approach will focus
+more on correctness than performance and will likely need to be optimized later as issues arise.
 
 \end{document}

@@ -1,0 +1,389 @@
+\documentclass[../HDF5_RFC.tex]{subfiles}
+
+\begin{document}
+
+% Start each appendix on a new page
+\newpage
+
+\section{Appendix: Fields modified by API functions}
+\label{apdx:h5s_fields_modified}
+
+The following sections give an overview of the fields modified in a \nameref{apdx:h5s_struct_h5s_t}
+structure by API functions in the H5S interface. This information is somewhat similar to that covered
+in Appendix \ref{apdx:h5s_functions}, but is gathered here for now with more details and notes for
+quicker review.
+
+\subsection{'Get'-style functions}
+
+The following functions are considered 'get'-style functions, in that their primary purpose is
+to either retrieve information from a dataspace or return a new dataspace without modifying one
+that may be passed in to the function. Therefore, any modifications made to a dataspace within
+one of these functions presents an obvious concurrency issue to be addressed.
+
+\subsubsection{\nameref{apdx:h5s_func_h5screate}}
+
+\textbf{Fields modified:} None
+
+\textbf{Notes:} No dataspace ID passed in
+
+\subsubsection{\nameref{apdx:h5s_func_h5screate_simple}}
+
+\textbf{Fields modified:} None
+
+\textbf{Notes:} No dataspace ID passed in
+
+\subsubsection{\nameref{apdx:h5s_func_h5scombine_hyperslab}}
+
+\textbf{Fields modified:} \texttt{select.sel\_info.hslab->span\_lst}
+
+\textbf{Notes:} This field may or may not be modified, but a much more thorough investigation is needed.
+This function may internally copy the old dataspace while sharing the span tree with the new copy,
+meaning that further operations in the internal call to \texttt{H5S\_select\_hyperslab()} have the
+potential to modify the span tree of the original dataspace passed in. This may not actually occur, but
+the surface to be audited is fairly large.
+
+\subsubsection{\nameref{apdx:h5s_func_h5scombine_select}}
+
+\textbf{Fields modified:} \texttt{select.sel\_info.hslab->span\_lst}
+
+\textbf{Notes:} This function may call the internal \texttt{H5S\_combine\_hyperslab()}, so can have
+similar issues as above.
+
+\subsubsection{\nameref{apdx:h5s_func_h5sdecode}}
+
+\textbf{Fields modified:} None
+
+\textbf{Notes:} No dataspace ID passed in
+
+\subsubsection{\nameref{apdx:h5s_func_h5sencode2}}
+
+\textbf{Fields modified:} \texttt{select.sel\_info.hslab->span\_lst->op\_info[0]} \\
+\texttt{select.sel\_info.hslab->diminfo\_valid} \\
+\texttt{select.sel\_info.hslab->diminfo}
+
+\textbf{Notes:} Can result in modifying the "operation info" field inside a structure while trying to
+cache the results of a hyperslab operation. See section \ref{h5s_op_gen}. Can also result in modifying
+the dimension info fields for a dataspace if the library needs to "rebuild" a regular selection. See
+section \ref{h5s_diminfo_rebuild}.
+
+\subsubsection{\nameref{apdx:h5s_func_h5sextent_equal}}
+
+\textbf{Fields modified:} None
+
+\textbf{Notes:}
+
+\subsubsection{\nameref{apdx:h5s_func_h5sselect_intersect_block}}
+
+\textbf{Fields modified:} \texttt{select.sel\_info.hslab->span\_lst->op\_info[0]} \\
+\texttt{select.sel\_info.hslab->diminfo\_valid} \\
+\texttt{select.sel\_info.hslab->diminfo}
+
+\textbf{Notes:} Can result in modifying the "operation info" field inside a structure while trying to
+cache the results of a hyperslab operation. See section \ref{h5s_op_gen}. Can also result in modifying
+the dimension info fields for a dataspace if the library needs to "rebuild" a regular selection. See
+section \ref{h5s_diminfo_rebuild}.
+
+\subsubsection{\nameref{apdx:h5s_func_h5sselect_project_intersection}}
+
+\textbf{Fields modified:} \texttt{select.sel\_info.hslab->span\_lst->op\_info[0]} \\
+\texttt{select.sel\_info.hslab->diminfo\_valid} \\
+\texttt{select.sel\_info.hslab->diminfo}
+
+\textbf{Notes:} Can result in modifying the "operation info" field inside a structure while trying to
+cache the results of a hyperslab operation. See section \ref{h5s_op_gen}. Can also result in modifying
+the dimension info fields for a dataspace if the library needs to "rebuild" a regular selection. See
+section \ref{h5s_diminfo_rebuild}.
+
+\subsubsection{\nameref{apdx:h5s_func_h5scopy}}
+
+\textbf{Fields modified:} None
+
+\textbf{Notes:}
+
+\subsubsection{\nameref{apdx:h5s_func_h5sget_regular_hyperslab}}
+
+\textbf{Fields modified:} \texttt{select.sel\_info.hslab->diminfo\_valid} \\
+\texttt{select.sel\_info.hslab->diminfo}
+
+\textbf{Notes:} Can result in modifying the dimension info fields for a dataspace if the library needs
+to "rebuild" a regular selection. See section \ref{h5s_diminfo_rebuild}.
+
+\subsubsection{\nameref{apdx:h5s_func_h5sget_select_bounds}}
+
+\textbf{Fields modified:} None
+
+\textbf{Notes:}
+
+\subsubsection{\nameref{apdx:h5s_func_h5sget_select_elem_npoints}}
+
+\textbf{Fields modified:} None
+
+\textbf{Notes:}
+
+\subsubsection{\nameref{apdx:h5s_func_h5sget_select_elem_pointlist}}
+
+\textbf{Fields modified:} \texttt{space->select.sel\_info.pnt\_lst->last\_idx} \\
+\texttt{space->select.sel\_info.pnt\_lst->last\_idx\_pnt}
+
+\textbf{Notes:} Modifies values in point selection information structure to cache the last point that
+was visited and try to speed up subsequent iteration operations.
+
+\subsubsection{\nameref{apdx:h5s_func_h5sget_select_hyper_nblocks}}
+
+\textbf{Fields modified:} \texttt{select.sel\_info.hslab->span\_lst->op\_info[0]}
+
+\textbf{Notes:} Can result in modifying the "operation info" field inside a structure while trying to
+cache the results of a hyperslab operation. See section \ref{h5s_op_gen}.
+
+\subsubsection{\nameref{apdx:h5s_func_h5sget_select_hyper_blocklist}}
+
+\textbf{Fields modified:} \texttt{select.sel\_info.hslab->diminfo\_valid} \\
+\texttt{select.sel\_info.hslab->diminfo}
+
+\textbf{Notes:} Can result in modifying the dimension info fields for a dataspace if the library needs
+to "rebuild" a regular selection. See section \ref{h5s_diminfo_rebuild}.
+
+\subsubsection{\nameref{apdx:h5s_func_h5sget_select_npoints}}
+
+\textbf{Fields modified:} None
+
+\textbf{Notes:}
+
+\subsubsection{\nameref{apdx:h5s_func_h5sget_select_type}}
+
+\textbf{Fields modified:} None
+
+\textbf{Notes:}
+
+\subsubsection{\nameref{apdx:h5s_func_h5sget_simple_extent_ndims}}
+
+\textbf{Fields modified:} None
+
+\textbf{Notes:}
+
+\subsubsection{\nameref{apdx:h5s_func_h5sget_simple_extent_dims}}
+
+\textbf{Fields modified:} None
+
+\textbf{Notes:}
+
+\subsubsection{\nameref{apdx:h5s_func_h5sget_simple_extent_npoints}}
+
+\textbf{Fields modified:} None
+
+\textbf{Notes:}
+
+\subsubsection{\nameref{apdx:h5s_func_h5sget_simple_extent_type}}
+
+\textbf{Fields modified:} None
+
+\textbf{Notes:}
+
+\subsubsection{\nameref{apdx:h5s_func_h5sis_regular_hyperslab}}
+
+\textbf{Fields modified:} \texttt{select.sel\_info.hslab->diminfo\_valid} \\
+\texttt{select.sel\_info.hslab->diminfo}
+
+\textbf{Notes:} Can result in modifying the dimension info fields for a dataspace if the library needs
+to "rebuild" a regular selection. See section \ref{h5s_diminfo_rebuild}.
+
+\subsubsection{\nameref{apdx:h5s_func_h5sis_simple}}
+
+\textbf{Fields modified:} None
+
+\textbf{Notes:}
+
+\subsubsection{\nameref{apdx:h5s_func_h5sselect_shape_same}}
+
+\textbf{Fields modified:} \texttt{select.sel\_info.hslab->span\_lst} \\
+\texttt{select.sel\_info.hslab->diminfo\_valid} \\
+\texttt{select.sel\_info.hslab->diminfo}
+
+\textbf{Notes:} Can result in creating a span tree for the dataspace(s) if they don't already have one.
+Can also result in modifying the dimension info fields for a dataspace if the library needs to "rebuild"
+a regular selection. See section \ref{h5s_diminfo_rebuild}.
+
+\subsubsection{\nameref{apdx:h5s_func_h5sselect_valid}}
+
+\textbf{Fields modified:} None
+
+\textbf{Notes:}
+
+\subsection{'Set'-style functions}
+
+The following functions are considered 'set'-style functions, in that their primary purpose is
+to modify some portion, the extent or selection or both, of a dataspace.
+
+\subsubsection{\nameref{apdx:h5s_func_h5sclose}}
+
+\textbf{Fields modified:} \texttt{extent}, \texttt{select}
+
+\textbf{Notes:} Frees \texttt{extent.size} and \texttt{extent.max} and sets \texttt{extent.rank} and \texttt{extent.nelem} to 0.
+
+Performs selection-specific cleanup on \texttt{select} field. 'all', point and hyperslab selections
+set \\
+\texttt{select.num\_elem} to 0 ('none' selections already have this). Point selections free \\
+\texttt{select.sel\_info.pnt\_lst} and set it to \texttt{NULL}. Hyperslab selections free the span
+tree information in \texttt{select.sel\_info.hslab->span\_lst} then free \texttt{select.sel\_info.hslab}.
+
+\subsubsection{\nameref{apdx:h5s_func_h5sextent_copy}}
+
+\textbf{Fields modified:} \texttt{extent}, \texttt{select} (in destination dataspace)
+
+\textbf{Notes:} In destination dataspace, frees \texttt{extent.size} and \texttt{extent.max}, then
+re-allocates them and copies all values over from source dataspace's \texttt{extent} field. If the
+selection in the destination dataspace is an 'all' selection, also updates \texttt{select.num\_elem}
+in the destination dataspace.
+
+\subsubsection{\nameref{apdx:h5s_func_h5smodify_select}}
+
+\textbf{Fields modified:} \texttt{select} (in destination dataspace \texttt{space1\_id})
+
+\textbf{Notes:} Depending on the path through the hyperslab code, each field in the \texttt{select}
+field may be modified, other than \texttt{select.offset} and \texttt{select.offset\_changed}. Any
+modifications to the union field \texttt{sel\_info} will be made to \texttt{sel\_info.hslab}.
+
+\subsubsection{\nameref{apdx:h5s_func_h5soffset_simple}}
+
+\textbf{Fields modified:} \texttt{select}
+
+\textbf{Notes:} Copies the passed in offset into \texttt{select.offset} and then sets
+\texttt{select.offset\_changed} to \texttt{true}.
+
+\subsubsection{\nameref{apdx:h5s_func_h5sselect_adjust}}
+
+\textbf{Fields modified:} \texttt{select}
+
+\textbf{Notes:} Calls selection type-specific callback 'adjust\_s' for adjusting the selection within
+a dataspace. For 'all' and 'none' selections, does nothing. For point selections, iterates through each
+selected point (\texttt{select.sel\_info.pnt\_lst->head->pnt} / \texttt{...->head->next->pnt}) and adjusts
+the location of each point by subtracting the passed in offset from the point coordinates. Then, updates
+the bounding box of the selection in \texttt{select.sel\_info.pnt\_lst->low\_bounds} and \\
+\texttt{select.sel\_info.pnt\_lst->high\_bounds}. For hyperslab selections, updates the regular selection
+information in \texttt{select.sel\_info.hslab->diminfo.opt}, \\
+\texttt{select.sel\_info.hslab->diminfo.low\_bounds} and \\
+\texttt{select.sel\_info.hslab->diminfo.high\_bounds}, if available. Also updates the span tree information
+in the nodes in \texttt{select.sel\_info.hslab->span\_lst}, if available.
+
+\subsubsection{\nameref{apdx:h5s_func_h5sselect_all}}
+
+\textbf{Fields modified:} \texttt{select}
+
+\textbf{Notes:} Releases selection in dataspace by performing selection-specific cleanup on
+\texttt{select} field (see entry for \nameref{apdx:h5s_func_h5sclose} in this section) and then
+sets \texttt{select.type} to point to \texttt{H5S\_sel\_all} structure. Updates \texttt{select.num\_elem}
+field to the number of points in the dataspace's extent.
+
+\subsubsection{\nameref{apdx:h5s_func_h5sselect_copy}}
+
+\textbf{Fields modified:} \texttt{select} (in destination dataspace)
+
+\textbf{Notes:} Releases selection in destination dataspace by performing selection-specific cleanup
+on \texttt{select} field (see entry for \nameref{apdx:h5s_func_h5sclose} in this section). Then, all
+fields from source dataspace \texttt{select} field are copied into destination dataspace \texttt{select}
+field. Finally, selection type-specific adjustments are made to \texttt{select} field of destination
+dataspace. For 'all' selections, \texttt{select.num\_elem} is updated to the number of points in the
+destination dataspace's extent. For 'none' selections, \texttt{select.num\_elem} is set to 0. For
+point selections, the list of selected points in the source dataspace is copied into
+\texttt{select.sel\_info.pnt\_lst} in the destination dataspace. For hyperslab selections, a new
+instance of \nameref{apdx:h5s_struct_h5s_hyper_sel_t} is allocated and eventually assigned to
+\texttt{select.sel\_info.hslab}. If the source dataspace has span tree information, a copy is made
+into \texttt{select.sel\_info.hslab->span\_lst} in the destination dataspace.
+
+\subsubsection{\nameref{apdx:h5s_func_h5sselect_elements}}
+
+\textbf{Fields modified:} \texttt{select}
+
+\textbf{Notes:} If current selection in dataspace isn't a point selection, or if a point selection
+is being set with the \texttt{H5S\_SELECT\_SET} selection operator, releases selection in dataspace
+by performing selection-specific cleanup on \texttt{select} field (see entry for
+\nameref{apdx:h5s_func_h5sclose} in this section). Next, allocates a new instance of
+\nameref{apdx:h5s_struct_h5s_pnt_list_t} in \texttt{select.sel\_info.pnt\_lst} if the dataspace didn't
+already have a point selection within it. Then, points are added to nodes in
+\texttt{select.sel\_info.pnt\_lst->head} / \\
+\texttt{...->head->next}, etc. The bounding box of the selection is updated in \\
+\texttt{select.sel\_info.pnt\_lst->low\_bounds} and \texttt{select.sel\_info.pnt\_lst->high\_bounds}
+as points are added. Once all points have been added, \texttt{select.num\_elem} is updated according to
+the points selected. Finally, \texttt{select.type} is set to point to the \texttt{H5S\_sel\_point}
+structure.
+
+\subsubsection{\nameref{apdx:h5s_func_h5sselect_hyperslab}}
+
+\textbf{Fields modified:} \texttt{select}
+
+\textbf{Notes:} Depending on the specific operation used, releases selection in dataspace by performing
+selection-specific cleanup on \texttt{select} field (see entry for \nameref{apdx:h5s_func_h5sclose} in
+this section) and then allocates a new instance of \nameref{apdx:h5s_struct_h5s_hyper_sel_t} in
+\texttt{select.sel\_info.hslab}. In this case, \texttt{select.type} is changed to point to the
+\texttt{H5S\_sel\_hyper} structure. Otherwise, essentially tries to combine a hyperslab selection into
+the existing selection. This could result in the selection being converted into a 'none' selection
+(see entry for \nameref{apdx:h5s_func_h5sselect_none} in this section). Depending on the path through
+the hyperslab code, each field in the \texttt{select} field may be modified, other than
+\texttt{select.offset} and \texttt{select.offset\_changed}.
+
+\subsubsection{\nameref{apdx:h5s_func_h5sselect_none}}
+
+\textbf{Fields modified:} \texttt{select}
+
+\textbf{Notes:} Releases selection in dataspace by performing selection-specific cleanup on
+\texttt{select} field (see entry for \nameref{apdx:h5s_func_h5sclose} in this section) and then
+sets \texttt{select.type} to point to \texttt{H5S\_sel\_none} structure.
+
+\subsubsection{\nameref{apdx:h5s_func_h5sset_extent_none}}
+
+\textbf{Fields modified:} \texttt{extent}, \texttt{select}
+
+\textbf{Notes:} Frees \texttt{extent.size} and \texttt{extent.max} and sets \texttt{extent.rank} and \texttt{extent.nelem} to 0. Sets \texttt{extent.type} to \texttt{H5S\_NULL}.
+
+\subsubsection{\nameref{apdx:h5s_func_h5sset_extent_simple}}
+
+\textbf{Fields modified:} \texttt{extent}, \texttt{select}
+
+\textbf{Notes:} Frees \texttt{extent.size} and \texttt{extent.max} and sets \texttt{extent.rank} and \texttt{extent.nelem} to 0. Then, performs extent type-specific setup on the dataspace. For scalar
+dataspaces (when the passed in \texttt{rank} parameter is 0), sets \texttt{extent.type} to
+\texttt{H5S\_SCALAR} and sets \texttt{extent.nelem} to 1. For simple dataspaces, sets \texttt{extent.type}
+to \texttt{H5S\_SIMPLE}, re-allocates \texttt{extent.size} and \texttt{extent.max} and copies over
+passed in values. \texttt{extent.nelem} is set to the calculated number of elements.
+
+For both scalar and simple dataspaces, \texttt{select.offset} is set to zeroes and
+\texttt{select.offset\_changed} is set to \texttt{false}. If the selection in the dataspace was an
+'all' selection, \texttt{select.num\_elem} is updated to reflect that all elements in the new extent
+are selected.
+
+\subsection{Other functions}
+
+The following functions are in a separate category due to primarily operating on a different
+object than a dataspace. However, a dataspace has to be passed in to some of these functions
+initially, which could have secondary effects on those dataspaces.
+
+\subsubsection{\nameref{apdx:h5s_func_h5ssel_iter_create}}
+
+\textbf{Fields modified:} \texttt{select.sel\_info.hslab->diminfo\_valid} \\
+\texttt{select.sel\_info.hslab->diminfo}
+
+\textbf{Notes:} Dataspace selection iterators call an 'init' callback when being created which may
+operate on the passed in dataspace. Can result in modifying the dimension info fields for a dataspace
+if the library needs to "rebuild" a regular selection. See section \ref{h5s_diminfo_rebuild}.
+
+\subsubsection{\nameref{apdx:h5s_func_h5ssel_iter_get_seq_list}}
+
+\textbf{Fields modified:} None
+
+\textbf{Notes:}
+
+\subsubsection{\nameref{apdx:h5s_func_h5ssel_iter_reset}}
+
+\textbf{Fields modified:} \texttt{select.sel\_info.hslab->diminfo\_valid} \\
+\texttt{select.sel\_info.hslab->diminfo}
+
+\textbf{Notes:} Dataspace selection iterators call an 'init' callback when being reset which may
+operate on the passed in dataspace. Can result in modifying the dimension info fields for a dataspace
+if the library needs to "rebuild" a regular selection. See section \ref{h5s_diminfo_rebuild}.
+
+\subsubsection{\nameref{apdx:h5s_func_h5ssel_iter_close}}
+
+\textbf{Fields modified:} None
+
+\textbf{Notes:}
+
+\end{document}

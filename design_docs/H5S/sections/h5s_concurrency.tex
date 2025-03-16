@@ -202,6 +202,20 @@ No particular concurrency issues specific to 'None' selections were noted.
 \subsection{Concurrency issues specific to hyperslab selections}
 \label{h5s_concurrency_hyper}
 
+\subsubsection{Rebuilds of hyperslab dimension information}
+\label{h5s_diminfo_rebuild}
+
+In various places in the hyperslab code, the library may try and "rebuild" a hyperslab
+selection by converting a span tree representation into a regular hyperslab selection
+representation with the \texttt{H5S\_\_hyper\_rebuild()} function. If the library is
+able to convert the span tree representation into a regular selection, several fields
+in the hyperslab information structure will be modified. If the hyperslab selection is
+not a regular selection (i.e., it cannot be represented with a single hyperslab selection
+"set" call with \texttt{H5S\_SELECT\_SET}), the library will simply set a field in the
+hyperslab information structure to indicate this and move on. In either case, these
+rebuild operations can be triggered from operations that normally would appear to be
+"read-only", which poses an issue for concurrency.
+
 \subsubsection{Concurrent updates of hyperslab selection span 'op generations count'}
 \label{h5s_op_gen}
 
