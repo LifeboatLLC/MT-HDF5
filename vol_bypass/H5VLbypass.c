@@ -1897,7 +1897,6 @@ start_thread_for_pool(void *args)
     void   **vec_bufs_local = NULL;
     int      local_count = 0;
     int      i;
-
     // fprintf(stderr, "In start_thread_for_pool: %d\n", thread_id);
 
     if ((file_indices_local = (int *)malloc(nsteps_tpool * sizeof(int))) == NULL) {
@@ -1958,7 +1957,6 @@ start_thread_for_pool(void *args)
             thread_task_count--;
 
             file_stuff[file_indices_local[i]].num_reads++;
-            file_stuff[file_indices_local[i]].read_started = true;
         }
 
         // fprintf(stderr, "thread %d: 1. local_count = %d, thread_task_count = %d,
@@ -1999,18 +1997,17 @@ start_thread_for_pool(void *args)
                 goto done;
             }
 
+            /* Read count should still be at least one at this point */
+            if (file_stuff[file_indices_local[i]].num_reads == 0) {
+                fprintf(stderr, "invalid number of reads for file %s\n", file_stuff[file_indices_local[i]].name);
+                ret_value = (void *)-1;
+                goto done;
+            }
+
             file_stuff[file_indices_local[i]].num_reads--;
 
-            /* When there is no task left in the queue and all the reads finish for
-             * the current file, signal the main process that this file can be closed.
-             */
-            if (thread_loop_finish && (file_stuff[file_indices_local[i]].num_reads == 0)) {
-                // fprintf(stderr, "thread %d: file name = %s, signal close_ready\n", thread_id,
-                // file_stuff[file_indices_local[i]].name);
-                /* There are currently no reads active on this file - it may be closed */
-                file_stuff[file_indices_local[i]].read_started = false;
-                pthread_cond_signal(&(file_stuff[file_indices_local[i]].close_ready));
-            }
+            /* Signal any threads waiting to close the file to check num_reads */
+            pthread_cond_signal(&(file_stuff[file_indices_local[i]].close_ready));
 
             if (pthread_mutex_unlock(&mutex_local) != 0) {
                 fprintf(stderr, "failed to unlock mutex\n");
@@ -2593,6 +2590,8 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
     bool       any_thread_active = false;
     bool       read_use_native   = false;
     bool       external_link_access = false;
+    bool       must_block        = false;
+    bool       locked = false;
     H5S_sel_type mem_sel_type = H5S_SEL_ERROR;
     H5S_sel_type file_sel_type = H5S_SEL_ERROR;
     bool types_equal = false;
@@ -2755,6 +2754,7 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
 
             /* Reset for the next H5Dread */
             pthread_mutex_lock(&mutex_local);
+            locked = true;
 
             /* Future optimization: Only flush when a write has been performed */
             if (flush_containing_file((H5VL_bypass_t *)dset[j]) < 0) {
@@ -2768,7 +2768,11 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
 
             thread_task_finished = false;
             thread_loop_finish   = false;
+            /* At least one read is being done through the Bypass VOL,
+             * so we should block until all tasks are complete */
+            must_block = true;
             pthread_mutex_unlock(&mutex_local);
+            locked = false;
 
             /* Initialize data selection info */
             strcpy(selection_info.file_name, bypass_obj->file_name);
@@ -2842,23 +2846,27 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
         goto done;
     }
 
+    locked = true;
+
     /* Only finish H5Dread() once all threads are inactive and no tasks are undone */
     /* Only block here if Bypass VOL was used for the read */
-    while (!read_use_native) {
-        any_thread_active = false;
+    if (must_block) {
+        while (true) {
+            any_thread_active = false;
 
-        if (is_any_thread_active(&any_thread_active) < 0) {
-            fprintf(stderr, "Unable to query thread active status\n");
-            /* Prevent deadlock on error */
-            pthread_mutex_unlock(&mutex_local);
-            ret_value = -1;
-            goto done;
+            if (is_any_thread_active(&any_thread_active) < 0) {
+                fprintf(stderr, "Unable to query thread active status\n");
+                /* Prevent deadlock on error */
+                pthread_mutex_unlock(&mutex_local);
+                ret_value = -1;
+                goto done;
+            }
+
+            if (!any_thread_active && thread_task_count == 0)
+                break;
+
+            pthread_cond_wait(&cond_read_finished, &mutex_local);
         }
-
-        if (!any_thread_active && thread_task_count == 0)
-            break;
-
-        pthread_cond_wait(&cond_read_finished, &mutex_local);
     }
 
     if (ret_value < 0) {
@@ -2872,9 +2880,13 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
         goto done;
     }
 
+    locked = false;
+
     assert(thread_task_count == 0);
 
 done:
+    if (locked)
+        pthread_mutex_unlock(&mutex_local);
 
     return ret_value;
 } /* end H5VL_bypass_dataset_read() */
@@ -3299,6 +3311,7 @@ static herr_t
 c_file_open_helper(const char *name)
 {
     herr_t ret_value = 0;
+    pthread_mutex_lock(&mutex_local);
 
     /* Initial value */
     file_stuff[file_stuff_count].fd = -1;
@@ -3342,7 +3355,6 @@ done:
         strcpy(file_stuff[file_stuff_count].name, name);
 
         file_stuff[file_stuff_count].num_reads    = 0;
-        file_stuff[file_stuff_count].read_started = false;
         pthread_cond_init(&(file_stuff[file_stuff_count].close_ready),
                         NULL); /* Initialize the condition variable for file closing */
         /*printf("%s: name = %s, file_stuff_count = %d, file_stuff[%d].name = %s, file_stuff[%d].fp = %d\n",
@@ -3363,9 +3375,9 @@ done:
         }
     }
 
+    pthread_mutex_unlock(&mutex_local);
     return ret_value;
 }
-
 /*-------------------------------------------------------------------------
  * Function:    H5VL_bypass_file_create
  *
@@ -3510,6 +3522,7 @@ H5VL_bypass_file_open(const char *name, unsigned flags, hid_t fapl_id, hid_t dxp
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL FILE Open\n");
 #endif
+    pthread_mutex_lock(&mutex_local);
 
     /* Get copy of our VOL info from FAPL */
     if (H5Pget_vol_info(fapl_id, (void **)&info) < 0) {
@@ -3589,6 +3602,8 @@ H5VL_bypass_file_open(const char *name, unsigned flags, hid_t fapl_id, hid_t dxp
     }
 
 done:
+    pthread_mutex_unlock(&mutex_local);
+
     return (void *)file;
 
 error:
@@ -3602,6 +3617,8 @@ error:
         if (req && *req && req_created)
             H5VL_bypass_free_obj(*req);
     } H5E_END_TRY;
+
+    pthread_mutex_unlock(&mutex_local);
 
     return NULL;
 } /* end H5VL_bypass_file_open() */
@@ -3805,6 +3822,8 @@ remove_file_info_helper(unsigned index)
 {
     unsigned i;
 
+    pthread_mutex_lock(&mutex_local);
+
     /* Remove the entry by shifting leftward all elements after this entry.
      * But don't do anything if this entry is the only one or is the last one in
      * the array except decrement the number of entries.
@@ -3816,7 +3835,6 @@ remove_file_info_helper(unsigned index)
             /* file_stuff[i].vfd_file_handle = file_stuff[i + 1].vfd_file_handle; */
             file_stuff[i].ref_count    = file_stuff[i + 1].ref_count;
             file_stuff[i].num_reads    = file_stuff[i + 1].num_reads;
-            file_stuff[i].read_started = file_stuff[i + 1].read_started;
             file_stuff[i].close_ready  = file_stuff[i + 1].close_ready;
         }
 
@@ -3825,17 +3843,17 @@ remove_file_info_helper(unsigned index)
         file_stuff[file_stuff_count - 1].fd = -1;
         file_stuff[file_stuff_count - 1].ref_count = 0;
         file_stuff[file_stuff_count - 1].num_reads = 0;
-        file_stuff[file_stuff_count - 1].read_started = 0;
     } else {
         /* Just zero out the entry itself */
         memset(file_stuff[index].name, 0, 1024);
         file_stuff[index].fd = -1;
         file_stuff[index].ref_count = 0;
         file_stuff[index].num_reads = 0;
-        file_stuff[index].read_started = 0;
     }
 
     file_stuff_count--;
+
+    pthread_mutex_unlock(&mutex_local);
 }
 
 /*-------------------------------------------------------------------------
@@ -3862,6 +3880,7 @@ H5VL_bypass_file_close(void *file, hid_t dxpl_id, void **req)
 
     assert(o);
     assert(o->under_object);
+    pthread_mutex_lock(&mutex_local);
 
     /* Find the name of this file */
     if (get_filename_helper((H5VL_bypass_t *)file, file_name, H5I_FILE, req) < 0) {
@@ -3876,26 +3895,9 @@ H5VL_bypass_file_close(void *file, hid_t dxpl_id, void **req)
      * the reference count drops to zero */
     for (i = 0; i < file_stuff_count; i++) {
         if (!strcmp(file_stuff[i].name, file_name) && file_stuff[i].fd) {
-            // fprintf(stderr, "%s at %d: file_name = %s, i = %d, file_stuff_count =
-            // %d, file_stuff[i].ref_count = %d, file_stuff[i].read_started = %d,
-            // num_reads = %d\n", __func__,
-            // __LINE__, file_name, i, file_stuff_count, file_stuff[i].ref_count,
-            // file_stuff[i].read_started, file_stuff[i].num_reads);
-            /* Wait until all thread in the thread pool finish reading the data before
-             * closing the C file */
-            if (file_stuff[i].read_started) {
-                pthread_mutex_lock(&mutex_local);
-                // while (!file_stuff[i].read_started || file_stuff[i].num_reads)
-                while (file_stuff[i].num_reads)
-                    pthread_cond_wait(&(file_stuff[i].close_ready), &mutex_local);
-                pthread_mutex_unlock(&mutex_local);
-            }
-
-            // fprintf(stderr, "%s at %d: file_name = %s, i = %d, file_stuff_count =
-            // %d, file_stuff[i].ref_count = %d, file_stuff[i].read_started = %d,
-            // num_reads = %d\n", __func__,
-            // __LINE__, file_name, i, file_stuff_count, file_stuff[i].ref_count,
-            // file_stuff[i].read_started, file_stuff[i].num_reads);
+            /* Wait until all thread in the thread pool finish reading the data before closing the C file */
+            while (file_stuff[i].num_reads > 0)
+                pthread_cond_wait(&(file_stuff[i].close_ready), &mutex_local);
 
             file_stuff[i].ref_count--;
 
@@ -3935,6 +3937,7 @@ H5VL_bypass_file_close(void *file, hid_t dxpl_id, void **req)
             ret_value = -1;
 
 done:
+    pthread_mutex_unlock(&mutex_local);
     return ret_value;
 
 } /* end H5VL_bypass_file_close() */
