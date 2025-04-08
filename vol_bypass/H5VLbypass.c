@@ -79,6 +79,8 @@ typedef struct Bypass_dataset_t {
     H5D_layout_t layout;
     int num_filters;
     dtype_info_t dtype_info;
+    bool use_native;
+    bool use_native_checked;
 } Bypass_dataset_t;
 
 /* The bypass VOL connector's object */
@@ -282,7 +284,7 @@ static herr_t release_dset_info(Bypass_dataset_t *dset);
 static herr_t get_dset_location(H5VL_bypass_t *dset_obj, hid_t dxpl_id, void **req, haddr_t *location);
 
 /* Check if any property of the dataset (type, layout, etc.) should force use of Native VOL */
-static herr_t should_dset_use_native(const Bypass_dataset_t *dset, bool *should_use_native);
+static herr_t should_dset_use_native(Bypass_dataset_t *dset);
 
 /* Compare two datatype instances for equivalence*/
 static bool bypass_types_equal(dtype_info_t *type_info1, dtype_info_t *type_info2);
@@ -1471,6 +1473,8 @@ dset_open_helper(H5VL_bypass_t *obj, hid_t dxpl_id, void **req) {
     dset->space_id = H5I_INVALID_HID;
     dset->num_filters = 0;
     dset->layout = H5D_LAYOUT_ERROR;
+    dset->use_native = false;
+    dset->use_native_checked = false;
 
     /* Retrieve dataset's DCPL, copied from H5Dget_create_plist */
     get_args.op_type               = H5VL_DATASET_GET_DCPL;
@@ -2584,22 +2588,19 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
     herr_t       ret_value   = 0;
     hid_t        file_space_id_copy = H5I_INVALID_HID;
     hid_t        mem_space_id_copy = H5I_INVALID_HID;
-    bool      dset_use_native = false;
     H5VL_bypass_t *bypass_obj = NULL;
     Bypass_dataset_t *bypass_dset = NULL;
     sel_info_t selection_info;
     int        i, j;
-    int        num_ext_files     = 0;
     bool       any_thread_active = false;
     bool       read_use_native   = false;
-    bool       external_link_access = false;
     H5S_sel_type mem_sel_type = H5S_SEL_ERROR;
     H5S_sel_type file_sel_type = H5S_SEL_ERROR;
     bool types_equal = false;
+    bool must_block = false;
+    bool locked = false;
     dtype_info_t mem_type_info;
     H5D_space_status_t dset_space_status = H5D_SPACE_STATUS_ERROR;
-
-    // hid_t  native_dtype;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL DATASET Read\n");
@@ -2610,9 +2611,7 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
         /* Prevent information persisting between iterations */
         memset(&selection_info, 0, sizeof(sel_info_t));
         memset(&mem_type_info, 0, sizeof(dtype_info_t));
-        dset_use_native = false;
         read_use_native = false;
-        external_link_access = false;
         mem_sel_type = H5S_SEL_ERROR;
         file_sel_type = H5S_SEL_ERROR;
         file_space_id_copy = H5I_INVALID_HID;
@@ -2634,7 +2633,7 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
 
         /* Let the native function handle datatype conversion.  Also check the flag for filters, virtual
          * dataset and reference datatype */
-        if (should_dset_use_native(bypass_dset, &dset_use_native) < 0) {
+        if (!bypass_dset->use_native_checked && should_dset_use_native(bypass_dset) < 0) {
             fprintf(stderr, "failed to determine if native function should be used\n");
             ret_value = -1;
             goto done;
@@ -2659,21 +2658,11 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
             goto done;
         }
 
-        if ((num_ext_files = H5Pget_external_count(bypass_dset->dcpl_id)) < 0) {
-            fprintf(stderr, "failed to get external file count\n");
-            ret_value = -1;
-            goto done;
-        }
-
-        /* If the dataset's file is not in table, it was accessed through an external link. */
-        if (selection_info.my_file_index < 0 || num_ext_files > 0)
-            external_link_access = true;
-    
-
         /* Check selection type */
         if (mem_space_id[j] == H5S_ALL) {
             mem_sel_type = H5S_SEL_ALL;
-        } else if ((mem_sel_type = H5Sget_select_type(mem_space_id[j])) < 0) {
+        } else if (mem_space_id[j] != H5S_BLOCK && mem_space_id[j] != H5S_PLIST &&
+            (mem_sel_type = H5Sget_select_type(mem_space_id[j])) < 0) {
             fprintf(stderr, "failed to get selection type\n");
             ret_value = -1;
             goto done;
@@ -2684,7 +2673,8 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
 
         if (file_space_id[j] == H5S_ALL) {
             file_sel_type = H5S_SEL_ALL;
-        } else if ((file_sel_type = H5Sget_select_type(file_space_id[j])) < 0) {
+        } else if (file_space_id[j] != H5S_BLOCK && file_space_id[j] != H5S_PLIST &&
+            (file_sel_type = H5Sget_select_type(file_space_id[j])) < 0) {
             fprintf(stderr, "failed to get selection type\n");
             ret_value = -1;
             goto done;
@@ -2707,8 +2697,8 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
             goto done;
         }
 
-        read_use_native = dset_use_native || !types_equal || 
-            external_link_access || mem_sel_type == H5S_SEL_POINTS || file_sel_type == H5S_SEL_POINTS
+        read_use_native = bypass_dset->use_native || !types_equal ||
+            mem_sel_type == H5S_SEL_POINTS || file_sel_type == H5S_SEL_POINTS
             || dset_space_status != H5D_SPACE_STATUS_ALLOCATED || mem_space_id[j] == H5S_BLOCK
             || file_space_id[j] == H5S_BLOCK || mem_space_id[j] == H5S_PLIST || file_space_id[j] == H5S_PLIST;
 
@@ -2755,6 +2745,7 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
 
             /* Reset for the next H5Dread */
             pthread_mutex_lock(&mutex_local);
+            locked = true;
 
             /* Future optimization: Only flush when a write has been performed */
             if (flush_containing_file((H5VL_bypass_t *)dset[j]) < 0) {
@@ -2768,7 +2759,11 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
 
             thread_task_finished = false;
             thread_loop_finish   = false;
+            /* At least one read is being done through the Bypass VOL.
+             * We should block until all tasks are complete. */
+            must_block = true;
             pthread_mutex_unlock(&mutex_local);
+            locked = false;
 
             /* Initialize data selection info */
             strcpy(selection_info.file_name, bypass_obj->file_name);
@@ -2842,23 +2837,27 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
         goto done;
     }
 
+    locked = true;
+
     /* Only finish H5Dread() once all threads are inactive and no tasks are undone */
     /* Only block here if Bypass VOL was used for the read */
-    while (!read_use_native) {
-        any_thread_active = false;
+    if (must_block) {
+	while (true) {
+	    any_thread_active = false;
 
-        if (is_any_thread_active(&any_thread_active) < 0) {
-            fprintf(stderr, "Unable to query thread active status\n");
-            /* Prevent deadlock on error */
-            pthread_mutex_unlock(&mutex_local);
-            ret_value = -1;
-            goto done;
-        }
+	    if (is_any_thread_active(&any_thread_active) < 0) {
+		fprintf(stderr, "Unable to query thread active status\n");
+		/* Prevent deadlock on error */
+		pthread_mutex_unlock(&mutex_local);
+		ret_value = -1;
+		goto done;
+	    }
 
-        if (!any_thread_active && thread_task_count == 0)
-            break;
+	    if (!any_thread_active && thread_task_count == 0)
+		break;
 
-        pthread_cond_wait(&cond_read_finished, &mutex_local);
+	    pthread_cond_wait(&cond_read_finished, &mutex_local);
+	}
     }
 
     if (ret_value < 0) {
@@ -2872,9 +2871,13 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
         goto done;
     }
 
+    locked = false;
+
     assert(thread_task_count == 0);
 
 done:
+    if (locked)
+        pthread_mutex_unlock(&mutex_local);
 
     return ret_value;
 } /* end H5VL_bypass_dataset_read() */
@@ -3300,6 +3303,8 @@ c_file_open_helper(const char *name)
 {
     herr_t ret_value = 0;
 
+    pthread_mutex_lock(&mutex_local);
+
     /* Initial value */
     file_stuff[file_stuff_count].fd = -1;
 
@@ -3363,8 +3368,10 @@ done:
         }
     }
 
+    pthread_mutex_unlock(&mutex_local);
+
     return ret_value;
-}
+} /* c_file_open_helper */
 
 /*-------------------------------------------------------------------------
  * Function:    H5VL_bypass_file_create
@@ -3444,7 +3451,7 @@ H5VL_bypass_file_create(const char *name, unsigned flags, hid_t fcpl_id, hid_t f
     }
     
     info = NULL;
-    
+
     /* Open the C file and set the fields for the file_t structure */
     if (c_file_open_helper(name) < 0) {
         fprintf(stderr, "error while opening c file\n");
@@ -3576,7 +3583,9 @@ H5VL_bypass_file_open(const char *name, unsigned flags, hid_t fapl_id, hid_t dxp
      * this file and finish */
     for (i = 0; i < file_stuff_count; i++) {
         if (!strcmp(file_stuff[i].name, name) && file_stuff[i].fd) {
+            pthread_mutex_lock(&mutex_local);
             file_stuff[i].ref_count++;
+            pthread_mutex_unlock(&mutex_local);
 
             goto done;
         }
@@ -3872,6 +3881,8 @@ H5VL_bypass_file_close(void *file, hid_t dxpl_id, void **req)
 
     // fprintf(stderr, "%s at %d: file_name = %s\n", __func__, __LINE__, file_name);
 
+    pthread_mutex_lock(&mutex_local);
+
     /* Close the file opened with C.  Remove the file structure from the list when
      * the reference count drops to zero */
     for (i = 0; i < file_stuff_count; i++) {
@@ -3884,11 +3895,9 @@ H5VL_bypass_file_close(void *file, hid_t dxpl_id, void **req)
             /* Wait until all thread in the thread pool finish reading the data before
              * closing the C file */
             if (file_stuff[i].read_started) {
-                pthread_mutex_lock(&mutex_local);
                 // while (!file_stuff[i].read_started || file_stuff[i].num_reads)
                 while (file_stuff[i].num_reads)
                     pthread_cond_wait(&(file_stuff[i].close_ready), &mutex_local);
-                pthread_mutex_unlock(&mutex_local);
             }
 
             // fprintf(stderr, "%s at %d: file_name = %s, i = %d, file_stuff_count =
@@ -3916,6 +3925,8 @@ H5VL_bypass_file_close(void *file, hid_t dxpl_id, void **req)
             }
         }
     }
+
+    pthread_mutex_unlock(&mutex_local);
 
     if ((ret_value = H5VLfile_close(o->under_object, o->under_vol_id, dxpl_id, req)) < 0) {
         fprintf(stderr, "Failed to close file in underlying VOL connectors\n");
@@ -5080,47 +5091,69 @@ done:
 }
 
 static herr_t
-should_dset_use_native(const Bypass_dataset_t* dset, bool *should_use_native) {
+should_dset_use_native(Bypass_dataset_t* dset) {
+    int num_ext_files = 0;
     herr_t ret_value = 0;
 
     assert(dset);
-    assert(should_use_native);
 
     if (dset->num_filters > 0) {
-        *should_use_native = true;
+        dset->use_native = true;
+        dset->use_native_checked = true;
         goto done;
     }
         
     if (H5D_VIRTUAL == dset->layout) {
-        *should_use_native = true;
+        dset->use_native = true;
+        dset->use_native_checked = true;
+
         goto done;
     }
 
     if (H5T_INTEGER != dset->dtype_info.class) {
-        *should_use_native = true;
+        dset->use_native = true;
+        dset->use_native_checked = true;
+
         goto done;
     }
 
     /* Some non-numeric library types (e.g. H5T_NATIVE_UCHAR) use the H5T_INTEGER class.
      * This is a hack to avoid using the Bypass VOL for datatypes that are not equivalent to H5T_NATIVE_INT */
     if (dset->dtype_info.size != sizeof(int)) {
-        *should_use_native = true;
+        dset->use_native = true;
+        dset->use_native_checked = true;
+
         goto done;
     }
 
     /* For now, the Bypass VOL only supports signed integers */
     if (dset->dtype_info.sign != H5T_SGN_2) {
-        *should_use_native = true;
+        dset->use_native = true;
+        dset->use_native_checked = true;
+
         goto done;
     }
 
     if (dset->layout == H5D_COMPACT) {
-        *should_use_native = true;
+        dset->use_native = true;
+        dset->use_native_checked = true;
+
         goto done;
     }
 
-    // TBD: Link type?
-    *should_use_native = false;
+    /* If external link is used, let the native library handle it */
+    if ((num_ext_files = H5Pget_external_count(dset->dcpl_id)) < 0) {
+        fprintf(stderr, "failed to get external file count\n");
+        ret_value = -1;
+        goto done;
+    }
+
+    if (num_ext_files > 0) {
+        dset->use_native = true;
+        dset->use_native_checked = true;
+
+        goto done;
+    }
 
 done:
     return ret_value;

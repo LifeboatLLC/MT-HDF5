@@ -71,8 +71,8 @@ static int file_stuff_size = FILE_STUFF_SIZE;
 
 /* Log info to be written out for the C program */
 typedef struct {
-    char    file_name[64];        /* file name to be read or written */
-    char    dset_name[64];        /* unused */
+    char    file_name[BYPASS_NAME_SIZE_LONG];        /* file name to be read or written */
+    char    dset_name[BYPASS_NAME_SIZE_LONG];        /* unused */
     haddr_t dset_loc;             /* dataset location (for contiguous) or chunk location (for chunked dataset) in bytes */
     hsize_t data_offset_file;     /* offset from 'dset_loc' in number of elements */
     hsize_t real_offset;          /* dset_loc + data_offset_file used only for sorting, not outputting to the log file  */
