@@ -269,7 +269,7 @@ static herr_t H5VL_bypass_token_from_str(void *obj, H5I_type_t obj_type, const c
 static herr_t H5VL_bypass_optional(void *obj, H5VL_optional_args_t *args, hid_t dxpl_id, void **req);
 
 /* Check if any threads are still performing or waiting for tasks */
-herr_t is_any_thread_active(bool *out);
+herr_t is_any_thread_active(bool *out, bool mutex_locked);
 
 /* Flush the file containing the provided dataset */
 static herr_t flush_containing_file(H5VL_bypass_t *file);
@@ -297,6 +297,14 @@ static herr_t get_dtype_info_helper(hid_t type_id, dtype_info_t *type_info_out);
 
 static H5D_space_status_t
 get_dset_space_status(H5VL_bypass_t *dset_obj, hid_t dxpl_id, void **req);
+
+/* Functions for task queue for the thread pool to process */
+static herr_t bypass_queue_destroy(bool mutex_locked);
+static herr_t bypass_queue_push(Bypass_task_t *task, bool mutex_locked);
+/* Retrieve a task from the global queue. Task must be released by caller.*/
+static Bypass_task_t * bypass_queue_pop(bool mutex_locked);
+static Bypass_task_t * bypass_task_create(int file_index, haddr_t addr, size_t io_len, void *buf);
+static herr_t bypass_task_release(Bypass_task_t *task);
 
 /*******************/
 /* Local variables */
@@ -616,18 +624,12 @@ H5VL_bypass_init(hid_t vipl_id)
     // printf("%s at line %d: nthreads_tpool = %d, nsteps_tpool = %d\n", __func__,
     // __LINE__, nthreads_tpool, nsteps_tpool);
 
-    /* Initialize the information strcuture for threads to use.  Do it before
-     * starting threads */
-    md_for_thread.file_indices   = md_for_thread.file_indices_local;
-    md_for_thread.addrs          = md_for_thread.addrs_local;
-    md_for_thread.sizes          = md_for_thread.sizes_local;
-    md_for_thread.vec_bufs       = md_for_thread.vec_bufs_local;
-    md_for_thread.vec_arr_nalloc = LOCAL_VECTOR_LEN;
-    md_for_thread.vec_arr_nused  = 0;
-    md_for_thread.free_memory    = false;
+    /* Initialize the task queue */
+    bypass_queue_head_g = NULL;
+    bypass_queue_tail_g = NULL;
 
     /* Initialize thread active status to true */
-    md_for_thread.thread_is_active = calloc(nthreads_tpool, sizeof(bool));
+    md_for_thread.thread_is_active = malloc(nthreads_tpool * sizeof(bool));
 
     for (i = 0; i < nthreads_tpool; i++)
         md_for_thread.thread_is_active[i] = true;
@@ -675,6 +677,8 @@ H5VL_bypass_term(void)
     FILE *log_fp;
     int   i;
     void  *thread_ret = NULL;
+    bool  any_thread_active = false;
+    herr_t ret_value = 0;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL TERM\n");
@@ -693,6 +697,7 @@ H5VL_bypass_term(void)
 
     pthread_cond_broadcast(&cond_local);
 
+    /* Doesn't stop if an error happens */
     for (i = 0; i < nthreads_tpool; i++) {
         if (pthread_join(th[i], &thread_ret) != 0)
             fprintf(stderr, "failed to join thread %d\n", i);
@@ -735,6 +740,24 @@ H5VL_bypass_term(void)
 
     fclose(log_fp);
 
+    /* Wait until all threads finish before releasing the queue */
+    pthread_mutex_lock(&mutex_local);
+
+    while (true) {
+        if (is_any_thread_active(&any_thread_active, true) < 0) {
+            fprintf(stderr, "error while checking thread active status for vol termination\n");
+            ret_value = -1;
+            break;
+        }
+
+        if (!any_thread_active)
+            break;
+    }
+
+    bypass_queue_destroy(true);
+
+    pthread_mutex_unlock(&mutex_local);
+
     if (file_stuff)
         free(file_stuff);
     if (info_stuff)
@@ -745,18 +768,12 @@ H5VL_bypass_term(void)
         free(md_for_thread.thread_is_active);
 
     /* Wait until all threads finish before releasing resources */
-    if (md_for_thread.free_memory) {
-        if (md_for_thread.file_indices)
-            free(md_for_thread.file_indices);
-        if (md_for_thread.addrs)
-            free(md_for_thread.addrs);
-        if (md_for_thread.sizes)
-            free(md_for_thread.sizes);
-        if (md_for_thread.vec_bufs)
-            free(md_for_thread.vec_bufs);
-    }
+    pthread_mutex_destroy(&mutex_local);
+    pthread_cond_destroy(&cond_local);
+    pthread_cond_destroy(&cond_read_finished);
+    pthread_cond_destroy(&continue_local);
 
-    return 0;
+    return ret_value;
 } /* end H5VL_bypass_term() */
 
 /*---------------------------------------------------------------------------
@@ -1895,38 +1912,18 @@ start_thread_for_pool(void *args)
     int thread_id = ((info_for_thread_t *)args)->thread_id;
     // int fd = ((info_for_thread_t *)args)->fd;
     void    *ret_value = (void*) 0;
-    int     *file_indices_local = NULL;
-    haddr_t *addrs_local = NULL;
-    size_t  *sizes_local = NULL;
-    void   **vec_bufs_local = NULL;
+    Bypass_task_t **tasks = NULL; /* An array of tasks to be queued */
     int      local_count = 0;
     int      i;
 
     // fprintf(stderr, "In start_thread_for_pool: %d\n", thread_id);
 
-    if ((file_indices_local = (int *)malloc(nsteps_tpool * sizeof(int))) == NULL) {
-        fprintf(stderr, "failed to allocate file indices\n");
-        ret_value = (void*) -1;
-        goto done;
-    }
-    
-    if ((addrs_local = (haddr_t *)malloc(nsteps_tpool * sizeof(haddr_t))) == NULL) {
-        fprintf(stderr, "failed to allocate addresses\n");
+    if ((tasks = (Bypass_task_t **)malloc(nsteps_tpool * sizeof(Bypass_task_t*))) == NULL) {
+        fprintf(stderr, "failed to allocate a squence of tasks\n");
         ret_value = (void*) -1;
         goto done;
     }
 
-    if ((sizes_local = (size_t *)malloc(nsteps_tpool * sizeof(size_t))) == NULL) {
-        fprintf(stderr, "failed to allocate sizes\n");
-        ret_value = (void*) -1;
-        goto done;
-    }
-
-    if ((vec_bufs_local = (void *)malloc(nsteps_tpool * sizeof(void *))) == NULL) {
-        fprintf(stderr, "failed to allocate vector buffers\n");
-        ret_value = (void*) -1;
-        goto done;
-    }
     /* Rename thread_loop_finish to a more appropriate name */
     while (!thread_loop_finish || !stop_tpool) {
         if (pthread_mutex_lock(&mutex_local) != 0) {
@@ -1953,16 +1950,15 @@ start_thread_for_pool(void *args)
         local_count = MIN(thread_task_count, nsteps_tpool);
 
         for (i = 0; i < local_count; i++) {
-            file_indices_local[i] = md_for_thread.file_indices[info_pointer];
-            addrs_local[i]        = md_for_thread.addrs[info_pointer];
-            sizes_local[i]        = md_for_thread.sizes[info_pointer];
-            vec_bufs_local[i]     = md_for_thread.vec_bufs[info_pointer];
+            /* Get the task in queue */
+            if ((tasks[i] = bypass_queue_pop(true)) == NULL) {
+                fprintf(stderr, "failed to pop task from queue\n");
+                ret_value = (void*) -1;
+                goto done;
+            }
 
-            info_pointer++;
-            thread_task_count--;
-
-            file_stuff[file_indices_local[i]].num_reads++;
-            file_stuff[file_indices_local[i]].read_started = true;
+            file_stuff[tasks[i]->file_index].num_reads++;
+            file_stuff[tasks[i]->file_index].read_started = true;
         }
 
         // fprintf(stderr, "thread %d: 1. local_count = %d, thread_task_count = %d,
@@ -1988,10 +1984,10 @@ start_thread_for_pool(void *args)
             // sizes_local = %ld, addrs_local = %llu\n", thread_id, i, file_indices_local[i],
             // vec_bufs_local[i], sizes_local[i], addrs_local[i]);
 
-            if (read_big_data(file_stuff[file_indices_local[i]].fd, vec_bufs_local[i], sizes_local[i],
-                          addrs_local[i]) < 0)
+            if (read_big_data(file_stuff[tasks[i]->file_index].fd, tasks[i]->vec_buf, tasks[i]->size,
+                          tasks[i]->addr) < 0)
             {
-                fprintf(stderr, "read_big_data failed within file %s\n", file_stuff[file_indices_local[i]].name);
+                fprintf(stderr, "read_big_data failed within file %s\n", file_stuff[tasks[i]->file_index].name);
                 /* Return a failure code, but try to complete the rest of the read request.
                  * This is important to properly decrement the reference count/num_reads on the local file object */
                 ret_value = (void *)-1;
@@ -2003,17 +1999,17 @@ start_thread_for_pool(void *args)
                 goto done;
             }
 
-            file_stuff[file_indices_local[i]].num_reads--;
+            file_stuff[tasks[i]->file_index].num_reads--;
 
             /* When there is no task left in the queue and all the reads finish for
              * the current file, signal the main process that this file can be closed.
              */
-            if (thread_loop_finish && (file_stuff[file_indices_local[i]].num_reads == 0)) {
+            if (thread_loop_finish && (file_stuff[tasks[i]->file_index].num_reads == 0)) {
                 // fprintf(stderr, "thread %d: file name = %s, signal close_ready\n", thread_id,
                 // file_stuff[file_indices_local[i]].name);
                 /* There are currently no reads active on this file - it may be closed */
-                file_stuff[file_indices_local[i]].read_started = false;
-                pthread_cond_signal(&(file_stuff[file_indices_local[i]].close_ready));
+                file_stuff[tasks[i]->file_index].read_started = false;
+                pthread_cond_signal(&(file_stuff[tasks[i]->file_index].close_ready));
             }
 
             if (pthread_mutex_unlock(&mutex_local) != 0) {
@@ -2021,6 +2017,14 @@ start_thread_for_pool(void *args)
                 ret_value = (void*) -1;
                 goto done;
             }
+
+            if (bypass_task_release(tasks[i]) < 0) {
+                fprintf(stderr, "failed to release task\n");
+                ret_value = (void*) -1;
+                goto done;
+            }
+
+            tasks[i] = NULL;
         }
 
         /* If all tasks have been taken on by other threads and this thread's work is complete,
@@ -2050,9 +2054,9 @@ start_thread_for_pool(void *args)
          * the corresponding file can be closed.
          */
         /* pthread_mutex_lock(&mutex_local);
-        if (thread_loop_finish && (file_stuff[file_indices_local[0]].num_reads ==
-    0)) { fprintf(stderr, "thread %d: before broadcast\n", thread_id);
-                pthread_cond_broadcast(&file_stuff[file_indices_local[0]].close_ready);
+        if (thread_loop_finish && (file_stuff[file_indices_local[0]].num_reads == 0)) {
+            fprintf(stderr, "thread %d: before broadcast\n", thread_id);
+            pthread_cond_broadcast(&file_stuff[file_indices_local[0]].close_ready);
         }
         pthread_mutex_unlock(&mutex_local); */
 
@@ -2061,14 +2065,23 @@ start_thread_for_pool(void *args)
     }
 
 done:
-    if (ret_value == (void*) -1) {
+    /* Attempt to clean up queue memory that we took ownership of */
+    if (ret_value < 0) {
         fprintf(stderr, "thread idx %d in pool failed\n", thread_id);
+
+        for (i = 0; i < local_count; i++) {
+            if (tasks[i] != NULL) {
+                bypass_task_release(tasks[i]);
+                tasks[i] = NULL;
+            }
+        }
     }
 
-    free(file_indices_local);
-    free(addrs_local);
-    free(sizes_local);
-    free(vec_bufs_local);
+    pthread_mutex_lock(&mutex_local);
+    md_for_thread.thread_is_active[thread_id] = false;
+    pthread_mutex_unlock(&mutex_local);
+
+    free(tasks);
 
     return ret_value;
 } /* end start_thread_for_pool() */
@@ -2085,6 +2098,9 @@ process_vectors(void *rbuf, sel_info_t *selection_info)
     size_t     file_len[SEL_SEQ_LIST_LEN], mem_len[SEL_SEQ_LIST_LEN];
     size_t     io_len;
     int        local_count_for_signal = 0;
+    Bypass_task_t *task = NULL;
+    haddr_t    task_addr   = HADDR_UNDEF;
+    void       *task_buf    = NULL;
     herr_t     ret_value = 0;
 
     /* Contiguous is treated as a single chunk */
@@ -2183,124 +2199,35 @@ process_vectors(void *rbuf, sel_info_t *selection_info)
          * datasets. To do: needs a flag to turn it on and off */
         io_len = MIN(io_len, MB);
 
-        /* Lock md_for_thread and update it */
+        /* Lock in order to append a task to the task queue */
         if (pthread_mutex_lock(&mutex_local) != 0) {
             fprintf(stderr, "failed to lock local mutex\n");
             ret_value = -1;
             goto done;
         }
 
-        if (md_for_thread.vec_arr_nused == md_for_thread.vec_arr_nalloc) {
-            /* Check if we're using the static arrays */
-            if (md_for_thread.addrs == md_for_thread.addrs_local) {
-                /* Allocate dynamic arrays.  Need to free them later */
-                if (NULL ==
-                    (md_for_thread.file_indices = malloc(sizeof(md_for_thread.file_indices_local) * 2)))
-                {
-                    fprintf(stderr, "memory allocation failed for file ids list\n");
-                    ret_value = -1;
-                    goto done;
-                }
-
-                if (NULL == (md_for_thread.addrs = malloc(sizeof(md_for_thread.addrs_local) * 2)))
-                {
-                    fprintf(stderr, "memory allocation failed for address list\n");
-                    ret_value = -1;
-                    goto done;
-                }
-
-                if (NULL == (md_for_thread.sizes = malloc(sizeof(md_for_thread.sizes_local) * 2)))
-                {
-                    fprintf(stderr, "memory allocation failed for size list\n");
-                    ret_value = -1;
-                    goto done;
-                }
-
-                if (NULL == (md_for_thread.vec_bufs = malloc(sizeof(md_for_thread.vec_bufs_local) * 2)))
-                {
-                    fprintf(stderr, "memory allocation failed for buffer list\n");
-                    ret_value = -1;
-                    goto done;
-                }
-
-                /* Copy the existing data */
-                (void)memcpy(md_for_thread.file_indices, md_for_thread.file_indices_local,
-                             sizeof(md_for_thread.file_indices_local));
-                (void)memcpy(md_for_thread.addrs, md_for_thread.addrs_local,
-                             sizeof(md_for_thread.addrs_local));
-                (void)memcpy(md_for_thread.sizes, md_for_thread.sizes_local,
-                             sizeof(md_for_thread.sizes_local));
-                (void)memcpy(md_for_thread.vec_bufs, md_for_thread.vec_bufs_local,
-                             sizeof(md_for_thread.vec_bufs_local));
-            }
-            else {
-                void *tmp_ptr;
-
-                /* Reallocate arrays */
-                if (NULL == (tmp_ptr = realloc(md_for_thread.file_indices,
-                                               md_for_thread.vec_arr_nalloc *
-                                                   sizeof(*(md_for_thread.file_indices)) * 2)))
-                {
-                    fprintf(stderr, "memory reallocation failed for file ids list\n");
-                    ret_value = -1;
-                    goto done;
-                }
-
-                md_for_thread.file_indices = tmp_ptr;
-                if (NULL == (tmp_ptr = realloc(md_for_thread.addrs, md_for_thread.vec_arr_nalloc *
-                                                                        sizeof(*(md_for_thread.addrs)) * 2)))
-                {
-                    fprintf(stderr, "memory reallocation failed for address list\n");
-                    ret_value = -1;
-                    goto done;
-                }                                                                    
-
-                md_for_thread.addrs = tmp_ptr;
-                if (NULL == (tmp_ptr = realloc(md_for_thread.sizes, md_for_thread.vec_arr_nalloc *
-                                                                        sizeof(*(md_for_thread.sizes)) * 2)))
-                {
-                    fprintf(stderr, "memory reallocation failed for size list\n");
-                    ret_value = -1;
-                    goto done;
-                }
-
-                md_for_thread.sizes = tmp_ptr;
-                if (NULL ==
-                    (tmp_ptr = realloc(md_for_thread.vec_bufs,
-                                       md_for_thread.vec_arr_nalloc * sizeof(*(md_for_thread.vec_bufs)) * 2)))
-                {
-                    fprintf(stderr, "memory reallocation failed for buffer list\n");
-                    ret_value = -1;
-                    goto done;
-                }
-
-                md_for_thread.vec_bufs = tmp_ptr;
-            }
-
-            /* Record that we've doubled the array sizes */
-            md_for_thread.vec_arr_nalloc *= 2;
-
-            md_for_thread.free_memory = true;
+        if ((task = malloc(sizeof(Bypass_task_t))) == NULL) {
+            fprintf(stderr, "Failed to allocate memory for a task\n");
+            ret_value = -1;
+            goto done;
         }
 
-        /* Add this segment to vector read list */
-        md_for_thread.file_indices[md_for_thread.vec_arr_nused] = selection_info->my_file_index;
-        md_for_thread.addrs[md_for_thread.vec_arr_nused] =
-            selection_info->chunk_addr + file_off[file_seq_i]; /* Add the base offset of the dataset to the
-                                                                  address */
-        md_for_thread.sizes[md_for_thread.vec_arr_nused]    = io_len;
-        md_for_thread.vec_bufs[md_for_thread.vec_arr_nused] = (void *)((uint8_t *)rbuf + mem_off[mem_seq_i]);
+        /* Populate task and append to queue */
+        task_addr = selection_info->chunk_addr + file_off[file_seq_i];
+        task_buf = (void *)((uint8_t *)rbuf + mem_off[mem_seq_i]);
 
-        // fprintf(stderr, "In process_vector: %d. addr = %llu, sizes = %llu, buf =
-        // %p\n", md_for_thread.vec_arr_nused,
-        // md_for_thread.addrs[md_for_thread.vec_arr_nused],
-        // md_for_thread.sizes[md_for_thread.vec_arr_nused],
-        // md_for_thread.vec_bufs[md_for_thread.vec_arr_nused]);
+        if ((task = bypass_task_create(selection_info->my_file_index,
+                        task_addr, io_len, task_buf)) == NULL) {
+            fprintf(stderr, "Failed to assemble task while processing vectors\n");
+            ret_value = -1;
+            goto done;
+        }
 
-        md_for_thread.vec_arr_nused++;
-
-        /* Increment the task in the queue of the thread pool */
-        thread_task_count++;
+        if (bypass_queue_push(task, true) < 0) {
+            fprintf(stderr, "Failed to push task to queue\n");
+            ret_value = -1;
+            goto done;
+        }
 
         local_count_for_signal++;
 
@@ -2384,7 +2311,7 @@ process_vectors(void *rbuf, sel_info_t *selection_info)
 
 done:
     return ret_value;
-} /* end process_vectors() */
+} /* end of process_vectors() */
 
 static int
 process_chunk_cb(const hsize_t *chunk_offsets, unsigned filter_mask,
@@ -2845,7 +2772,7 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
 	while (true) {
 	    any_thread_active = false;
 
-	    if (is_any_thread_active(&any_thread_active) < 0) {
+	    if (is_any_thread_active(&any_thread_active, true) < 0) {
 		fprintf(stderr, "Unable to query thread active status\n");
 		/* Prevent deadlock on error */
 		pthread_mutex_unlock(&mutex_local);
@@ -5066,12 +4993,12 @@ H5VL_bypass_optional(void *obj, H5VL_optional_args_t *args, hid_t dxpl_id, void 
 
 /* This is a helper function to check if any thread is active. */
 herr_t
-is_any_thread_active(bool *out) {
+is_any_thread_active(bool *out, bool mutex_locked) {
     herr_t ret_value = 0;
 
     assert(out);
 
-    if (pthread_mutex_lock(&mutex_local) != 0) {
+    if (!mutex_locked && pthread_mutex_lock(&mutex_local) != 0) {
         fprintf(stderr, "pthread_mutex_lock failed\n");
         ret_value = -1;
         goto done;
@@ -5083,10 +5010,11 @@ is_any_thread_active(bool *out) {
         *out = *out || md_for_thread.thread_is_active[i];
 
 done:
-    if (pthread_mutex_unlock(&mutex_local) != 0) {
+    if (!mutex_locked && pthread_mutex_unlock(&mutex_local) != 0) {
         fprintf(stderr, "pthread_mutex_unlock failed\n");
         ret_value = -1;
     }
+
     return ret_value;
 }
 
@@ -5354,5 +5282,170 @@ flush_containing_file(H5VL_bypass_t *dset) {
     }
 
 done:
+    return ret_value;
+}
+
+static herr_t
+bypass_queue_destroy(bool mutex_locked) {
+    herr_t ret_value = 0;
+    bool locked = false;
+    Bypass_task_t *curr = NULL;
+    Bypass_task_t *next = NULL;
+
+    if (!mutex_locked) {
+	if (pthread_mutex_lock(&mutex_local) != 0) {
+	    fprintf(stderr, "pthread_mutex_lock failed\n");
+	    ret_value = -1;
+	    goto done;
+	}
+
+	locked = true;
+    }
+
+    if (bypass_queue_head_g == NULL) {
+        assert(bypass_queue_tail_g == NULL);
+        assert(thread_task_count == 0);
+        goto done;
+    }
+
+    curr = bypass_queue_head_g;
+
+    while (curr != NULL) {
+        next = curr->next;
+        free(curr);
+        curr = next;
+    }
+
+    bypass_queue_head_g = NULL;
+    bypass_queue_tail_g = NULL;
+    thread_task_count = 0;
+
+done:
+    if (locked && pthread_mutex_unlock(&mutex_local) != 0) {
+        fprintf(stderr, "pthread_mutex_unlock failed\n");
+        ret_value = -1;
+    }
+
+    return ret_value;
+}
+
+static herr_t
+bypass_queue_push(Bypass_task_t *task, bool mutex_locked) {
+    herr_t ret_value = 0;
+    bool locked = false;
+
+    if (!mutex_locked) {
+	if (pthread_mutex_lock(&mutex_local) != 0) {
+	    fprintf(stderr, "pthread_mutex_lock failed\n");
+	    ret_value = -1;
+	    goto done;
+	}
+
+	locked = true;
+    }
+
+    if (bypass_queue_head_g == NULL) {
+        /* Queue is empty */
+        assert(bypass_queue_tail_g == NULL);
+        assert(thread_task_count == 0);
+
+        bypass_queue_head_g = task;
+        bypass_queue_tail_g = task;
+        thread_task_count = 1;
+    } else {
+        assert(bypass_queue_tail_g != NULL);
+        assert(thread_task_count > 0);
+
+        bypass_queue_tail_g->next = task;
+        bypass_queue_tail_g = task;
+        thread_task_count++;
+
+        assert(bypass_queue_head_g != bypass_queue_tail_g);
+    }
+
+done:
+    if (locked && pthread_mutex_unlock(&mutex_local) != 0) {
+        fprintf(stderr, "pthread_mutex_unlock failed\n");
+        ret_value = -1;
+    }
+
+    return ret_value;
+}
+
+/* Retrieve a task from the global queue.
+ * Task must be released by caller.*/
+static Bypass_task_t *
+bypass_queue_pop(bool mutex_locked) {
+    Bypass_task_t *ret_value = NULL;
+    bool locked = false;
+
+    if (!mutex_locked) {
+	if (pthread_mutex_lock(&mutex_local) != 0) {
+	    fprintf(stderr, "pthread_mutex_lock failed\n");
+	    goto done;
+	}
+
+	locked = true;
+    }
+
+    /* Queue is empty */
+    if (bypass_queue_head_g == NULL) {
+        assert(bypass_queue_tail_g == NULL);
+        assert(thread_task_count == 0);
+        ret_value = NULL;
+    } else if (bypass_queue_head_g == bypass_queue_tail_g) {
+        /* Queue has only one element */
+        assert(thread_task_count == 1);
+        ret_value = bypass_queue_head_g;
+
+        bypass_queue_head_g = NULL;
+        bypass_queue_tail_g = NULL;
+        thread_task_count = 0;
+    } else {
+        /* Queue has >= 2 elements */
+        assert(thread_task_count > 1);
+        assert(bypass_queue_head_g->next != NULL);
+
+        ret_value = bypass_queue_head_g;
+
+        bypass_queue_head_g = bypass_queue_head_g->next;
+        thread_task_count--;
+    }
+
+done:
+    if (locked && pthread_mutex_unlock(&mutex_local) != 0) {
+        fprintf(stderr, "pthread_mutex_unlock failed\n");
+        ret_value = NULL;
+    }
+
+    return ret_value;
+}
+
+static Bypass_task_t *
+bypass_task_create(int file_index, haddr_t addr, size_t size, void *buf) {
+    Bypass_task_t *ret_value = NULL;
+
+    if ((ret_value = (Bypass_task_t *)malloc(sizeof(Bypass_task_t))) == NULL) {
+        fprintf(stderr, "failed to allocate space for new read task\n");
+        goto done;
+    }
+
+    ret_value->file_index = file_index;
+    ret_value->addr = addr;
+    ret_value->size = size;
+    ret_value->vec_buf = buf;
+
+    /* Will be populated after this task is inserted into queue */
+    ret_value->next = NULL;
+done:
+    return ret_value;
+}
+
+static herr_t
+bypass_task_release(Bypass_task_t *task) {
+    herr_t ret_value = 0;
+
+    free(task);
+
     return ret_value;
 }
