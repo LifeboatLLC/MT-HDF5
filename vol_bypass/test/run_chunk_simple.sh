@@ -1,19 +1,22 @@
 #! /bin/sh
 
 # Modify the following variables as command line options for the h5_read.c:
-#     number of threads
-#     number of steps for thread pool queue
+#     number of threads for the thread pool
+#     number of tasks to be put into thread pool queue in each step
+#     maximal number of data elements for each data pieces to be read
 #     dataset dimension one
 #     dataset dimension two
 #     chunk dimension one
 #     chunk dimension two
 NTHREADS=4
 NSTEPS_QUEUE=1024
-# Dataset size = 64GB
-# DIM1=131072
-# DIM2=131072
-# CHUNK_DIM1=8192
-# CHUNK_DIM2=8192
+MAX_NELMTS=1048576
+
+# Dataset size = 16x4 bytes
+# DIM1=4
+# DIM2=4
+# CHUNK_DIM1=2
+# CHUNK_DIM2=2
 
 # Dataset size = 4MB
 # DIM1=1024
@@ -22,16 +25,16 @@ NSTEPS_QUEUE=1024
 # CHUNK_DIM2=64
 
 # Dataset size = 16GB
-# DIM1=65536
-# DIM2=65536
+DIM1=65536
+DIM2=65536
+CHUNK_DIM1=8192
+CHUNK_DIM2=8192
+
+# Dataset size = 64GB
+# DIM1=131072
+# DIM2=131072
 # CHUNK_DIM1=8192
 # CHUNK_DIM2=8192
-
-# Dataset size = 16x4 bytes
-DIM1=4
-DIM2=4
-CHUNK_DIM1=2
-CHUNK_DIM2=2
 
 SPACE_SELLECTION=1
 
@@ -45,7 +48,7 @@ unset HDF5_PLUGIN_PATH
 echo ""
 echo ""
 echo "Test 1a: Reading single dataset in a single file with straight HDF5 (no Bypass VOL) with no child thread"
-./h5_read -t 0 -d ${DIM1}x${DIM2} -c ${CHUNK_DIM1}x${CHUNK_DIM2} -s ${SPACE_SELLECTION} -k
+./h5_read -t 0 -d ${DIM1}x${DIM2} -c ${CHUNK_DIM1}x${CHUNK_DIM2} -s ${SPACE_SELLECTION}
 
 #echo ""
 #echo ""
@@ -53,16 +56,17 @@ echo "Test 1a: Reading single dataset in a single file with straight HDF5 (no By
 # ./h5_read -t ${NTHREADS} -d ${DIM1}x${DIM2} -c ${CHUNK_DIM1}x${CHUNK_DIM2} -s ${SPACE_SELLECTION}
 
 # Set the environment variables to use Bypass VOL. Need to modify them with your own paths 
-export HDF5_PLUGIN_PATH=/Users/raylu/Lifeboat/HDF/MT-HDF5/vol_bypass
+export HDF5_PLUGIN_PATH=/Users/raylu/Lifeboat/HDF/Matt/MT-HDF5_main2/vol_bypass
 export HDF5_VOL_CONNECTOR="bypass under_vol=0;under_info={};"
-export DYLD_LIBRARY_PATH=$DYLD_LIBRARY_PATH:/Users/raylu/Lifeboat/HDF/Experimental/build/hdf5/lib:$HDF5_PLUGIN_PATH
+export DYLD_LIBRARY_PATH=$DYLD_LIBRARY_PATH:/Users/raylu/Lifeboat/HDF/Jordan/build/hdf5/lib:$HDF5_PLUGIN_PATH
 export BYPASS_VOL_NTHREADS=${NTHREADS}
 export BYPASS_VOL_NSTEPS=${NSTEPS_QUEUE}
+export BYPASS_VOL_MAX_NELMTS=${MAX_NELMTS}
 
 echo ""
 echo ""
 echo "Test 2a: Reading single dataset in a single file with Bypass VOL with thread pool"
-./h5_read -t 0 -d ${DIM1}x${DIM2} -c ${CHUNK_DIM1}x${CHUNK_DIM2} -s ${SPACE_SELLECTION} -k
+./h5_read -t 0 -d ${DIM1}x${DIM2} -c ${CHUNK_DIM1}x${CHUNK_DIM2} -s ${SPACE_SELLECTION}
 
 #echo ""
 #echo ""
@@ -78,7 +82,7 @@ echo "Test 2a: Reading single dataset in a single file with Bypass VOL with thre
 echo ""
 echo ""
 echo "Test 3b: Reading single dataset in a single file in C only with multi-thread"
-./posix_read_mthread -t ${NTHREADS} -d ${DIM1}x${DIM2} -c ${CHUNK_DIM1}x${CHUNK_DIM2} -k
+./posix_read_mthread -t ${NTHREADS} -d ${DIM1}x${DIM2} -c ${CHUNK_DIM1}x${CHUNK_DIM2}
 
 # Checking the correctness of the data may not work if there are more than one section because the thread pool may still be 
 # reading the data during the check.  Each section corresponds to a H5Dread.  Sections are seperated by ### in info.log.
@@ -87,4 +91,4 @@ echo "Test 3b: Reading single dataset in a single file in C only with multi-thre
 echo ""
 echo ""
 echo "Test 3c: Reading single dataset in a single file in C only with thread pool"
-./posix_read_tpool -t ${NTHREADS} -d ${DIM1}x${DIM2} -c ${CHUNK_DIM1}x${CHUNK_DIM2} -m ${NSTEPS_QUEUE} -k
+./posix_read_tpool -t ${NTHREADS} -d ${DIM1}x${DIM2} -c ${CHUNK_DIM1}x${CHUNK_DIM2} -m ${NSTEPS_QUEUE}

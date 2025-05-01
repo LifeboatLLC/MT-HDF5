@@ -313,7 +313,7 @@ static const H5VL_class_t H5VL_bypass_g = {
     (H5VL_class_value_t)H5VL_BYPASS_VALUE, /* value        */
     H5VL_BYPASS_NAME,                      /* name         */
     H5VL_BYPASS_VERSION,                   /* connector version */
-    0,                                     /* capability flags */
+    0, //H5VL_CAP_FLAG_THREADSAFE,              /* capability flags for thread-safe or multithread */
     H5VL_bypass_init,                      /* initialize   */
     H5VL_bypass_term,                      /* terminate    */
     {
@@ -577,9 +577,8 @@ H5VL_bypass_init(hid_t vipl_id)
 {
     char *nthreads_str = NULL;
     char *nsteps_str   = NULL;
+    char *nelmts_str     = NULL;
     pthread_mutexattr_t attr;
-    // info_for_thread_t info_for_thread[nthreads_tpool]; /* Remove it and use the global variable
-    // meta_for_thread? */
     int i;
 
 #ifdef ENABLE_BYPASS_LOGGING
@@ -618,8 +617,18 @@ H5VL_bypass_init(hid_t vipl_id)
     if (nsteps_tpool < 1)
         nsteps_tpool = 1;
 
-    // printf("%s at line %d: nthreads_tpool = %d, nsteps_tpool = %d\n", __func__,
-    // __LINE__, nthreads_tpool, nsteps_tpool);
+    /* Retrieve the maximal number of elements in data pieces to be read from the user's input */
+    nelmts_str = getenv("BYPASS_VOL_MAX_NELMTS");
+
+    if (nelmts_str)
+        nelmts_max = atoll(nelmts_str);
+
+    /* The maximal number of data elements to be read must be at least 1 */
+    if (nelmts_max < 1)
+        nelmts_max = 1;
+
+    //printf("%s at line %d: nthreads_tpool = %d, nsteps_tpool = %d, nelmts_max = %lld, nelmts_str = %s\n", __func__,
+    //    __LINE__, nthreads_tpool, nsteps_tpool, nelmts_max, nelmts_str);
 
     /* Initialize the task queue */
     bypass_queue_head_g = NULL;
@@ -677,6 +686,7 @@ H5VL_bypass_term(void)
     /* Reset VOL ID */
     H5VL_BYPASS_g = H5I_INVALID_HID;
 
+    /* Stop the thread pool */
     stop_tpool = true;
 
     /* If H5Dread isn't even called in the application, the thread pool is waiting
@@ -725,16 +735,8 @@ H5VL_bypass_term(void)
 
     fclose(log_fp);
 
-    /* Wait until all threads finish before releasing the queue */
-    pthread_mutex_lock(&mutex_local);
-
-    while (tasks_unfinished > 0) {
-        pthread_cond_wait(&cond_read_finished, &mutex_local);
-    }
-
+    /* pthread_join has been called, just destroy the queue directly */
     bypass_queue_destroy(true);
-
-    pthread_mutex_unlock(&mutex_local);
 
     if (file_stuff)
         free(file_stuff);
@@ -743,7 +745,7 @@ H5VL_bypass_term(void)
     if (info_for_thread)
         free(info_for_thread);
 
-    /* Wait until all threads finish before releasing resources */
+    /* Release thread resources */
     pthread_mutex_destroy(&mutex_local);
     pthread_cond_destroy(&cond_local);
     pthread_cond_destroy(&cond_read_finished);
@@ -1559,7 +1561,9 @@ H5VL_bypass_dataset_create(void *obj, const H5VL_loc_params_t *loc_params, const
 
     if ((under = H5VLdataset_create(o->under_object, loc_params, o->under_vol_id, name,
         lcpl_id, type_id, space_id, dcpl_id, dapl_id, dxpl_id, req)) == NULL) {
-            fprintf(stderr, "failed to create dataset in underlying connector\n");
+
+            fprintf(stderr, "In %s of %s at line %d: failed to create dataset in underlying connector\n",
+                __func__, __FILE__, __LINE__);
             goto error;
     }
 
@@ -1900,7 +1904,7 @@ start_thread_for_pool(void *args)
         goto done;
     }
 
-    /* Rename thread_loop_finish to a more appropriate name */
+    /* stop_tpool is only turned on in H5VL_bypass_term when the application finishes */
     while (!stop_tpool) {
         if (pthread_mutex_lock(&mutex_local) != 0) {
             fprintf(stderr, "failed to lock mutex\n");
@@ -1917,7 +1921,7 @@ start_thread_for_pool(void *args)
         // fprintf(stderr, "after wait\n");
 
         /* tasks_in_queue can be smaller (LEFTOVER being passed into
-         * submit_task() in read_vectors()) or larger (submit_task() keeps adding
+         * submit_task() in process_vectors()) or larger (submit_task() keeps adding
          * more before they are processed) than nsteps_tpool. Choose the smaller
          * value */
         local_count = MIN(tasks_in_queue, nsteps_tpool);
@@ -1982,7 +1986,6 @@ start_thread_for_pool(void *args)
             }
 
             tasks_unfinished--;
-            pthread_cond_signal(&cond_read_finished);
 
             if (pthread_mutex_unlock(&mutex_local) != 0) {
                 fprintf(stderr, "failed to unlock mutex\n");
@@ -1998,6 +2001,22 @@ start_thread_for_pool(void *args)
 
             tasks[i] = NULL;
         }
+
+        if (pthread_mutex_lock(&mutex_local) != 0) {
+            fprintf(stderr, "failed to lock mutex\n");
+            ret_value = (void*) -1;
+            goto done;
+        }
+
+        /* Signal that all tasks finished in the queue */
+	if (tasks_unfinished == 0)
+	    pthread_cond_signal(&cond_read_finished);
+
+	if (pthread_mutex_unlock(&mutex_local) != 0) {
+	    fprintf(stderr, "failed to unlock mutex\n");
+	    ret_value = (void*) -1;
+	    goto done;
+	}
     }
 
 done:
@@ -2127,9 +2146,9 @@ process_vectors(void *rbuf, sel_info_t *selection_info)
         /* Calculate length of this IO */
         io_len = MIN(file_len[file_seq_i], mem_len[mem_seq_i]);
 
-        /* Make sure the data length isn't greater than 1MB, mainly for contiguous
-         * datasets. To do: needs a flag to turn it on and off */
-        io_len = MIN(io_len, MB);
+        /* Make sure the data length isn't greater than user's input
+         * (default to 1024 * 1024), mainly for contiguous datasets */
+        io_len = MIN(io_len, nelmts_max);
 
         /* Lock in order to append a task to the task queue */
         if (pthread_mutex_lock(&mutex_local) != 0) {
@@ -2227,7 +2246,7 @@ process_vectors(void *rbuf, sel_info_t *selection_info)
     }
 
     /* If there is any leftover entries in the queue, signal the thread pool to
-     * read them */
+     * read them.  The tasks have been enqueued earlier. */
     if (local_count_for_signal > 0 && local_count_for_signal < nsteps_tpool)
         pthread_cond_broadcast(&cond_local);
 
@@ -2607,7 +2626,13 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
             pthread_mutex_lock(&mutex_local);
             locked = true;
 
-            /* Future optimization: Only flush when a write has been performed */
+            /* Future optimization: Only flush when a write has been performed.
+             * Currently, some tests (specifically H5TEST-objcopy, likely others) fail because the Bypass VOL
+             * attempts to read a dataset under the assumption that all written data has been flushed to file,
+             * when in reality it is still cached. At the low level, this manifested as pread() being passed
+             * write requests that went out of bounds of the posix file.  By flushing before each file before
+             * read, we make sure that all previous writes are reflected in the filesystem.
+             */
             if (flush_containing_file((H5VL_bypass_t *)dset[j]) < 0) {
                 fprintf(stderr, "failed to flush dataset\n");
                 ret_value = -1;

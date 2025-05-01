@@ -1,11 +1,11 @@
 #Your HDF5 install path
-HDF5_DIR=/Users/raylu/Lifeboat/HDF/build_hdf5/hdf5
+HDF5_DIR=/Users/raylu/Lifeboat/HDF/Jordan/build/hdf5
 
 CC=clang
 AR=ar
 
 # DEBUG=-DENABLE_BYPASS_LOGGING -g -O0
-DEBUG=-O0 -g
+DEBUG=-O3
 
 INCLUDES=-I$(HDF5_DIR)/include
 CFLAGS = $(DEBUG) -fPIC $(INCLUDES) -Wall
