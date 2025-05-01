@@ -35,7 +35,7 @@ If you're using CMake, change the following path through ccmake or cmake:
 
 - **CMAKE_INSTALL_PREFIX**: path to your hdf5 install/build location, such as hdf5_build/hdf5/
 
-There are the scripts to run the benchmark:
+Below are the scripts to run the benchmark:
 
 - run_chunk_simple.sh
 - run_contiguous_simple.sh
@@ -46,9 +46,9 @@ To run them correctly, you must modify the three environment variables in these 
 
 - **HDF5_PLUGIN_PATH**: the path to the Bypass VOL library
 - **HDF5_VOL_CONNECTOR**: the name of the Bypass VOL
-- **DYLD_LIBRARY_PATH(Mac) or LD_LIBRARY_PATH**(Linux): the paths to the HDF5 library and the Bypass VOL library
+- **DYLD_LIBRARY_PATH**(Mac) or **LD_LIBRARY_PATH**(Linux): the paths to the HDF5 library and the Bypass VOL library
 
-There are three other environment variables:
+There are three other environment variables to be passed into the Bypass VOL:
 
 - **BYPASS_VOL_NTHREADS**:   adjust the number of threads for the thread pool in Bypass VOL
 - **BYPASS_VOL_NSTEPS**:     the number of tasks passed into the thread pool queue each time
