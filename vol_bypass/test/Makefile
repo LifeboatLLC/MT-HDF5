@@ -1,5 +1,5 @@
 #Your HDF5 install path
-HDF5_DIR=~/Lifeboat/HDF/build_hdf5/hdf5
+HDF5_DIR=/Users/raylu/Lifeboat/HDF/Jordan/build/hdf5
 
 H5CC=$(HDF5_DIR)/bin/h5cc -shlib
 CC=clang
@@ -26,7 +26,7 @@ $(CREATEEXE): $(CREATESRC)
 	$(H5CC) $^ -o $(CREATEEXE)
 
 $(DSETREXE): $(DSETRSRC)
-	$(H5CC) -O0 -g -pthread $^ -o $(DSETREXE)
+	$(H5CC) -O3 -pthread $^ -o $(DSETREXE)
 
 $(POSIXRMEXE): $(POSIXRMSRC)
 	$(CC) -O3 -pthread $^ -o $(POSIXRMEXE)

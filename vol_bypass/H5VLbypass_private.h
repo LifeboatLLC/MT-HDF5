@@ -47,6 +47,7 @@ pthread_cond_t  continue_local;
 
 int  nthreads_tpool       = NUM_LOCAL_THREADS;
 int  nsteps_tpool         = THREAD_STEP;
+int64_t  nelmts_max         = MB;
 int  info_pointer         = 0;
 int  tasks_in_queue    = 0;
 int  tasks_unfinished  = 0;
