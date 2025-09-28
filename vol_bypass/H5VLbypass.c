@@ -83,6 +83,7 @@ typedef struct chunk_cb_info_t {
     hsize_t chunk_dims[DIM_RANK_MAX]; // TBD: Assumes chunk dims are treated as constant even for edge chunks
     sel_info_t *selection_info;
     void *rbuf;
+    task_queue_t *task_queue;
 } chunk_cb_info_t;
 
 /********************* */
@@ -272,10 +273,9 @@ static H5D_space_status_t
 get_dset_space_status(H5VL_bypass_t *dset_obj, hid_t dxpl_id, void **req);
 
 /* Functions for task queue for the thread pool to process */
-static herr_t bypass_queue_destroy(bool mutex_locked);
-static herr_t bypass_queue_push(Bypass_task_t *task, bool mutex_locked);
-/* Retrieve a task from the global queue. Task must be released by caller.*/
-static Bypass_task_t * bypass_queue_pop(bool mutex_locked);
+static herr_t bypass_queue_destroy(task_queue_t *queue, bool need_mutex);
+static herr_t bypass_queue_push(task_queue_t *queue, Bypass_task_t *task, bool need_mutex);
+static Bypass_task_t * bypass_queue_pop(task_queue_t *queue, bool need_mutex);
 static Bypass_task_t * bypass_task_create(H5VL_bypass_t *file, haddr_t addr, size_t io_len, void *buf);
 static herr_t bypass_task_release(Bypass_task_t *task);
 
@@ -616,7 +616,8 @@ H5VL_bypass_init(hid_t vipl_id)
 {
     char *nthreads_str = NULL;
     char *nsteps_str   = NULL;
-    char *nelmts_str     = NULL;
+    char *nelmts_str   = NULL;
+    char *no_tpool_str = NULL;
     pthread_mutexattr_t attr;
     int i;
 
@@ -636,7 +637,9 @@ H5VL_bypass_init(hid_t vipl_id)
     if (nthreads_str)
         nthreads_tpool = atoi(nthreads_str);
 
-    /* The minimal number of threads is 1 while the maximal is 32 */
+    /* The minimal number of threads is 1 while the maximal is 32
+     * TODO: change the number 32 to a macro
+     */
     if (nthreads_tpool < 1)
         nthreads_tpool = 1;
     else if (nthreads_tpool > 32)
@@ -668,9 +671,16 @@ H5VL_bypass_init(hid_t vipl_id)
     //printf("%s at line %d: nthreads_tpool = %d, nsteps_tpool = %d, nelmts_max = %lld, nelmts_str = %s\n", __func__,
     //    __LINE__, nthreads_tpool, nsteps_tpool, nelmts_max, nelmts_str);
 
-    /* Initialize the task queue */
-    bypass_queue_head_g = NULL;
-    bypass_queue_tail_g = NULL;
+    /* Retrieve the flag for not using the thread pool from the user's input */
+    no_tpool_str = getenv("BYPASS_VOL_NO_TPOOL");
+
+    if (no_tpool_str && !strcmp(no_tpool_str, "true"))
+        no_tpool = true;
+
+    /* Initialize the task queue for the thread pool */
+    //bypass_queue_head_g = NULL;
+    //bypass_queue_tail_g = NULL;
+    memset(&queue_for_tpool, 0, sizeof(task_queue_t));
 
     info_for_thread = malloc(nthreads_tpool * sizeof(info_for_thread_t));
 
@@ -731,7 +741,7 @@ H5VL_bypass_term(void)
      * for this condition variable. This broadcast tells the thread pool to stop
      * waiting.  Turning on the 'all_tasks_enqueued' variable stops the while
      * loop for pthread_cond_wait in thread pool. */
-    all_tasks_enqueued = true;
+    queue_for_tpool.all_tasks_enqueued = true;
 
     pthread_cond_broadcast(&cond_local);
 
@@ -764,17 +774,21 @@ H5VL_bypass_term(void)
                     info_stuff[i].file_name, info_stuff[i].dset_name,
                     info_stuff[i].dset_loc, info_stuff[i].data_offset_file, info_stuff[i].nelmts,
                     info_stuff[i].data_offset_mem);
-        else
-            fprintf(log_fp, "###\n");
-
+        else {
+	    if (!no_tpool)
+                fprintf(log_fp, "###\n");
+        }
         // printf("%s: %d, i = %d, end_of_read = %d\n", __func__, __LINE__, i,
         // info_stuff[i].end_of_read);
     }
 
+    if (no_tpool)
+	fprintf(log_fp, "###\n");
+
     fclose(log_fp);
 
     /* pthread_join has been called, just destroy the queue directly */
-    bypass_queue_destroy(true);
+    bypass_queue_destroy(&queue_for_tpool, true);
 
     if (info_stuff)
         free(info_stuff);
@@ -1718,7 +1732,7 @@ H5VL_bypass_dataset_open(void *obj, const H5VL_loc_params_t *loc_params, const c
     } else if (o->type == H5I_GROUP) {
         parent_file = o->u.group.file;
     } else {
-        fprintf(stderr, "invalid object type\n");
+        fprintf(stderr, "In %s of %s at line %d: invalid object type\n", __func__, __FILE__, __LINE__);
         goto error;
     }
 
@@ -2006,7 +2020,7 @@ start_thread_for_pool(void *args)
 
         // fprintf(stderr, "thread %d: before wait\n", thread_id);
         /* If no tasks are available to work on, just wait.  Not sure if stop_tpool is useful. */
-        while (tasks_in_queue == 0 && !stop_tpool) {
+        while (queue_for_tpool.tasks_in_queue == 0 && !stop_tpool) {
             pthread_cond_wait(&cond_local, &mutex_local);
         }
 
@@ -2016,11 +2030,11 @@ start_thread_for_pool(void *args)
          * submit_task() in process_vectors()) or larger (submit_task() keeps adding
          * more before they are processed) than nsteps_tpool. Choose the smaller
          * value */
-        local_count = MIN(tasks_in_queue, nsteps_tpool);
+        local_count = MIN(queue_for_tpool.tasks_in_queue, nsteps_tpool);
 
         for (i = 0; i < local_count; i++) {
             /* Get the task in queue */
-            if ((tasks[i] = bypass_queue_pop(true)) == NULL) {
+            if ((tasks[i] = bypass_queue_pop(&queue_for_tpool, true)) == NULL) {
                 fprintf(stderr, "failed to pop task from queue\n");
                 ret_value = (void*) -1;
                 goto done;
@@ -2058,7 +2072,7 @@ start_thread_for_pool(void *args)
             /* When there is no task left in the queue and all the reads finish for
              * the current file, signal the main process that this file can be closed.
              */
-            if ((tasks_in_queue == 0) && all_tasks_enqueued &&
+            if ((queue_for_tpool.tasks_in_queue == 0) && queue_for_tpool.all_tasks_enqueued &&
                 tasks[i]->file->u.file.num_reads == 0) {
 
                 /* There are currently no reads active on this file - it may be closed */
@@ -2067,7 +2081,7 @@ start_thread_for_pool(void *args)
                 pthread_cond_signal(&(tasks[i]->file->u.file.close_ready));
             }
 
-            tasks_unfinished--;
+            queue_for_tpool.tasks_unfinished--;
 
             if (pthread_mutex_unlock(&mutex_local) != 0) {
                 fprintf(stderr, "failed to unlock mutex\n");
@@ -2091,7 +2105,7 @@ start_thread_for_pool(void *args)
         }
 
         /* Signal that all tasks finished in the queue */
-	if (tasks_unfinished == 0)
+	if (queue_for_tpool.tasks_unfinished == 0)
 	    pthread_cond_signal(&cond_read_finished);
 
 	if (pthread_mutex_unlock(&mutex_local) != 0) {
@@ -2120,7 +2134,7 @@ done:
 } /* end start_thread_for_pool() */
 
 static herr_t
-process_vectors(void *rbuf, sel_info_t *selection_info)
+process_vectors(task_queue_t *task_queue, void *rbuf, sel_info_t *selection_info)
 {
     hid_t      file_iter_id, mem_iter_id;
     size_t     file_seq_i, mem_seq_i, file_nseq, mem_nseq;
@@ -2180,8 +2194,6 @@ process_vectors(void *rbuf, sel_info_t *selection_info)
     file_seq_i = mem_seq_i = SEL_SEQ_LIST_LEN;
     file_nseq = mem_nseq = 0;
 
-    // printf("%s: %d\n", __func__, __LINE__);
-
     /* Loop until all elements are processed. The algorithm is copied from the
      * function H5FD__read_selection_translate in H5FDint.c, which is somewhat
      * similar to H5D__select_io in H5Dselect.c
@@ -2232,51 +2244,77 @@ process_vectors(void *rbuf, sel_info_t *selection_info)
          * (default to 1024 * 1024), mainly for contiguous datasets */
         io_len = MIN(io_len, nelmts_max);
 
-        /* Lock in order to append a task to the task queue */
-        if (pthread_mutex_lock(&mutex_local) != 0) {
-            fprintf(stderr, "failed to lock local mutex\n");
-            ret_value = -1;
-            goto done;
-        }
+	if (no_tpool) {
+	    if ((task = malloc(sizeof(Bypass_task_t))) == NULL) {
+		fprintf(stderr, "Failed to allocate memory for a task\n");
+		ret_value = -1;
+		goto done;
+	    }
 
-        if ((task = malloc(sizeof(Bypass_task_t))) == NULL) {
-            fprintf(stderr, "Failed to allocate memory for a task\n");
-            ret_value = -1;
-            goto done;
-        }
+	    /* Populate task and append to queue */
+	    task_addr = selection_info->chunk_addr + file_off[file_seq_i];
+	    task_buf = (void *)((uint8_t *)rbuf + mem_off[mem_seq_i]);
 
-        /* Populate task and append to queue */
-        task_addr = selection_info->chunk_addr + file_off[file_seq_i];
-        task_buf = (void *)((uint8_t *)rbuf + mem_off[mem_seq_i]);
+	    if ((task = bypass_task_create(selection_info->file, task_addr, io_len, task_buf)) == NULL) {
+		fprintf(stderr, "Failed to assemble task while processing vectors\n");
+		ret_value = -1;
+		goto done;
+	    }
 
-        if ((task = bypass_task_create(selection_info->file, task_addr, io_len, task_buf)) == NULL) {
-            fprintf(stderr, "Failed to assemble task while processing vectors\n");
-            ret_value = -1;
-            goto done;
-        }
+	    //printf("%s: %d: task_queue->tasks_in_queue = %d\n", __func__, __LINE__, task_queue->tasks_in_queue);
 
-        if (bypass_queue_push(task, true) < 0) {
-            fprintf(stderr, "Failed to push task to queue\n");
-            ret_value = -1;
-            goto done;
-        }
+	    if (bypass_queue_push(task_queue, task, false) < 0) {
+		fprintf(stderr, "Failed to push task to queue\n");
+		ret_value = -1;
+		goto done;
+	    }
+	} else {
+	    /* Lock in order to append a task to the task queue */
+	    if (pthread_mutex_lock(&mutex_local) != 0) {
+		fprintf(stderr, "failed to lock local mutex\n");
+		ret_value = -1;
+		goto done;
+	    }
 
-        tasks_unfinished++;
+	    if ((task = malloc(sizeof(Bypass_task_t))) == NULL) {
+		fprintf(stderr, "Failed to allocate memory for a task\n");
+		ret_value = -1;
+		goto done;
+	    }
 
-        local_count_for_signal++;
+	    /* Populate task and append to queue */
+	    task_addr = selection_info->chunk_addr + file_off[file_seq_i];
+	    task_buf = (void *)((uint8_t *)rbuf + mem_off[mem_seq_i]);
 
-        if (pthread_mutex_unlock(&mutex_local) != 0) {
-            fprintf(stderr, "failed to unlock local mutex\n");
-            ret_value = -1;
-            goto done;
-        }
+	    if ((task = bypass_task_create(selection_info->file, task_addr, io_len, task_buf)) == NULL) {
+		fprintf(stderr, "Failed to assemble task while processing vectors\n");
+		ret_value = -1;
+		goto done;
+	    }
 
-        /* Let the queue accumulate nsteps_tpool entries then signal the thread pool
-         * to read them */
-        if (local_count_for_signal >= nsteps_tpool) {
-            pthread_cond_broadcast(&cond_local);
-            local_count_for_signal = 0;
-        }
+	    if (bypass_queue_push(task_queue, task, false) < 0) {
+		fprintf(stderr, "Failed to push task to queue\n");
+		ret_value = -1;
+		goto done;
+	    }
+
+	    task_queue->tasks_unfinished++;
+
+	    local_count_for_signal++;
+
+	    if (pthread_mutex_unlock(&mutex_local) != 0) {
+		fprintf(stderr, "failed to unlock local mutex\n");
+		ret_value = -1;
+		goto done;
+	    }
+
+	    /* Let the queue accumulate nsteps_tpool entries then signal the thread pool
+	     * to read them */
+	    if (local_count_for_signal >= nsteps_tpool) {
+		pthread_cond_broadcast(&cond_local);
+		local_count_for_signal = 0;
+	    }
+	}
 
         /* Save the info for the C log file */
         {
@@ -2438,7 +2476,7 @@ process_chunk_cb(const hsize_t *chunk_offsets, unsigned filter_mask,
     cb_info->selection_info->chunk_addr    = chunk_addr;
 
     /* Retrieve the pieces of data (vectors) from the chunk and put them into the memory */
-    process_vectors(cb_info->rbuf, cb_info->selection_info);
+    process_vectors(cb_info->task_queue, cb_info->rbuf, cb_info->selection_info);
 
 done:
     /* Close the space ID for the memory selection */
@@ -2456,8 +2494,8 @@ done:
     return ret_value;
 } /* process_chunk_cb */
 
-static herr_t process_chunks(void *rbuf, void *dset, hid_t dcpl_id, hid_t dxpl_id, hid_t mem_space, hid_t file_space,
-               sel_info_t *selection_info, void **req) {
+static herr_t process_chunks(task_queue_t *task_queue, void *rbuf, void *dset, hid_t dcpl_id, hid_t dxpl_id,
+               hid_t mem_space, hid_t file_space, sel_info_t *selection_info, void **req) {
     herr_t ret_value = 0;
     H5VL_bypass_t *dset_obj = (H5VL_bypass_t *)dset;
     H5VL_native_dataset_optional_args_t dset_opt_args;
@@ -2506,6 +2544,7 @@ static herr_t process_chunks(void *rbuf, void *dset, hid_t dcpl_id, hid_t dxpl_i
     chunk_cb_info.mem_space = mem_space;
     chunk_cb_info.selection_info = selection_info;
     chunk_cb_info.rbuf = rbuf;
+    chunk_cb_info.task_queue = task_queue;
 
     dset_opt_args.chunk_iter.op = process_chunk_cb;
     dset_opt_args.chunk_iter.op_data = (void*)&chunk_cb_info;
@@ -2528,7 +2567,6 @@ done:
 
     return ret_value;
 } /* end process_chunks() */
-
 
 /*-------------------------------------------------------------------------
  * Function:    H5VL_bypass_dataset_read
@@ -2560,6 +2598,7 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
     bool must_block = false;
     bool locked = false;
     dtype_info_t mem_type_info;
+    task_queue_t local_queue;
     H5D_space_status_t dset_space_status = H5D_SPACE_STATUS_ERROR;
 
 #ifdef ENABLE_BYPASS_LOGGING
@@ -2705,7 +2744,7 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
                 goto done;
             }
 
-            all_tasks_enqueued = false;
+            queue_for_tpool.all_tasks_enqueued = false;
 
             /* At least one read is being done through the Bypass VOL.
              * We should block until all tasks are complete. */
@@ -2714,8 +2753,6 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
             locked = false;
 
             /* Initialize data selection info */
-            //strcpy(selection_info.file_name, bypass_obj->file_name);
-
             if (get_dset_name_helper((H5VL_bypass_t *)(dset[j]), selection_info.dset_name, req) < 0) {
                 fprintf(stderr, "failed to retrieve dataset name\n");
                 ret_value = -1;
@@ -2727,23 +2764,70 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
             if (H5D_CHUNKED == bypass_dset->layout) {
                 /* Iterate through all chunks and map the data selection in each chunk to the memory.
                  * Put the selections into a queue for the thread pool to read the data */
-                process_chunks(buf[j], dset[j], bypass_dset->dcpl_id, plist_id, mem_space_id_copy, file_space_id_copy,
-                               &selection_info, req);
-            }
-            else if (H5D_CONTIGUOUS == bypass_dset->layout) {
+                if (no_tpool) {
+                    //printf("%s: %d, in bypass VOL\n", __func__, __LINE__);
+
+                    /* Make sure no garbage in any field */
+                    memset(&local_queue, 0, sizeof(task_queue_t));
+
+                    process_chunks(&local_queue, buf[j], dset[j], bypass_dset->dcpl_id, plist_id, mem_space_id_copy, file_space_id_copy,
+                                   &selection_info, req);
+                } else {
+                    process_chunks(&queue_for_tpool, buf[j], dset[j], bypass_dset->dcpl_id, plist_id, mem_space_id_copy, file_space_id_copy,
+                                   &selection_info, req);
+                }
+            } else if (H5D_CONTIGUOUS == bypass_dset->layout) {
                 selection_info.file_space_id = file_space_id_copy;
                 selection_info.mem_space_id  = mem_space_id_copy;
 
                 /* Handles the hyperslab selection and read the data */
-                if (process_vectors(buf[j], &selection_info) < 0) {
-                    fprintf(stderr, "failed to insert vectors into queue\n");
-                    ret_value = -1;
-                    goto done;
+                if (no_tpool) {
+                    /* Make sure no garbage in any field */
+                    memset(&local_queue, 0, sizeof(task_queue_t));
+
+                    /* Each thread reads puts tasks into its own queue */
+		    if (process_vectors(&local_queue, buf[j], &selection_info) < 0) {
+			fprintf(stderr, "failed to insert vectors into queue\n");
+			ret_value = -1;
+			goto done;
+		    }
+                } else {
+                    /* Use the global instance of task_queue_t for thread pool */
+		    if (process_vectors(&queue_for_tpool, buf[j], &selection_info) < 0) {
+			fprintf(stderr, "failed to insert vectors into queue\n");
+			ret_value = -1;
+			goto done;
+		    }
                 }
             } else {
                 fprintf(stderr, "unsupported dataset layout\n");
                 ret_value = -1;
                 goto done;
+            }
+
+            /* Each thread reads from its own task queue if 'BYPASS_VOL_NO_TPOOL' environment variable is set */
+            if (no_tpool) {
+                Bypass_task_t *task = NULL;
+
+                while (local_queue.tasks_in_queue) {
+		    if ((task = bypass_queue_pop(&local_queue, false)) == NULL) {
+			fprintf(stderr, "failed to pop task from queue\n");
+			ret_value = -1;
+			goto done;
+		    }
+
+		    if (read_big_data(task->file->u.file.fd, task->vec_buf, task->size, task->addr) < 0) {
+			fprintf(stderr, "read_big_data failed within file %s\n", task->file->u.file.name);
+			/* Return a failure code, but try to complete the rest of the read request.
+			 * This is important to properly decrement the reference count/num_reads on the local file object */
+			ret_value = -1;
+		    }
+
+		    if (task != NULL) {
+			bypass_task_release(task);
+			task = NULL;
+		    }
+                }
             }
 
             /* Save the info for the C log file */
@@ -2773,7 +2857,7 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
 
     /* Signal the thread pool to finish this read. Notify the thread pool that it finished putting tasks in the queue. */
     pthread_mutex_lock(&mutex_local);
-    all_tasks_enqueued = true;
+    queue_for_tpool.all_tasks_enqueued = true;
     pthread_cond_broadcast(&cond_local);  /* Why do this signal/broadcast? */
     pthread_mutex_unlock(&mutex_local);
     
@@ -2791,7 +2875,7 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
     /* Only finish H5Dread() once all threads are inactive and no tasks are undone */
     /* Only block here if Bypass VOL was used for the read */
     if (must_block) {
-        while (tasks_unfinished > 0) {
+        while (queue_for_tpool.tasks_unfinished > 0) {
 	    pthread_cond_wait(&cond_read_finished, &mutex_local);
 	}
     }
@@ -2809,7 +2893,7 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
 
     locked = false;
 
-    assert(tasks_unfinished == 0);
+    assert(queue_for_tpool.tasks_unfinished == 0);
 
 done:
     if (locked)
@@ -5344,13 +5428,13 @@ done:
 }
 
 static herr_t
-bypass_queue_destroy(bool mutex_locked) {
+bypass_queue_destroy(task_queue_t *queue, bool need_mutex) {
     herr_t ret_value = 0;
     bool locked = false;
     Bypass_task_t *curr = NULL;
     Bypass_task_t *next = NULL;
 
-    if (!mutex_locked) {
+    if (!need_mutex) {
 	if (pthread_mutex_lock(&mutex_local) != 0) {
 	    fprintf(stderr, "pthread_mutex_lock failed\n");
 	    ret_value = -1;
@@ -5360,13 +5444,13 @@ bypass_queue_destroy(bool mutex_locked) {
 	locked = true;
     }
 
-    if (bypass_queue_head_g == NULL) {
-        assert(bypass_queue_tail_g == NULL);
-        assert(tasks_in_queue == 0);
+    if (queue->bypass_queue_head_g == NULL) {
+        assert(queue->bypass_queue_tail_g == NULL);
+        assert(queue->tasks_in_queue == 0);
         goto done;
     }
 
-    curr = bypass_queue_head_g;
+    curr = queue->bypass_queue_head_g;
 
     while (curr != NULL) {
         next = curr->next;
@@ -5374,9 +5458,9 @@ bypass_queue_destroy(bool mutex_locked) {
         curr = next;
     }
 
-    bypass_queue_head_g = NULL;
-    bypass_queue_tail_g = NULL;
-    tasks_in_queue = 0;
+    queue->bypass_queue_head_g = NULL;
+    queue->bypass_queue_tail_g = NULL;
+    queue->tasks_in_queue = 0;
 
 done:
     if (locked && pthread_mutex_unlock(&mutex_local) != 0) {
@@ -5388,11 +5472,11 @@ done:
 }
 
 static herr_t
-bypass_queue_push(Bypass_task_t *task, bool mutex_locked) {
+bypass_queue_push(task_queue_t *queue, Bypass_task_t *task, bool need_mutex) {
     herr_t ret_value = 0;
     bool locked = false;
 
-    if (!mutex_locked) {
+    if (need_mutex) {
 	if (pthread_mutex_lock(&mutex_local) != 0) {
 	    fprintf(stderr, "pthread_mutex_lock failed\n");
 	    ret_value = -1;
@@ -5402,23 +5486,23 @@ bypass_queue_push(Bypass_task_t *task, bool mutex_locked) {
 	locked = true;
     }
 
-    if (bypass_queue_head_g == NULL) {
+    if (queue->bypass_queue_head_g == NULL) {
         /* Queue is empty */
-        assert(bypass_queue_tail_g == NULL);
-        assert(tasks_in_queue == 0);
+        assert(queue->bypass_queue_tail_g == NULL);
+        assert(queue->tasks_in_queue == 0);
 
-        bypass_queue_head_g = task;
-        bypass_queue_tail_g = task;
-        tasks_in_queue = 1;
+        queue->bypass_queue_head_g = task;
+        queue->bypass_queue_tail_g = task;
+        queue->tasks_in_queue = 1;
     } else {
-        assert(bypass_queue_tail_g != NULL);
-        assert(tasks_in_queue > 0);
+        assert(queue->bypass_queue_tail_g != NULL);
+        assert(queue->tasks_in_queue > 0);
 
-        bypass_queue_tail_g->next = task;
-        bypass_queue_tail_g = task;
-        tasks_in_queue++;
+        queue->bypass_queue_tail_g->next = task;
+        queue->bypass_queue_tail_g = task;
+        queue->tasks_in_queue++;
 
-        assert(bypass_queue_head_g != bypass_queue_tail_g);
+        assert(queue->bypass_queue_head_g != queue->bypass_queue_tail_g);
     }
 
 done:
@@ -5430,14 +5514,14 @@ done:
     return ret_value;
 }
 
-/* Retrieve a task from the global queue.
+/* Retrieve a task from a queue.
  * Task must be released by caller.*/
 static Bypass_task_t *
-bypass_queue_pop(bool mutex_locked) {
+bypass_queue_pop(task_queue_t *queue, bool need_mutex) {
     Bypass_task_t *ret_value = NULL;
     bool locked = false;
 
-    if (!mutex_locked) {
+    if (need_mutex) {
 	if (pthread_mutex_lock(&mutex_local) != 0) {
 	    fprintf(stderr, "pthread_mutex_lock failed\n");
 	    goto done;
@@ -5447,27 +5531,27 @@ bypass_queue_pop(bool mutex_locked) {
     }
 
     /* Queue is empty */
-    if (bypass_queue_head_g == NULL) {
-        assert(bypass_queue_tail_g == NULL);
-        assert(tasks_in_queue == 0);
+    if (queue->bypass_queue_head_g == NULL) {
+        assert(queue->bypass_queue_tail_g == NULL);
+        assert(queue->tasks_in_queue == 0);
         ret_value = NULL;
-    } else if (bypass_queue_head_g == bypass_queue_tail_g) {
+    } else if (queue->bypass_queue_head_g == queue->bypass_queue_tail_g) {
         /* Queue has only one element */
-        assert(tasks_in_queue == 1);
-        ret_value = bypass_queue_head_g;
+        assert(queue->tasks_in_queue == 1);
+        ret_value = queue->bypass_queue_head_g;
 
-        bypass_queue_head_g = NULL;
-        bypass_queue_tail_g = NULL;
-        tasks_in_queue = 0;
+        queue->bypass_queue_head_g = NULL;
+        queue->bypass_queue_tail_g = NULL;
+        queue->tasks_in_queue = 0;
     } else {
         /* Queue has >= 2 elements */
-        assert(tasks_in_queue > 1);
-        assert(bypass_queue_head_g->next != NULL);
+        assert(queue->tasks_in_queue > 1);
+        assert(queue->bypass_queue_head_g->next != NULL);
 
-        ret_value = bypass_queue_head_g;
+        ret_value = queue->bypass_queue_head_g;
 
-        bypass_queue_head_g = bypass_queue_head_g->next;
-        tasks_in_queue--;
+        queue->bypass_queue_head_g = queue->bypass_queue_head_g->next;
+        queue->tasks_in_queue--;
     }
 
 done:
@@ -5489,7 +5573,6 @@ bypass_task_create(H5VL_bypass_t *file, haddr_t addr, size_t size, void *buf) {
     }
 
     ret_value->file = file;
-    //ret_value->file_index = file_index;
     ret_value->addr = addr;
     ret_value->size = size;
     ret_value->vec_buf = buf;

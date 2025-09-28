@@ -10,7 +10,7 @@ pthread_cond_t  cond_value, cond_value_finish;
 typedef struct {
     int         fp;
     int         thread_id;
-    file_info_t *file_info;
+    //file_info_t *file_info;
     int         file_info_entry_num;
     int         step;
     int         *data;
@@ -25,150 +25,6 @@ typedef struct {
 tpool_var_t *tpool_vars;
 int  section_index = 0;
 bool all_section_done = false;
-
-/*------------------------------------------------------------
- * Desoleted: Read and parse the info.log file for the preparation of  
- * reading the data in C only.  Use read_info_log_file_array instead
- *------------------------------------------------------------
- */
-int read_info_log_file(int *finfo_entry_num)
-{
-    FILE *fp = NULL;
-    int display;
-    int i, counter = 0;
-    size_t len;
-    char *buf = NULL;
-    char *token = NULL;
-    const char delimiter[] = " \n\0";
-
-    /* Make sure the info.log file exists */
-    if (access("info.log", F_OK) != 0) {
-        printf("info.log doesn't exist.  You must run this test with Bypass VOL to generate it.\n"); 
-        exit(1);
-    }
-
-    /* Open the info.log file and count the number of characters */
-    fp = fopen("info.log", "r");
-
-    while (1) {
-        display = fgetc(fp);
-        counter++;
-        if (feof(fp))
-            break;    
-    }
-
-    fclose(fp);
-
-    /* Allocate enough buffer and read the file content into the buffer */
-    buf = malloc(counter + 1);
-
-    fp = fopen("info.log", "r");
-
-    fread(buf, sizeof(char), counter, fp);
-
-    buf[counter] = '\0'; 
-
-
-    /* Begin to parse the buffer containing the contents of the log file */
-    counter = 0;
-
-    /* File name */
-    token = strtok(buf, delimiter);
-    //printf("%s ", token);
-    strcpy(file_info[counter].file_name, token);
-
-    /* Dataset name (unused) */
-    token = strtok(NULL, delimiter);
-    //printf("%s ", token);
-    strcpy(file_info[counter].dset_name, token);
-
-    /* Location of dataset in the file */
-    token = strtok(NULL, delimiter);
-    //printf("%s ", token);
-    file_info[counter].dset_offset = atoll(token);
-
-    /* Offset of data in the HDF5 file to be read into the memory */
-    token = strtok(NULL, delimiter);
-    //printf("%s ", token);
-    file_info[counter].offset_f = atoll(token);
-
-    /* Number of elements to be read */
-    token = strtok(NULL, delimiter);
-    //printf("%s ", token);
-    file_info[counter].nelmts = atoll(token);
-
-    /* Offset of the data in the memory to be read */
-    token = strtok(NULL, delimiter);
-    //printf("%s ", token);
-    file_info[counter].offset_m = atoll(token);
-
-    while (1) {
-        /* File name */
-        token = strtok(NULL, delimiter);
-        if (!token)
-            break;
-        //printf("%s ", token);
-
-        counter++;
-
-        /* Double the size of file_info when it's full */
-        if (counter == *finfo_entry_num) {
-            *finfo_entry_num *= 2;
-            file_info = (file_info_t *)realloc(file_info, *finfo_entry_num * sizeof(file_info_t));
-        }
-
-        strcpy(file_info[counter].file_name, token);
-
-        /* Dataset name (unused) */
-        token = strtok(NULL, delimiter);
-        //printf("%s ", token);
-        strcpy(file_info[counter].dset_name, token);
-
-        /* Location of dataset in the file */
-        token = strtok(NULL, delimiter);
-        //printf("%s ", token);
-        file_info[counter].dset_offset = atoll(token);
-
-        /* Offset of data in the HDF5 file to be read into the memory */
-        token = strtok(NULL, delimiter);
-        //printf("%s ", token);
-        file_info[counter].offset_f = atoll(token);
-
-        /* Number of elements to be read */
-        token = strtok(NULL, delimiter);
-        //printf("%s ", token);
-        file_info[counter].nelmts = atoll(token);
-
-        /* Offset of the data in the memory to be read */
-        token = strtok(NULL, delimiter);
-        //printf("%s ", token);
-        file_info[counter].offset_m = atoll(token);
-    }
-
-    /* Total number of entries to be returned */
-    counter++;
-
-    fclose(fp);
-    free(buf);
-
-    /* printf("3. Print out file_info:\n");
-    if (hand.num_files == 1 && hand.num_dsets == 1) {
-        for (i = 0; i < counter; i++)
-            printf("%s %s %lld %lld %lld %lld\n", file_info[i].file_name, file_info[i].dset_name, file_info[i].dset_offset, file_info[i].offset_f, file_info[i].nelmts, file_info[i].offset_m);
-    } else if (hand.num_files == 1 && hand.num_dsets > 1) {
-        for (i = 0; i < hand.num_dsets; i++)
-            printf("%s %s %lld %lld %lld %lld\n", file_info[i].file_name, file_info[i].dset_name, file_info[i].dset_offset, file_info[i].offset_f, file_info[i].nelmts, file_info[i].offset_m);
-    } else {
-        for (i = 0; i < hand.num_files; i++)
-            printf("%s %s %lld %lld %lld %lld\n", file_info[i].file_name, file_info[i].dset_name, file_info[i].dset_offset, file_info[i].offset_f, file_info[i].nelmts, file_info[i].offset_m);
-    }
-    printf("\n"); */
-
-    return counter;
-
-error:
-    return -1;
-}
 
 /*------------------------------------------------------------
  * Function executed by each thread: 
@@ -189,12 +45,12 @@ void submit_task(int step, int index)
     pthread_cond_broadcast(&cond_value);
 }
 
-void* read_partial_dset_in_c(void* arg)
+void* read_in_c(void* arg)
 {
     //int fp = ((c_args_t *)arg)->fp;
     int thread_id = ((c_args_t *)arg)->thread_id;
     int *data = ((c_args_t *)arg)->data;
-    file_info_t *file_info = ((c_args_t *)arg)->file_info;
+    //file_info_t *file_info = ((c_args_t *)arg)->file_info;
     int step = ((c_args_t *)arg)->step;
     int num_entries = ((c_args_t *)arg)->file_info_entry_num;
     file_info_t *file_info_local;
@@ -265,6 +121,7 @@ void* read_partial_dset_in_c(void* arg)
     return NULL;
 }
 
+#ifdef TMP
 /*------------------------------------------------------------
  * Function executed by each thread: 
  *
@@ -350,6 +207,7 @@ void* read_multiple_files_in_c(void* arg)
   
     return NULL;
 }
+#endif
 
 /*------------------------------------------------------------
  * Start to test the case of a single dataset in a single file
@@ -357,7 +215,7 @@ void* read_multiple_files_in_c(void* arg)
  *------------------------------------------------------------
  */
 int
-launch_single_file_single_dset_read(bool single_file_single_dset)
+launch_read(bool single_file_single_dset)
 {
     int         fp;
     int         i, j, k;
@@ -378,12 +236,11 @@ launch_single_file_single_dset_read(bool single_file_single_dset)
     data_out = (int *)calloc(hand.dset_dim1 * hand.dset_dim2, sizeof(int)); /* output buffer */
     tpool_vars = (tpool_var_t *)calloc(file_info_nsections, sizeof(tpool_var_t));
 
-    /* Break down the data buffer into DATA_SECTION_NUM sections if the dataset is greater than 16GB */
-    if (hand.dset_dim1 * hand.dset_dim2 > (long long int)4 * GB && hand.dset_dim1 % DATA_SECTION_NUM == 0) {
-    //if (hand.dset_dim1 * hand.dset_dim2 > 1 && hand.dset_dim1 % DATA_SECTION_NUM == 0) {
+    /* Break down the dataset into NUM_DATA_SECTIONS sections if the dataset is too big */
+    if (hand.num_data_sections > 1) {
         data_in_section = true;
 
-        data_out = (int *)calloc((hand.dset_dim1 / DATA_SECTION_NUM) * hand.dset_dim2, sizeof(int)); /* output buffer */
+        data_out = (int *)calloc((hand.dset_dim1 / hand.num_data_sections) * hand.dset_dim2, sizeof(int)); /* output buffer */
     } else {
         data_out = (int *)calloc(hand.dset_dim1 * hand.dset_dim2, sizeof(int)); /* output buffer */
     }
@@ -411,14 +268,14 @@ launch_single_file_single_dset_read(bool single_file_single_dset)
     /* Create threads to start the thread pool */
     for (i = 0; i < hand.num_threads; i++) {
 	c_info[i].thread_id = i;
-	c_info[i].file_info = file_info;
+	//c_info[i].file_info = file_info;
 	c_info[i].file_info_entry_num = finfo_entry_num;
 	c_info[i].data = data_out;
         c_info[i].step = hand.step_size;
 
         //printf("c_info[%d].file_info_entry_num = %d, file_info_num_allocated = %d, finfo_entry_num = %d\n", i, c_info[i].file_info_entry_num, file_info_num_allocated, finfo_entry_num);
 
-	pthread_create(&threads[i], NULL, read_partial_dset_in_c, &c_info[i]);
+	pthread_create(&threads[i], NULL, read_in_c, &c_info[i]);
     }
 
     /* Start the time after starting the thread pool just like the Bypass VOL */
@@ -501,8 +358,9 @@ error:
     return -1;
 }
 
+#ifdef TMP
 /*------------------------------------------------------------
- * Start to test the case of multiple datasets in a single file
+ * Deprecated: Start to test the case of multiple datasets in a single file
  * with multi-thread with HDF5 and C
  *------------------------------------------------------------
  */
@@ -519,11 +377,7 @@ launch_single_file_multiple_dset_read()
     int         finfo_entry_num;
     struct timeval begin, end;
 
-    if (read_info_log_file(&finfo_entry_num) < 0) {
-	printf("read_info_log_file failed\n");
-	exit(1);
-    }
-
+printf("file_info->file_name = %s\n", file_info->file_name);
     /* Start to read the data using C functions without HDF5 involved */
     fp = open(file_info->file_name, O_RDONLY);
 
@@ -555,7 +409,7 @@ error:
 }
 
 /*------------------------------------------------------------
- * Start to test the case of a single dataset in multiple files
+ * Deprecated: Start to test the case of a single dataset in multiple files
  * with multi-thread with HDF5 and C
  *------------------------------------------------------------
  */
@@ -569,11 +423,6 @@ launch_multiple_file_read(int num_files)
     int *data_out = NULL;
     int         finfo_entry_num;
     struct timeval begin, end;
-
-    if (read_info_log_file(&finfo_entry_num) < 0) {
-	printf("read_info_log_file failed\n");
-	exit(1);
-    }
 
     gettimeofday(&begin, 0);
 
@@ -597,6 +446,7 @@ launch_multiple_file_read(int num_files)
 error:
     return -1;
 }
+#endif
 
 /*------------------------------------------------------------
  * Main function
@@ -617,11 +467,11 @@ main(int argc, char **argv)
     read_info_log_file_array();
 
     if (hand.num_files == 1 && hand.num_dsets == 1) {
-        launch_single_file_single_dset_read(true);
+        launch_read(true);
     } else if (hand.num_files == 1 && hand.num_dsets > 1) {
-        launch_single_file_single_dset_read(false);
+        launch_read(false);
     } else if (hand.num_files > 1) {
-        launch_single_file_single_dset_read(false);
+        launch_read(false);
     }
 
     /* Print out the performance statistics */

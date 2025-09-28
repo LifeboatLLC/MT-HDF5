@@ -48,18 +48,17 @@ int create_files()
     /* Initializing random generator */
     srand((unsigned) time(&t));
 
-    /* Break down the data buffer into DATA_SECTION_NUM sections if the dataset is greater than 16GB */
-    if (hand.dset_dim1 * hand.dset_dim2 > (long long int)4 * GB && hand.dset_dim1 % DATA_SECTION_NUM == 0) {
-    //if (hand.dset_dim1 * hand.dset_dim2 > (long long int)1 && hand.dset_dim1 % DATA_SECTION_NUM == 0) {
+    /* Break down the dataset into NUM_DATA_SECTIONS sections if the dataset is too big */
+    if (hand.num_data_sections > 1) {
         data_in_section = true;
 
 	/* Define the memory dataspace */
-	dimsm[0] = hand.dset_dim1 / DATA_SECTION_NUM;
+	dimsm[0] = hand.dset_dim1 / hand.num_data_sections;
 	dimsm[1] = hand.dset_dim2;
 
 	memspace = H5Screate_simple(RANK, dimsm, NULL);
 
-        data = (int *)malloc((hand.dset_dim1 / DATA_SECTION_NUM) * hand.dset_dim2 * sizeof(int)); /* output buffer */
+        data = (int *)malloc((hand.dset_dim1 / hand.num_data_sections) * hand.dset_dim2 * sizeof(int)); /* output buffer */
     } else {
 	/* Define the memory dataspace */
 	dimsm[0] = hand.dset_dim1;
@@ -125,9 +124,9 @@ int create_files()
 
             /* Write the data to the dataset */
             if (data_in_section) {
-                for (m = 0; m < DATA_SECTION_NUM; m++) {
-		    /* Define hyperslab in the dataset. Each time it writes DATA_SECTION_NUM rows of data. The number of rows must be 
-		     * evenly divided by the number of threads.
+                for (m = 0; m < hand.num_data_sections; m++) {
+		    /* Define hyperslab in the dataset. Each time it writes (hand.dset_dim1 / hand.num_data_sections) rows of data.
+                     * The number of rows must be evenly divided by the number of threads.
 		     *    
 		     *    0 0 0 0 
 		     *    0 0 0 0 
@@ -138,9 +137,9 @@ int create_files()
 		     *    3 3 3 3
 		     *    3 3 3 3
 		     */
-		    offset[0] = m * (hand.dset_dim1 / DATA_SECTION_NUM);
+		    offset[0] = m * (hand.dset_dim1 / hand.num_data_sections);
 		    offset[1] = 0;
-		    count[0]  = hand.dset_dim1 / DATA_SECTION_NUM;
+		    count[0]  = hand.dset_dim1 / hand.num_data_sections;
 		    count[1]  = hand.dset_dim2;
 
                     status = H5Sselect_none(dataspace);
@@ -149,7 +148,7 @@ int create_files()
                     /* Data buffer initialization */
                     p = data;
 
-		    for (j = 0; j < hand.dset_dim1 / DATA_SECTION_NUM; j++)
+		    for (j = 0; j < hand.dset_dim1 / hand.num_data_sections; j++)
 			for (i = 0; i < hand.dset_dim2; i++)
 			    if (hand.random_data)
 				*p++ = i + j + rand() % 50;
