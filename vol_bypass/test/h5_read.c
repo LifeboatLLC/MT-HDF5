@@ -29,6 +29,7 @@ typedef struct {
     int   num_files;
     hid_t file_id;
     hid_t dset_id;
+    int   data_section_id;
     int   *data; 
 } args_t;
 
@@ -44,96 +45,84 @@ void* read_partial_dset_with_hdf5(void* arg)
     int thread_id = ((args_t *)arg)->thread_id;
     int *data = ((args_t *)arg)->data;
     hid_t dataset = ((args_t *)arg)->dset_id;
+    int data_section_id = ((args_t *)arg)->data_section_id;
     hid_t dataspace, memspace;
 
     hsize_t dimsm[2];    /* memory space dimensions */
     hsize_t count[2], block[2];
     hsize_t offset[2], stride[2];
+    hsize_t mcount[2], mblock[2];
+    hsize_t moffset[2], mstride[2];
+    bool    data_buf_allocated = false;
     int     nerrors = 0;
     herr_t  status;
     int     i;
 
     dataspace = H5Dget_space(dataset); /* dataspace handle */
 
-    /* Break down the data buffer into DATA_SECTION_NUM sections if the dataset is greater than 16GB.  Only allow it
-     * when there is no child thread */
-    if (hand.dset_dim1 * hand.dset_dim2 > (long long int)4 * GB && hand.dset_dim1 % DATA_SECTION_NUM == 0 && hand.num_threads == 0) {
-    //if (hand.dset_dim1 * hand.dset_dim2 > (long long int)1 && hand.dset_dim1 % DATA_SECTION_NUM == 0 && hand.num_threads == 0) {
-        data_in_section = true;
-
+    if (data_in_section) {
 	/* Define the memory dataspace */
-	dimsm[0] = hand.dset_dim1 / DATA_SECTION_NUM;
+	dimsm[0] = hand.dset_dim1 / hand.num_data_sections;
 	dimsm[1] = hand.dset_dim2;
-
-	memspace = H5Screate_simple(RANK, dimsm, NULL);
-
-        data = (int *)malloc((hand.dset_dim1 / DATA_SECTION_NUM) * hand.dset_dim2 * sizeof(int)); /* output buffer */
     } else {
 	/* Define the memory dataspace. */
 	dimsm[0] = hand.dset_dim1;
 	dimsm[1] = hand.dset_dim2;
-
-	memspace = H5Screate_simple(RANK, dimsm, NULL);
-
-        data = (int *)malloc(hand.dset_dim1 * hand.dset_dim2 * sizeof(int)); /* output buffer */
     }
 
+    memspace = H5Screate_simple(RANK, dimsm, NULL);
+
+    /* Currently, only selection by row is supported */
     if (hand.space_select == 1) {
+	/* Define hyperslab in the dataset. Each thread reads a few rows of data.
+         * The number of rows must be * evenly divided by the number of threads.
+	 *
+	 *    0 0 0 0
+	 *    0 0 0 0
+	 *    1 1 1 1
+	 *    1 1 1 1
+	 *    2 2 2 2
+	 *    2 2 2 2
+	 *    3 3 3 3
+	 *    3 3 3 3
+	 */
         if (data_in_section) {
-	    for (i = 0; i < DATA_SECTION_NUM; i++) {
-		/* Define hyperslab in the dataset. Each thread reads a few rows of data. The number of rows must be 
-		 * evenly divided by the number of threads.
-		 *    
-		 *    0 0 0 0 
-		 *    0 0 0 0 
-		 *    1 1 1 1
-		 *    1 1 1 1
-		 *    2 2 2 2   
-		 *    2 2 2 2   
-		 *    3 3 3 3
-		 *    3 3 3 3
-		 */
-		offset[0] = i * (hand.dset_dim1 / DATA_SECTION_NUM);
-		offset[1] = 0;
-		count[0]  = hand.dset_dim1 / DATA_SECTION_NUM;
-		count[1]  = hand.dset_dim2;
-
-		status = H5Sselect_none(dataspace);
-		status = H5Sselect_hyperslab(dataspace, H5S_SELECT_SET, offset, NULL, count, NULL);
-
-		/* Read data from hyperslab in the file into the memory. */
-		status = H5Dread(dataset, H5T_NATIVE_INT, memspace, dataspace, H5P_DEFAULT, data);
-
-		if (status < 0)
-		    printf("H5Dread failed\n");
-
-		/* Data verification if enabled.  Do not enable this option (-k) for performance study */
-		if (hand.check_data && !hand.random_data) {
-		    /* Checking the correctness of the data if there are more than one H5Dread may not pass because the thread pool may still be 
-		     * reading the data during the check.  The way thread pool is set up doesn't guarantee the data reading is finished during the check.
-		     * Sleeping for a while may give the thread pool enough time to finish reading the data.
-		     */
-		    //sleep(1);
-
-		    nerrors = check_data(data, 0, i);
-                }
-
-		if (nerrors > 0)
-		    printf("%d errors during data verification at line %d in the function %s\n", nerrors, __LINE__, __func__);
+	    if (hand.num_threads == 0) {
+		offset[0] = data_section_id * (hand.dset_dim1 / hand.num_data_sections);
+		count[0]  = hand.dset_dim1 / hand.num_data_sections;
+	    } else {
+		offset[0] = data_section_id * (hand.dset_dim1 / hand.num_data_sections) +
+			    thread_id * (hand.dset_dim1 / (hand.num_data_sections * hand.num_threads));
+		count[0]  = hand.dset_dim1 / (hand.num_data_sections * hand.num_threads);
 	    }
+
+	    offset[1] = 0;
+	    count[1]  = hand.dset_dim2;
+
+	    status = H5Sselect_none(dataspace);
+	    status = H5Sselect_hyperslab(dataspace, H5S_SELECT_SET, offset, NULL, count, NULL);
+
+	    /* Selection in memory */
+	    if (hand.num_threads == 0) {
+		moffset[0] = 0;
+		mcount[0]  = hand.dset_dim1 / hand.num_data_sections;
+	    } else {
+		moffset[0] = thread_id * (hand.dset_dim1 / (hand.num_data_sections * hand.num_threads));
+		mcount[0]  = hand.dset_dim1 / (hand.num_data_sections * hand.num_threads);
+	    }
+
+	    moffset[1] = 0;
+	    mcount[1]  = hand.dset_dim2;
+
+	    status = H5Sselect_none(memspace);
+	    status = H5Sselect_hyperslab(memspace, H5S_SELECT_SET, moffset, NULL, mcount, NULL);
+
+	    /* Read data from hyperslab in the file into the memory. */
+	    status = H5Dread(dataset, H5T_NATIVE_INT, memspace, dataspace, H5P_DEFAULT, data);
+
+	    if (status < 0)
+		printf("H5Dread failed\n");
         } else {
-	    /* Define hyperslab in the dataset. Each thread reads a few rows of data. The number of rows must be 
-	     * evenly divided by the number of threads.
-	     *    
-	     *    0 0 0 0 
-	     *    0 0 0 0 
-	     *    1 1 1 1
-	     *    1 1 1 1
-	     *    2 2 2 2   
-	     *    2 2 2 2   
-	     *    3 3 3 3
-	     *    3 3 3 3
-	     */
             if (hand.num_threads == 0) {
 	        offset[0] = 0;
 	        count[0]  = hand.dset_dim1;
@@ -155,66 +144,14 @@ void* read_partial_dset_with_hdf5(void* arg)
 	    if (status < 0)
 		printf("H5Dread failed\n");
         }
-    } else if (hand.space_select == 2) {
-	/* Define hyperslab in the dataset.  Each thread reads every other row of data.  The number of rows must 
-	 * be evenly divided by the number of threads.
-	 * 
-	 *     0 ... ...
-	 *     1 ... ...
-	 *     2 ... ...
-	 *     3 ... ...
-	 *     0 ... ...
-	 *     1 ... ...
-	 *       ... ...
-	 */
-	offset[0] = thread_id;
-	offset[1] = 0;
-	stride[0] = hand.num_threads;
-	stride[1] = 1;
-	count[0]  = hand.dset_dim1 / hand.num_threads;;
-	count[1]  = 1;
-	block[0]  = 1;
-	block[1]  = hand.dset_dim2;
-
-	status = H5Sselect_hyperslab(dataspace, H5S_SELECT_SET, offset, stride, count, block);
-        status = H5Sselect_hyperslab(memspace, H5S_SELECT_SET, offset, stride, count, block);
-
-	/* Read data from hyperslab in the file into the hyperslab in memory. */
-	status = H5Dread(dataset, H5T_NATIVE_INT, memspace, dataspace, H5P_DEFAULT, data);
-
-	if (status < 0)
-	    printf("H5Dread failed\n");
-    } else if (hand.space_select == 3) {
-	/* Define hyperslab in the dataset. Each thread reads a few columns of data. The number of columns 
-	 * must be evenly divided by the number of threads.
-	 *
-	 *    0 0 1 1 2 2 3 3
-	 *    0 0 1 1 2 2 3 3
-	 *    0 0 1 1 2 2 3 3
-	 *    0 0 1 1 2 2 3 3
-	 *    ... ...
-	 *    
-	 */
-	offset[0] = 0;
-	offset[1] = thread_id * (hand.dset_dim2 / hand.num_threads);
-	count[0]  = hand.dset_dim1;
-	count[1]  = hand.dset_dim2 / hand.num_threads;
-
-	status = H5Sselect_hyperslab(dataspace, H5S_SELECT_SET, offset, NULL, count, NULL);
-        status = H5Sselect_hyperslab(memspace, H5S_SELECT_SET, offset, NULL, count, NULL);
-
-	/* Read data from hyperslab in the file into the hyperslab in memory. */
-	status = H5Dread(dataset, H5T_NATIVE_INT, memspace, dataspace, H5P_DEFAULT, data);
-
-	if (status < 0)
-	    printf("H5Dread failed\n");
     }
-
-    //printf("thread_id = %d, offset[0]=%llu, offset[1]=%llu, count[0]=%llu, count[1] = %llu\n", thread_id, offset[0], offset[1], count[0], count[1]);
 
     H5Sclose(memspace);
     H5Sclose(dataspace);
-    free(data);
+
+    if (data_buf_allocated)
+        free(data);
+
     return NULL;
 }
 
@@ -698,40 +635,121 @@ launch_single_file_single_dset_read(void)
     if (hand.num_threads == 0) {
         args_t info;
 
-	info.thread_id = 0;
-	info.dset_id = dataset;
-	info.data = NULL;  /* Memory buffer is allocated in the function read_partial_dset_with_hdf5 */
+	/* Break down the dataset into NUM_DATA_SECTIONS sections if the dataset is too big */
+        if (hand.num_data_sections > 1) {
+            /* Set this global flag, mainly for check_data() */
+	    data_in_section = true;
 
-	read_partial_dset_with_hdf5(&info);
+	    data_out = (int *)calloc((hand.dset_dim1 / hand.num_data_sections) * hand.dset_dim2, sizeof(int)); /* output buffer */
+
+	    if (!data_out) {
+		printf("data_out is NULL\n");
+		goto error;
+	    }
+
+	    for (j = 0; j < hand.num_data_sections; j++) {
+		info.thread_id = 0;
+		info.dset_id = dataset;
+		info.data_section_id = j;
+		info.data = data_out;
+
+	        read_partial_dset_with_hdf5(&info);
+
+		/* Data verification if enabled.  Do not enable this option (-k) for performance study */
+		if (hand.check_data && !hand.random_data)
+		    nerrors = check_data(data_out, 0, j);
+
+		if (nerrors > 0)
+		    printf("%d errors during data verification at line %d in the function %s\n", nerrors, __LINE__, __func__);
+            }
+        } else {
+	    data_out = (int *)calloc(hand.dset_dim1 * hand.dset_dim2, sizeof(int)); /* output buffer */
+
+	    if (!data_out) {
+		printf("data_out is NULL\n");
+		goto error;
+	    }
+
+	    info.thread_id = 0;
+	    info.dset_id = dataset;
+	    info.data_section_id = 0; /* No section */
+	    info.data = data_out;
+
+	    read_partial_dset_with_hdf5(&info);
+
+	    /* Data verification if enabled.  Do not enable this option (-k) for performance study */
+	    if (hand.check_data && !hand.random_data)
+		nerrors = check_data(data_out, 0, 0);
+
+	    if (nerrors > 0)
+		printf("%d errors during data verification at line %d in the function %s\n", nerrors, __LINE__, __func__);
+        }
     } else if (hand.num_threads > 0) {
         args_t info[hand.num_threads];
     
-        data_out = (int *)calloc(hand.dset_dim1 * hand.dset_dim2, sizeof(int)); /* output buffer */
+	/* Break down the dataset into NUM_DATA_SECTIONS sections if the dataset is too big */
+        if (hand.num_data_sections > 1) {
+            /* Set this global flag, mainly for check_data() */
+	    data_in_section = true;
 
-	if (!data_out) {
-	    printf("data_out is NULL\n");
-	    goto error;
-	}
+	    data_out = (int *)calloc((hand.dset_dim1 / hand.num_data_sections) * hand.dset_dim2, sizeof(int)); /* output buffer */
 
-	/* Create threads to read the data */
-	for (i = 0; i < hand.num_threads; i++) {
-	    info[i].thread_id = i;
-	    info[i].dset_id = dataset;
-	    info[i].data = data_out;
-	    pthread_create(&threads[i], NULL, read_partial_dset_with_hdf5, &info[i]);
-	}
+	    if (!data_out) {
+		printf("data_out is NULL\n");
+		goto error;
+	    }
 
-	/* Wait for threads to complete */
-	for (i = 0; i < hand.num_threads; i++) {
-	    pthread_join(threads[i], NULL);
-	}
+            /* Read the data section by section and check its correctness */
+	    for (j = 0; j < hand.num_data_sections; j++) {
+		/* Create threads to read the data */
+		for (i = 0; i < hand.num_threads; i++) {
+		    info[i].thread_id = i;
+		    info[i].dset_id = dataset;
+		    info[i].data_section_id = j;
+		    info[i].data = data_out;
+		    pthread_create(&threads[i], NULL, read_partial_dset_with_hdf5, &info[i]);
+		}
 
-	/* Data verification if enabled.  Do not enable this option (-k) for performance study */
-	if (hand.check_data && !hand.random_data)
-	    nerrors = check_data(data_out, 0, 0);
+		/* Wait for threads to complete */
+		for (i = 0; i < hand.num_threads; i++) {
+		    pthread_join(threads[i], NULL);
+		}
 
-	if (nerrors > 0)
-	    printf("%d errors during data verification at line %d in the function %s\n", nerrors, __LINE__, __func__);
+		/* Data verification if enabled.  Do not enable this option (-k) for performance study */
+		if (hand.check_data && !hand.random_data)
+		    nerrors = check_data(data_out, 0, j);
+
+		if (nerrors > 0)
+		    printf("%d errors during data verification at line %d in the function %s\n", nerrors, __LINE__, __func__);
+            }
+        } else {
+	    data_out = (int *)calloc(hand.dset_dim1 * hand.dset_dim2, sizeof(int)); /* output buffer */
+
+	    if (!data_out) {
+		printf("data_out is NULL\n");
+		goto error;
+	    }
+
+	    /* Create threads to read the data in the entire buffer */
+	    for (i = 0; i < hand.num_threads; i++) {
+		info[i].thread_id = i;
+		info[i].dset_id = dataset;
+		info[i].data = data_out;
+		pthread_create(&threads[i], NULL, read_partial_dset_with_hdf5, &info[i]);
+	    }
+
+	    /* Wait for threads to complete */
+	    for (i = 0; i < hand.num_threads; i++) {
+		pthread_join(threads[i], NULL);
+	    }
+
+	    /* Data verification if enabled.  Do not enable this option (-k) for performance study */
+	    if (hand.check_data && !hand.random_data)
+		nerrors = check_data(data_out, 0, 0);
+
+	    if (nerrors > 0)
+		printf("%d errors during data verification at line %d in the function %s\n", nerrors, __LINE__, __func__);
+        }
     }
 
     /* Close/release resources */
@@ -908,8 +926,6 @@ main(int argc, char **argv)
 
     /* Print out the performance statistics */
     report_statistics();
-
-    free(file_info);
 
     return 0;
 }

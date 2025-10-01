@@ -7,7 +7,7 @@
 void
 usage(void)
 {
-    printf("    [-h] [-c --dimsChunk] [-d --dimsDset] [-e --enableChunkCache] [-f --nFiles] [-k --checkData] [-m -stepSize] [-n --nDsets] [-r --randomData] [-s --spaceSelect] [-t --nThreads]\n");
+    printf("    [-h] [-c --dimsChunk] [-d --dimsDset] [-e --enableChunkCache] [-f --nFiles] [-k --checkData] [-m -stepSize] [-n --nDsets] [-q --nSections] [-r --randomData] [-s --spaceSelect] [-t --nThreads]\n");
     printf("    [-h --help]: this help page\n");
     printf("    [-c --dimsChunk]: the 2D dimensions of the chunks.  The default is no chunking.\n");
     printf("    [-d --dimsDset]: the 2D dimensions of the datasets.  The default is 1024 x 1024.\n");
@@ -17,9 +17,10 @@ usage(void)
     printf("    [-l --multiDsets]: read multiple datasets using H5Dread_multi. The default is false.\n");
     printf("    [-m --stepSize]: the number of data pieces passed into the thread pool.  The default is 1.\n");
     printf("    [-n --nDsets]: number of datasets in a single file.  The default is 1.\n");
+    printf("    [-q --nSections]: number of data sections to break down a large dataset.  The default is 1.\n");
     printf("    [-r --randomData]: the data has random values. The default is false.\n");
-    printf("    [-s --spaceSelect]: hyperslab selection of data space.  The default is the rows divided by the number of threads (value 1)\n");
-    printf("            The other options are each thread reads a row alternatively (value 2) and the columns divided by the number of threads (value 3)\n");
+    printf("    [-s --spaceSelect]: hyperslab selection of data space.  The default is the rows divided by the number of threads - value 1\n");
+    printf("            The other options are unsurppoted\n");
     printf("    [-t --nThreads]: number of child threads in addition to the main process.  The default is 1.\n");
     printf("\n");
 }
@@ -41,6 +42,7 @@ parse_command_line(int argc, char *argv[])
                                     {"checkData", no_argument, NULL, 'k'},
                                     {"stepSize=", required_argument, NULL, 'm'},
                                     {"nDsets=", required_argument, NULL, 'n'},
+                                    {"nSections=", required_argument, NULL, 'q'},
                                     {"randomData", no_argument, NULL, 'r'},
                                     {"spaceSelect=", required_argument, NULL, 's'},
                                     {"nThreads=", required_argument, NULL, 't'},
@@ -51,6 +53,7 @@ parse_command_line(int argc, char *argv[])
     hand.num_threads              = 0; /* No child thread. Serial only            */
     hand.num_files                = 1;
     hand.num_dsets                = 1;
+    hand.num_data_sections        = 1;
     hand.step_size                = 1;
     hand.chunk_cache              = false;
     hand.plain_hdf5               = false;
@@ -62,9 +65,9 @@ parse_command_line(int argc, char *argv[])
     hand.dset_dim2                = 1024;
     hand.chunk_dim1               = 0; /* No chunking.  Contiguous is the default. */
     hand.chunk_dim2               = 0; /* No chunking.  Contiguous is the default. */
-    hand.space_select             = 1;
+    hand.space_select             = 1; /* Other values are not supported           */
 
-    while ((opt = getopt_long(argc, argv, "c:d:ef:hklm:n:rs:t:", long_options, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "c:d:ef:hklm:n:q:rs:t:", long_options, NULL)) != -1) {
         switch (opt) {
             case 'c':
                 /* The dimensions of the chunks */
@@ -148,6 +151,15 @@ parse_command_line(int argc, char *argv[])
                 else
                     printf("optarg is null\n");
                 break;
+            case 'q':
+                /* The number of data sections to break down a large dataset */
+                if (optarg) {
+                    fprintf(stdout, "number of data sections:\t\t\t\t%s\n", optarg);
+                    hand.num_data_sections = atoi(optarg);
+                }
+                else
+                    printf("optarg is null\n");
+                break;
             case 'r':
                 /* Assign random values to the data during file creation */
                 fprintf(stdout, "assign random values to the data:\t\t\t\tTrue\n");
@@ -162,9 +174,9 @@ parse_command_line(int argc, char *argv[])
                     if (hand.space_select == 1)
                         fprintf(stdout, "options of data space selection:\t\t\trows divided by the number of threads\n");
                     else if (hand.space_select == 2)
-                        fprintf(stdout, "options of data space selection:\t\t\trows alternated by threads\n");
+                        fprintf(stdout, "options of data space selection:\t\t\trows alternated by threads (unsuppoted)\n");
                     else if (hand.space_select == 3)
-                        fprintf(stdout, "options of data space selection:\t\t\tcolumns divided by the number of threads\n");
+                        fprintf(stdout, "options of data space selection:\t\t\tcolumns divided by the number of threads (unsuppoted)\n");
                 }
                 else
                     printf("optarg is null\n");
@@ -208,10 +220,21 @@ parse_command_line(int argc, char *argv[])
         exit(1);
     }
 
-    /*if (hand.num_files == 1 && hand.num_dsets == 1 && hand.num_threads != 0 && (hand.dset_dim1 % hand.num_threads != 0)) {
+    if (hand.num_files == 1 && hand.num_dsets == 1 && hand.num_threads != 0 && (hand.dset_dim1 % hand.num_threads != 0)) {
         printf("Error: The number of the row in the dataset must be in a multiplication of the number of threads\n");
         exit(1);
-    }*/
+    }
+
+    /* Make sure there is no conflict in the command line options */
+    if (hand.num_data_sections < 1 || hand.num_data_sections > hand.dset_dim1) {
+        printf("Error: Wrong number of dataset sections\n");
+        exit(1);
+    }
+
+    if (hand.dset_dim1 % hand.num_data_sections != 0) {
+        printf("Error: The number of dataset sections must evenly divide the number of the dataset rows\n");
+        exit(1);
+    }
 
     if (hand.random_data == true && hand.check_data == true) {
         printf("Error: Can't verify the correctness of the data if its values are random\n");
@@ -270,7 +293,7 @@ check_data(int *data, int file_or_dset_index, int data_section)
     int i, j;
 
     if (data_in_section)
-        num_rows = hand.dset_dim1 / DATA_SECTION_NUM;
+        num_rows = hand.dset_dim1 / hand.num_data_sections;
     else
         num_rows = hand.dset_dim1;
 
@@ -512,10 +535,10 @@ int read_info_log_file_array(void)
 
     fclose(fp);
 
-//fprintf(stderr, "buf before get_num_of_sections: %s\n", buf);
-
     /* Find out the number of sections */
     file_info_nsections = get_num_of_sections(buf, SECTION_BREAK);
+
+    file_info_count = (int *)malloc(sizeof(int) * file_info_nsections);
 
     /* Allocate space for file info */
     file_info_array = (file_info_t **)malloc(sizeof(file_info_t *) * file_info_nsections);
@@ -543,10 +566,8 @@ int read_info_log_file_array(void)
 
     /* Read each section and save the information */
     for (i = 0; i < file_info_nsections; i++) {
-//fprintf(stderr, "--1-- section_array[%d] = %s\n", i, section_array[i]);
         read_file_info_sections(section_array[i], i);
     }
-//fprintf(stderr, "--2--\n");
 
     /* Free the memory buffers */
     for (i = 0; i < counter; i++)
@@ -571,4 +592,6 @@ void free_file_info_array()
         free(file_info_array[i]);
 
     free(file_info_array);
+
+    free(file_info_count);
 }

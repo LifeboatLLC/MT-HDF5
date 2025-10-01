@@ -20,7 +20,6 @@
 #include <errno.h>
 #include <fcntl.h>
 
-#define DATA_SECTION_NUM   4
 #define SECTION_BREAK      "\n###\n"
 #define POSIX_MAX_IO_BYTES INT_MAX
 #define MIN(a, b)          (((a) < (b)) ? (a) : (b))
@@ -31,6 +30,7 @@ typedef struct {
     int   num_threads;
     int   num_files;
     int   num_dsets;
+    int   num_data_sections;
     int   step_size;
     long long int   dset_dim1;
     long long int   dset_dim2;
@@ -63,10 +63,9 @@ typedef struct {
 } statistics_t;
 
 handler_t    hand;
-file_info_t  *file_info;
 file_info_t  **file_info_array;
-int          file_info_count[32];
-int          file_info_nsections;
+int          *file_info_count;
+int          file_info_nsections = 0;
 statistics_t statistics;
 
 bool data_in_section = false;

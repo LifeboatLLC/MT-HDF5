@@ -47,11 +47,9 @@ pthread_cond_t  continue_local;
 
 int  nthreads_tpool       = NUM_LOCAL_THREADS;
 int  nsteps_tpool         = THREAD_STEP;
-int64_t  nelmts_max         = MB;
+int64_t  nelmts_max       = MB;
+bool no_tpool             = false;                 /* use the thread pool unless the application set the environment variable "BYPASS_VOL_NO_TPOOL" */
 int  info_pointer         = 0;
-int  tasks_in_queue    = 0;
-int  tasks_unfinished  = 0;
-bool all_tasks_enqueued = false;                   /* Flag for H5Dread to notify the thread pool that it finished putting tasks in the queue */
 
 bool stop_tpool           = false;                   /* Flag to tell the thread pool to terminate, turned on in H5VL_bypass_term */
 pthread_t th[NTHREADS_MAX];
@@ -122,7 +120,7 @@ typedef struct H5VL_bypass_t {
     } u;
 } H5VL_bypass_t;
 
-/* Forward declaration of Bypass_task_t */
+/* Forward declaration of Bypass_task_t and the task queue for the thread pool */
 typedef struct Bypass_task_t Bypass_task_t;
 
 typedef struct Bypass_task_t {
@@ -134,6 +132,16 @@ typedef struct Bypass_task_t {
     Bypass_task_t *next;
 } Bypass_task_t;
 
+typedef struct task_queue_t {
+    Bypass_task_t *bypass_queue_head_g;
+    Bypass_task_t *bypass_queue_tail_g;
+    int            tasks_in_queue;
+    int            tasks_unfinished;    /* The next two fields are only used for thread pool */
+    bool           all_tasks_enqueued;  /* Flag for H5Dread to notify the thread pool that it finished putting tasks in the queue */
+} task_queue_t;
+
+task_queue_t queue_for_tpool;
+
 typedef struct {
     size_t  counter;
 
@@ -143,14 +151,11 @@ typedef struct {
     hid_t   mem_space_id;
     haddr_t chunk_addr;
 
-    H5VL_bypass_t *file; // TODO: Replace this and names above with dset ptr
+    H5VL_bypass_t *file; // TODO: Replace this and names above with dset pointer
     int     dtype_size;
 
     bool    memory_allocated;
 } sel_info_t;
-
-static Bypass_task_t *bypass_queue_head_g;
-static Bypass_task_t *bypass_queue_tail_g;
 
 static info_t *info_stuff;
 static int info_count = 0;
