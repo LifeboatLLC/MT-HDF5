@@ -535,10 +535,10 @@ int read_info_log_file_array(void)
 
     fclose(fp);
 
-//fprintf(stderr, "buf before get_num_of_sections: %s\n", buf);
-
     /* Find out the number of sections */
     file_info_nsections = get_num_of_sections(buf, SECTION_BREAK);
+
+    file_info_count = (int *)malloc(sizeof(int) * file_info_nsections);
 
     /* Allocate space for file info */
     file_info_array = (file_info_t **)malloc(sizeof(file_info_t *) * file_info_nsections);
@@ -566,10 +566,8 @@ int read_info_log_file_array(void)
 
     /* Read each section and save the information */
     for (i = 0; i < file_info_nsections; i++) {
-//fprintf(stderr, "--1-- section_array[%d] = %s\n", i, section_array[i]);
         read_file_info_sections(section_array[i], i);
     }
-//fprintf(stderr, "--2--\n");
 
     /* Free the memory buffers */
     for (i = 0; i < counter; i++)
@@ -594,4 +592,6 @@ void free_file_info_array()
         free(file_info_array[i]);
 
     free(file_info_array);
+
+    free(file_info_count);
 }

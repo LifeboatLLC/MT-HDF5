@@ -80,17 +80,24 @@ void* read_multiple_dsets_with_multiple_threads(void* arg)
     int *data;
     file_info_t *local_file_info;
     int nerrors = 0;
-    int k;
+    int j, k;
 
     data = (int *)malloc(hand.dset_dim1 * hand.dset_dim2 * sizeof(int));
 
     for (k = 0; k < hand.num_dsets / hand.num_threads; k++) {
         local_file_info = file_info_array[thread_id * (file_info_nsections / hand.num_threads) + k];
 
-        //printf("k=%d, thread_id=%d, dset_name=%s, dset_offset=%lld, offset_f=%lld, nelmts=%lld, offset_m=%lld\n", k, thread_id, local_file_info->dset_name, local_file_info->dset_offset, local_file_info->offset_f, local_file_info->nelmts, local_file_info->offset_m);
+	/* In the Bypass VOL, each read is limited to a certain number of elements (set through the
+         * environment variable MAX_NELMTS). A bigger dataset may be broken down to multiple reads.
+         * 'file_info_count' contains the number of reads. */
+        for (j = 0; j < file_info_count[thread_id * (file_info_nsections / hand.num_threads) + k]; j++) {
+	    /* printf("k=%d, thread_id=%d, dset_name=%s, dset_offset=%lld, offset_f=%lld, nelmts=%lld, offset_m=%lld\n",
+                k, thread_id, local_file_info[j].dset_name, local_file_info[j].dset_offset, local_file_info[j].offset_f,
+                local_file_info[j].nelmts, local_file_info[j].offset_m); */
 
-        read_big_data(fp, data + local_file_info->offset_m, sizeof(int) * local_file_info->nelmts,
-            (local_file_info->dset_offset + local_file_info->offset_f * sizeof(int)));
+	    read_big_data(fp, data + local_file_info[j].offset_m, sizeof(int) * local_file_info[j].nelmts,
+		(local_file_info[j].dset_offset + local_file_info[j].offset_f * sizeof(int)));
+        }
 
         /* Data verification if enabled */
         if (hand.check_data && !hand.random_data)
@@ -119,17 +126,24 @@ void* read_multiple_dsets_with_no_child_thread(void* arg)
     file_info_t *local_file_info;
     int *data;
     int nerrors = 0;
-    int k;
+    int j, k;
 
     data = (int *)malloc(hand.dset_dim1 * hand.dset_dim2 * sizeof(int));
 
     for (k = 0; k < hand.num_dsets; k++) {
         local_file_info = file_info_array[k];
 
-        //printf("k=%d, thread_id=%d, dset_name=%s, dset_offset=%lld, offset_f=%lld, nelmts=%lld, offset_m=%lld\n", k, thread_id, local_file_info->dset_name, local_file_info->dset_offset, local_file_info->offset_f, local_file_info->nelmts, local_file_info->offset_m);
+	/* In the Bypass VOL, each read is limited to a certain number of elements (set through the
+         * environment variable MAX_NELMTS). A bigger dataset may be broken down to multiple reads.
+         * 'file_info_count' contains the number of reads. */
+        for (j = 0; j < file_info_count[k]; j++) {
+	    /* printf("k=%d, dset_name=%s, dset_offset=%lld, offset_f=%lld, nelmts=%lld, offset_m=%lld\n",
+                k, local_file_info[j].dset_name, local_file_info[j].dset_offset, local_file_info[j].offset_f,
+                local_file_info[j].nelmts, local_file_info[j].offset_m); */
 
-        read_big_data(fp, data + local_file_info->offset_m, sizeof(int) * local_file_info->nelmts,
-            (local_file_info->dset_offset + local_file_info->offset_f * sizeof(int)));
+	    read_big_data(fp, data + local_file_info[j].offset_m, sizeof(int) * local_file_info[j].nelmts,
+		(local_file_info[j].dset_offset + local_file_info[j].offset_f * sizeof(int)));
+        }
 
         /* Data verification if enabled */
         if (hand.check_data && !hand.random_data)
@@ -138,6 +152,7 @@ void* read_multiple_dsets_with_no_child_thread(void* arg)
         /* This data verification is only for debugging purpose. */
         if (nerrors > 0)
             printf("%d errors during data verification at line %d.\n", nerrors, __LINE__);
+
     }
 
     free(data);
@@ -159,21 +174,26 @@ void* read_multiple_files_with_multiple_threads(void* arg)
     int *p, *data = NULL;
     file_info_t *local_file_info;
     int nerrors = 0;
-    int i, j, k;
+    int j, k;
 
     data = (int *)malloc(sizeof(int) * hand.dset_dim1 * hand.dset_dim2);
 
     for (k = 0; k < hand.num_files / hand.num_threads; k++) {
         local_file_info = file_info_array[thread_id * (file_info_nsections / hand.num_threads) + k];
 
-        //printf("thread_id=%d, file_name=%s, dset_name=%s, dset_offset=%d, offset_f=%d, nelmts=%d, offset_m=%d\n", thread_id, local_file_info->file_name, local_file_info->dset_name, local_file_info->dset_offset, local_file_info->offset_f, local_file_info->nelmts, local_file_info->offset_m);
+        fp = open(local_file_info[0].file_name, O_RDONLY);
 
-        fp = open(local_file_info->file_name, O_RDONLY);
+	/* In the Bypass VOL, each read is limited to a certain number of elements (set through the
+         * environment variable MAX_NELMTS). A bigger dataset may be broken down to multiple reads.
+         * 'file_info_count' contains the number of reads. */
+        for (j = 0; j < file_info_count[thread_id * (file_info_nsections / hand.num_threads) + k]; j++) {
+	    /* printf("k=%d, thread_id=%d, file_name=%s, dset_name=%s, dset_offset=%lld, offset_f=%lld, nelmts=%lld, offset_m=%lld\n",
+                k, thread_id, local_file_info[j].file_name, local_file_info[j].dset_name, local_file_info[j].dset_offset, local_file_info[j].offset_f,
+                local_file_info[j].nelmts, local_file_info[j].offset_m); */
 
-        read_big_data(fp, data + local_file_info->offset_m, sizeof(int) * local_file_info->nelmts,
-            (local_file_info->dset_offset + local_file_info->offset_f * sizeof(int)));
-
-        close(fp);
+	    read_big_data(fp, data + local_file_info[j].offset_m, sizeof(int) * local_file_info[j].nelmts,
+		(local_file_info[j].dset_offset + local_file_info[j].offset_f * sizeof(int)));
+        }
 
         /* Data verification if enabled */
         if (hand.check_data && !hand.random_data)
@@ -203,19 +223,22 @@ void* read_multiple_files_with_no_child_thread(void* arg)
     int *data = NULL;
     file_info_t *local_file_info;
     int nerrors = 0;
-    int k;
+    int j, k;
 
     data = (int *)malloc(sizeof(int) * hand.dset_dim1 * hand.dset_dim2);
 
     for (k = 0; k < hand.num_files; k++) {
         local_file_info = file_info_array[k];
 
-        //printf("thread_id=%d, file_name=%s, dset_name=%s, dset_offset=%d, offset_f=%d, nelmts=%d, offset_m=%d\n", thread_id, local_file_info->file_name, local_file_info->dset_name, local_file_info->dset_offset, local_file_info->offset_f, local_file_info->nelmts, local_file_info->offset_m);
+        fp = open(local_file_info[0].file_name, O_RDONLY);
 
-        fp = open(local_file_info->file_name, O_RDONLY);
-
-        read_big_data(fp, data + local_file_info->offset_m, sizeof(int) * local_file_info->nelmts,
-            (local_file_info->dset_offset + local_file_info->offset_f * sizeof(int)));
+	/* In the Bypass VOL, each read is limited to a certain number of elements (set through the
+         * environment variable MAX_NELMTS). A bigger dataset may be broken down to multiple reads.
+         * 'file_info_count' contains the number of reads. */
+        for (j = 0; j < file_info_count[k]; j++) {
+	    read_big_data(fp, data + local_file_info[j].offset_m, sizeof(int) * local_file_info[j].nelmts,
+		(local_file_info[j].dset_offset + local_file_info[j].offset_f * sizeof(int)));
+        }
 
         close(fp);
 
@@ -259,7 +282,6 @@ launch_single_file_single_dset_read(void)
     /* Break down the dataset into NUM_DATA_SECTIONS sections if the dataset is too big */
     if (hand.num_data_sections > 1) {
         data_in_section = true;
-        //hand.check_data = false;   /* Skipping data verification in this case */
 
         data_out = (int *)calloc((hand.dset_dim1 / hand.num_data_sections) * hand.dset_dim2, sizeof(int)); /* output buffer */
     } else {

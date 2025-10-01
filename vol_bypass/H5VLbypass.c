@@ -678,8 +678,6 @@ H5VL_bypass_init(hid_t vipl_id)
         no_tpool = true;
 
     /* Initialize the task queue for the thread pool */
-    //bypass_queue_head_g = NULL;
-    //bypass_queue_tail_g = NULL;
     memset(&queue_for_tpool, 0, sizeof(task_queue_t));
 
     info_for_thread = malloc(nthreads_tpool * sizeof(info_for_thread_t));

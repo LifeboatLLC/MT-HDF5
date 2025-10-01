@@ -1,7 +1,7 @@
 #! /bin/sh
 
 # Modify the following variables as command line options for the h5_create.c, h5_read.c.  The number of data sections
-# isn't used in these test cases:
+# (NDATA_SECTIONS) isn't supported in these test cases:
 #     number of threads for the multi-thread application
 #     number of threads for the thread pool
 #     number of steps for thread pool queue
@@ -17,7 +17,7 @@ MAX_NELMTS=1048576
 # Dataset size = 4MB
 DIM1=2
 DIM2=2
-NDSETS=32
+NDSETS=16
 
 # Dataset size = 4MB
 # DIM1=1024
@@ -73,7 +73,11 @@ echo "Test 2c: Reading multiple datasets in a single file using H5Dread_multi wi
 
 # The C test must follow the test with Bypass VOL immediately to use info.log file which contains file name and data info
 echo ""
-echo "Test 3a: Reading multiple datasets in a single file in C only with multi-thread (no thread pool)"
+echo "Test 3a: Reading multiple datasets in a single file in C only with no child thread and no thread pool"
+./posix_read_mthread -t 0 -d ${DIM1}x${DIM2} -n ${NDSETS} -k
+
+echo ""
+echo "Test 3b: Reading multiple datasets in a single file in C only with multi-thread (no thread pool)"
 ./posix_read_mthread -t ${NTHREADS_FOR_MULTI} -d ${DIM1}x${DIM2} -n ${NDSETS} -k
 
 # Avoid checking the correctness of the data if there are more than one section because the thread pool may still be 

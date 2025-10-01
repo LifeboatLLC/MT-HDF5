@@ -10,7 +10,6 @@ pthread_cond_t  cond_value, cond_value_finish;
 typedef struct {
     int         fp;
     int         thread_id;
-    //file_info_t *file_info;
     int         file_info_entry_num;
     int         step;
     int         *data;
@@ -120,94 +119,6 @@ void* read_in_c(void* arg)
 
     return NULL;
 }
-
-#ifdef TMP
-/*------------------------------------------------------------
- * Function executed by each thread: 
- *
- * Reading multiple datasets in C in the case of multiple
- * datasets in a single file
- *------------------------------------------------------------
- */
-void* read_multiple_dsets_in_c(void* arg)
-{
-    int fp = ((c_args_t *)arg)->fp;
-    int thread_id = ((c_args_t *)arg)->thread_id;
-    int *data;
-    file_info_t *local_file_info;
-    int *p;
-    int nerrors = 0;
-    int i, j, k;
-
-    data = (int *)malloc(hand.dset_dim1 * hand.dset_dim2 * sizeof(int));
-
-    for (k = 0; k < hand.num_dsets / hand.num_threads; k++) {
-        local_file_info = &(file_info[k * hand.num_threads + thread_id]);
-
-        //printf("k=%d, thread_id=%d, dset_name=%s, dset_offset=%lld, offset_f=%lld, nelmts=%lld, offset_m=%lld\n", k, thread_id, local_file_info->dset_name, local_file_info->dset_offset, local_file_info->offset_f, local_file_info->nelmts, local_file_info->offset_m);
-
-        read_big_data(fp, data + local_file_info->offset_m, sizeof(int) * local_file_info->nelmts, (local_file_info->dset_offset + local_file_info->offset_f * sizeof(int)));
-
-        /* Data verification if enabled */
-        if (hand.check_data && !hand.random_data)
-            nerrors = check_data(data, (k * hand.num_threads + thread_id), 0);
-
-        /* This data verification is only for debugging purpose.  The order of the dataset being read in C
-         * may not be the same as with HDF5.  So it may report error here. */
-        if (nerrors > 0)
-            printf("%d errors during data verification at line %d.  It could be caused by the different order of datasets being read.\n", nerrors, __LINE__);
-    }
-
-    free(data);
-
-    return NULL;
-}
-
-/*------------------------------------------------------------
- * Function executed by each thread: 
- *
- * Reading multiple files in C in the case of a single 
- * dataset in multiple files
- *------------------------------------------------------------
- */
-void* read_multiple_files_in_c(void* arg)
-{
-    int fp;
-    int thread_id = ((c_args_t *)arg)->thread_id;
-    int *p, *data = NULL;
-    file_info_t *local_file_info;
-    int nerrors = 0;
-    int i, j, k;
-
-    data = (int *)malloc(sizeof(int) * hand.dset_dim1 * hand.dset_dim2);
-
-    for (k = 0; k < hand.num_files / hand.num_threads; k++) {
-        local_file_info = &(file_info[k * hand.num_threads + thread_id]);
-
-        //printf("thread_id=%d, file_name=%s, dset_name=%s, dset_offset=%d, offset_f=%d, nelmts=%d, offset_m=%d\n", thread_id, local_file_info->file_name, local_file_info->dset_name, local_file_info->dset_offset, local_file_info->offset_f, local_file_info->nelmts, local_file_info->offset_m);
-
-        fp = open(local_file_info->file_name, O_RDONLY);
-
-        read_big_data(fp, data + local_file_info->offset_m, sizeof(int) * local_file_info->nelmts, (local_file_info->dset_offset + local_file_info->offset_f * sizeof(int)));
-
-        close(fp);
-
-        /* Data verification if enabled */
-        if (hand.check_data && !hand.random_data)
-            nerrors = check_data(data, (k * hand.num_threads + thread_id), 0);
-
-        /* This data verification is only for debugging purpose.  The order of the data in the files being read in C
-         * may not be the same as with HDF5.  So it may report error here. */
-        if (nerrors > 0)
-            printf("%d errors during data verification at line %d in the function %s.  It could be caused by the different order of datasets being read.\n", nerrors, __LINE__, __func__);
-
-    }
-
-    free(data);
-  
-    return NULL;
-}
-#endif
 
 /*------------------------------------------------------------
  * Start to test the case of a single dataset in a single file
@@ -357,96 +268,6 @@ launch_read(bool single_file_single_dset)
 error:
     return -1;
 }
-
-#ifdef TMP
-/*------------------------------------------------------------
- * Deprecated: Start to test the case of multiple datasets in a single file
- * with multi-thread with HDF5 and C
- *------------------------------------------------------------
- */
-int
-launch_single_file_multiple_dset_read()
-{
-    int         i, j, k;
-    pthread_t threads[hand.num_threads];
-    int thread_ids[hand.num_threads];
-    c_args_t c_info[hand.num_threads];
-    int *p, *data_out = NULL;
-    char file_name[1024];
-    int fp;
-    int         finfo_entry_num;
-    struct timeval begin, end;
-
-printf("file_info->file_name = %s\n", file_info->file_name);
-    /* Start to read the data using C functions without HDF5 involved */
-    fp = open(file_info->file_name, O_RDONLY);
-
-    gettimeofday(&begin, 0);
-
-    /* Create threads to read the data */
-    for (i = 0; i < hand.num_threads; i++) {
-	c_info[i].thread_id = i;
-	c_info[i].file_info = &file_info[i];
-	c_info[i].fp = fp;
-	pthread_create(&threads[i], NULL, read_multiple_dsets_in_c, &c_info[i]);
-    }
-
-    /* Wait for threads to complete */
-    for (i = 0; i < hand.num_threads; i++) {
-	pthread_join(threads[i], NULL);
-    }
-
-    gettimeofday(&end, 0);
-
-    save_statistics(begin, end);
-
-    close(fp);
-
-    return 0;
-
-error:
-    return -1;
-}
-
-/*------------------------------------------------------------
- * Deprecated: Start to test the case of a single dataset in multiple files
- * with multi-thread with HDF5 and C
- *------------------------------------------------------------
- */
-int
-launch_multiple_file_read(int num_files)
-{
-    pthread_t threads[hand.num_threads];
-    int thread_ids[hand.num_threads];
-    c_args_t c_info[hand.num_threads];
-    int i, j;
-    int *data_out = NULL;
-    int         finfo_entry_num;
-    struct timeval begin, end;
-
-    gettimeofday(&begin, 0);
-
-    /* Create threads to read the multiple files in C only */
-    for (i = 0; i < hand.num_threads; i++) {
-	c_info[i].thread_id = i;
-	pthread_create(&threads[i], NULL, read_multiple_files_in_c, &c_info[i]);
-    }
-
-    /* Wait for threads to complete */
-    for (i = 0; i < hand.num_threads; i++) {
-	pthread_join(threads[i], NULL);
-    }
-
-    gettimeofday(&end, 0);
-
-    save_statistics(begin, end);
-
-    return 0;
-
-error:
-    return -1;
-}
-#endif
 
 /*------------------------------------------------------------
  * Main function

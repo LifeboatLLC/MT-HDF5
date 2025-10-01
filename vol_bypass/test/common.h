@@ -64,8 +64,8 @@ typedef struct {
 
 handler_t    hand;
 file_info_t  **file_info_array;
-int          file_info_count[32];
-int          file_info_nsections;
+int          *file_info_count;
+int          file_info_nsections = 0;
 statistics_t statistics;
 
 bool data_in_section = false;
