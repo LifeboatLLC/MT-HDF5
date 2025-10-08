@@ -39,6 +39,7 @@
 #include <sys/types.h>
 #include <sys/uio.h>
 #include <unistd.h>
+#include <sys/resource.h>
 
 /* Public HDF5 headers */
 #include "hdf5.h"
@@ -3327,6 +3328,7 @@ c_file_open_helper(H5VL_bypass_t *obj, const char *name)
 {
     herr_t ret_value = 0;
     Bypass_file_t *file = NULL;
+    struct rlimit limit;
 
     assert(obj);
     assert(obj->type == H5I_FILE);
@@ -3337,6 +3339,16 @@ c_file_open_helper(H5VL_bypass_t *obj, const char *name)
     /* Open the file with the system's function */
     if ((file->fd = open(name, O_RDONLY)) < 0) {
         fprintf(stderr, "failed to open file descriptor: %s\n", strerror(errno));
+
+        /* If the number of files being opened exceeds the system limit, print out the corresponding error message */
+	if (errno == EMFILE) {
+	    if (getrlimit(RLIMIT_NOFILE, &limit) == 0) {
+	        printf("Maximal number of files exceeded. Use the shell command 'ulimit -n' to check (current limit is %ld).\n", (long)limit.rlim_cur);
+                printf("Either set this limit to a higher number or reduce the number of files to be opened\n");
+            } else
+                printf("In %s of %s at line %d: getrlimit() failed\n", __func__, __FILE__, __LINE__);
+	}
+
         ret_value = -1;
         goto done;
     }

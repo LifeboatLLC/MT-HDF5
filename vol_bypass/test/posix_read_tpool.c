@@ -144,7 +144,6 @@ launch_read(bool single_file_single_dset)
     pthread_cond_init(&cond_value, NULL);
     pthread_cond_init(&cond_value_finish, NULL);
 
-    data_out = (int *)calloc(hand.dset_dim1 * hand.dset_dim2, sizeof(int)); /* output buffer */
     tpool_vars = (tpool_var_t *)calloc(file_info_nsections, sizeof(tpool_var_t));
 
     /* Break down the dataset into NUM_DATA_SECTIONS sections if the dataset is too big */
@@ -165,21 +164,30 @@ launch_read(bool single_file_single_dset)
 
     /* Start to read the data using C functions without HDF5 involved */
 
-    /* Open the file in each section.  It can be a little wasteful if the file is in more than one section.
-     * But that is okay because this is not part of the benchmark. */
-    for (i = 0; i < file_info_nsections; i++) {
-        /* All pieces of data in a section are supposed to belong to one file */
-        fp = open(file_info_array[i][0].file_name, O_RDONLY);
-    
-        /* Put this file pointer into all the entries in this section */   
-        for (j = 0; j < file_info_count[i]; j++)
-            file_info_array[i][j].fp = fp; 
+    /* Open the file in each section */
+    if (hand.num_files > 1) {
+	for (i = 0; i < file_info_nsections; i++) {
+	    /* All pieces of data in a section are supposed to belong to one file */
+	    fp = open(file_info_array[i][0].file_name, O_RDONLY);
+
+	    /* Put this file pointer into all the entries in this section */
+	    for (j = 0; j < file_info_count[i]; j++)
+		file_info_array[i][j].fp = fp;
+	}
+    } else {
+        /* Open the file only once */
+        fp = open(file_info_array[0][0].file_name, O_RDONLY);
+
+	for (i = 0; i < file_info_nsections; i++) {
+	    /* Put this file pointer into all the entries in this section */
+	    for (j = 0; j < file_info_count[i]; j++)
+		file_info_array[i][j].fp = fp;
+	}
     }
 
     /* Create threads to start the thread pool */
     for (i = 0; i < hand.num_threads; i++) {
 	c_info[i].thread_id = i;
-	//c_info[i].file_info = file_info;
 	c_info[i].file_info_entry_num = finfo_entry_num;
 	c_info[i].data = data_out;
         c_info[i].step = hand.step_size;
@@ -257,8 +265,11 @@ launch_read(bool single_file_single_dset)
     pthread_cond_destroy(&cond_value_finish);
 
     /* Close the files in all sections */
-    for (i = 0; i < file_info_nsections; i++)
-        close(file_info_array[i][0].fp);
+    if (hand.num_files > 1) {
+	for (i = 0; i < file_info_nsections; i++)
+	    close(file_info_array[i][0].fp);
+    } else
+	close(file_info_array[0][0].fp);
 
     free(data_out);
     free(tpool_vars);
