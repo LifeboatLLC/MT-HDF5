@@ -17,7 +17,7 @@ MAX_NELMTS=1048576
 # Dataset size = 4MB
 DIM1=2
 DIM2=2
-NDSETS=16
+NDSETS=1024
 
 # Dataset size = 4MB
 # DIM1=1024
