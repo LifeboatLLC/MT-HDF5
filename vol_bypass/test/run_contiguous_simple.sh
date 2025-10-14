@@ -26,12 +26,12 @@ NDATA_SECTIONS=1
 # DIM2=1024
 
 # Dataset size = 64MB
-DIM1=4096
-DIM2=4096
+# DIM1=4096
+# DIM2=4096
 
 # Dataset size = 16GB
-# DIM1=65536
-# DIM2=65536
+DIM1=65536
+DIM2=65536
 
 # Dataset size = 64GB
 # DIM1=131072
@@ -78,7 +78,12 @@ unset BYPASS_VOL_NO_TPOOL
 
 echo ""
 echo ""
-echo "Test 2c: Reading single dataset in a single file with Bypass VOL with thread pool"
+echo "Test 2c: Reading single dataset in a single file running multi-threaded application and the thread pool in the Bypass VOL"
+./h5_read -t ${NTHREADS_FOR_MULTI} -d ${DIM1}x${DIM2} -q ${NDATA_SECTIONS} -k
+
+echo ""
+echo ""
+echo "Test 2d: Reading single dataset in a single file with Bypass VOL with thread pool"
 ./h5_read -t 0 -d ${DIM1}x${DIM2} -q ${NDATA_SECTIONS} -k
 
 # The C test must follow the test with Bypass VOL immediately to use info.log file which contains file name and data info

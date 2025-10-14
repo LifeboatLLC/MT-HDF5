@@ -64,11 +64,16 @@ echo "Test 2a: Reading multiple datasets in a single file with Bypass VOL with m
 unset BYPASS_VOL_NO_TPOOL
 
 echo ""
-echo "Test 2b: Reading multiple datasets in a single file with Bypass VOL"
+echo ""
+echo "Test 2b: Reading multiple datasets in a single file running multi-threaded application and the thread pool in the Bypass VOL"
+./h5_read -t ${NTHREADS_FOR_MULTI} -d ${DIM1}x${DIM2} -n {NDSETS} -k
+
+echo ""
+echo "Test 2c: Reading multiple datasets in a single file with Bypass VOL"
 ./h5_read -t 0 -d ${DIM1}x${DIM2} -n ${NDSETS} -k
 
 echo ""
-echo "Test 2c: Reading multiple datasets in a single file using H5Dread_multi with Bypass VOL"
+echo "Test 2d: Reading multiple datasets in a single file using H5Dread_multi with Bypass VOL"
 ./h5_read -t 0 -d ${DIM1}x${DIM2} -n ${NDSETS} -l -k
 
 # The C test must follow the test with Bypass VOL immediately to use info.log file which contains file name and data info

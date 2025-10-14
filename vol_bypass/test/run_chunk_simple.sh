@@ -26,16 +26,16 @@ NDATA_SECTIONS=1
 # CHUNK_DIM2=2
 
 # Dataset size = 4MB
-DIM1=1024
-DIM2=1024
-CHUNK_DIM1=64
-CHUNK_DIM2=64
+# DIM1=1024
+# DIM2=1024
+# CHUNK_DIM1=64
+# CHUNK_DIM2=64
 
 # Dataset size = 16GB
-# DIM1=65536
-# DIM2=65536
-# CHUNK_DIM1=8192
-# CHUNK_DIM2=8192
+DIM1=65536
+DIM2=65536
+CHUNK_DIM1=8192
+CHUNK_DIM2=8192
 
 # Dataset size = 64GB
 # DIM1=131072
@@ -86,7 +86,12 @@ unset BYPASS_VOL_NO_TPOOL
 
 echo ""
 echo ""
-echo "Test 2c: Reading single dataset in a single file with Bypass VOL with thread pool (serial application)"
+echo "Test 2c: Reading single dataset in a single file running multi-threaded application and the thread pool in the Bypass VOL"
+./h5_read -t ${NTHREADS_FOR_MULTI} -d ${DIM1}x${DIM2} -c ${CHUNK_DIM1}x${CHUNK_DIM2} -q ${NDATA_SECTIONS} -k
+
+echo ""
+echo ""
+echo "Test 2d: Reading single dataset in a single file with Bypass VOL with thread pool (serial application)"
 ./h5_read -t 0 -d ${DIM1}x${DIM2} -c ${CHUNK_DIM1}x${CHUNK_DIM2} -q ${NDATA_SECTIONS} -k
 
 # The C test must follow the test with Bypass VOL immediately to use info.log file which contains file name and data info
