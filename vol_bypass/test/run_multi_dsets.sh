@@ -66,7 +66,7 @@ unset BYPASS_VOL_NO_TPOOL
 echo ""
 echo ""
 echo "Test 2b: Reading multiple datasets in a single file running multi-threaded application and the thread pool in the Bypass VOL"
-./h5_read -t ${NTHREADS_FOR_MULTI} -d ${DIM1}x${DIM2} -n {NDSETS} -k
+./h5_read -t ${NTHREADS_FOR_MULTI} -d ${DIM1}x${DIM2} -n ${NDSETS} -k
 
 echo ""
 echo "Test 2c: Reading multiple datasets in a single file with Bypass VOL"
