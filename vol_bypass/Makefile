@@ -5,7 +5,7 @@ CC=clang
 AR=ar
 
 # DEBUG=-DENABLE_BYPASS_LOGGING -g -O0
-DEBUG=-O3
+DEBUG=-pthread -O3
 
 INCLUDES=-I$(HDF5_DIR)/include
 CFLAGS = $(DEBUG) -fPIC $(INCLUDES) -Wall

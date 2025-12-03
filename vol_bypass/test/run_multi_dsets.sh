@@ -9,20 +9,20 @@
 #     dimension one of dataset
 #     dimension two of dataset
 #     number of datasets
-NTHREADS_FOR_MULTI=4
-NTHREADS_FOR_TPOOL=4
+NTHREADS_FOR_MULTI=2
+NTHREADS_FOR_TPOOL=2
 NSTEPS_QUEUE=1024
 MAX_NELMTS=1048576
 
 # Dataset size = 4MB
-DIM1=2
-DIM2=2
-NDSETS=1024
+# DIM1=2
+# DIM2=2
+# NDSETS=1024
 
 # Dataset size = 4MB
-# DIM1=1024
-# DIM2=1024
-# NDSETS=1024
+DIM1=1024
+DIM2=1024
+NDSETS=4
 
 # Dataset size = 16GB
 # DIM1=65536
@@ -57,6 +57,7 @@ export BYPASS_VOL_MAX_NELMTS=${MAX_NELMTS}
 export BYPASS_VOL_NO_TPOOL=true
 
 echo ""
+echo "		===================================================================		"
 echo "Test 2a: Reading multiple datasets in a single file with Bypass VOL with multiple threads"
 ./h5_read -t ${NTHREADS_FOR_MULTI} -d ${DIM1}x${DIM2} -n ${NDSETS} -k
 
@@ -78,6 +79,7 @@ echo "Test 2d: Reading multiple datasets in a single file using H5Dread_multi wi
 
 # The C test must follow the test with Bypass VOL immediately to use info.log file which contains file name and data info
 echo ""
+echo "		===================================================================		"
 echo "Test 3a: Reading multiple datasets in a single file in C only with no child thread and no thread pool"
 ./posix_read_mthread -t 0 -d ${DIM1}x${DIM2} -n ${NDSETS} -k
 

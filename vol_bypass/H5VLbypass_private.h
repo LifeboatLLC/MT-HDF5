@@ -20,6 +20,7 @@
 /* Public headers needed by this file */
 #include "H5VLbypass.h"        /* Public header for connector */
 #include <pthread.h>
+#include <stdatomic.h>
 
 /* Private characteristics of the bypass VOL connector */
 #define H5VL_BYPASS_VERSION     0
@@ -129,13 +130,15 @@ typedef struct Bypass_task_t {
     haddr_t        addr;       /* Location in filesystem file to read from */
     size_t         size;
     void          *vec_buf;    /* User buffer to populate */
+    atomic_int    *task_count_ptr;
+    pthread_cond_t *local_condition_ptr;
     Bypass_task_t *next;
 } Bypass_task_t;
 
 typedef struct task_queue_t {
     Bypass_task_t *bypass_queue_head_g;
     Bypass_task_t *bypass_queue_tail_g;
-    int            tasks_in_queue;
+    int            tasks_in_queue;      /* Used only by the queue local to each thread when the thread pool isn't used */
     int            tasks_unfinished;    /* The next two fields are only used for thread pool */
     bool           all_tasks_enqueued;  /* Flag for H5Dread to notify the thread pool that it finished putting tasks in the queue */
 } task_queue_t;
@@ -155,11 +158,13 @@ typedef struct {
     int     dtype_size;
 
     bool    memory_allocated;
+    atomic_int *task_count_ptr;
+    pthread_cond_t *local_condition_ptr;
 } sel_info_t;
 
 static info_t *info_stuff;
-static int info_count = 0;
-static int info_size = INFO_SIZE;
+static int64_t info_count = 0;
+static int64_t info_size = INFO_SIZE;
 static info_for_thread_t *info_for_thread;
 
 #ifdef __cplusplus

@@ -47,11 +47,11 @@ unset HDF5_PLUGIN_PATH
 echo ""
 echo ""
 echo "Test 1a: Reading single dataset in a single file with straight HDF5 (no Bypass VOL) with no child thread"
-./h5_read -t 0 -d ${DIM1}x${DIM2} -q ${NDATA_SECTIONS} -k
+./h5_read -t 0 -d ${DIM1}x${DIM2} -q ${NDATA_SECTIONS}
 
 echo ""
 echo "Test 1b: Reading single dataset in a single file with straight HDF5 (no Bypass VOL)"
-./h5_read -t ${NTHREADS_FOR_MULTI} -d ${DIM1}x${DIM2} -q ${NDATA_SECTIONS} -k
+./h5_read -t ${NTHREADS_FOR_MULTI} -d ${DIM1}x${DIM2} -q ${NDATA_SECTIONS}
 
 # Set the environment variables to use Bypass VOL. Need to modify them with your own paths 
 export HDF5_PLUGIN_PATH=/Users/raylu/Lifeboat/HDF/Matt/MT-HDF5_no_tpool/vol_bypass
@@ -66,12 +66,13 @@ export BYPASS_VOL_NO_TPOOL=true
 
 echo ""
 echo ""
+echo "		===================================================================		"
 echo "Test 2a: Reading single dataset in a single file with Bypass VOL running no child thread (no thread pool)"
-./h5_read -t 0 -d ${DIM1}x${DIM2} -q ${NDATA_SECTIONS} -k
+./h5_read -t 0 -d ${DIM1}x${DIM2} -q ${NDATA_SECTIONS}
 
 echo ""
 echo "Test 2b: Reading single dataset in a single file with Bypass VOL with multiple threads (no thread pool)"
-./h5_read -t ${NTHREADS_FOR_MULTI} -d ${DIM1}x${DIM2} -q ${NDATA_SECTIONS} -k
+./h5_read -t ${NTHREADS_FOR_MULTI} -d ${DIM1}x${DIM2} -q ${NDATA_SECTIONS}
 
 # Use the thread pool
 unset BYPASS_VOL_NO_TPOOL
@@ -79,23 +80,24 @@ unset BYPASS_VOL_NO_TPOOL
 echo ""
 echo ""
 echo "Test 2c: Reading single dataset in a single file running multi-threaded application and the thread pool in the Bypass VOL"
-./h5_read -t ${NTHREADS_FOR_MULTI} -d ${DIM1}x${DIM2} -q ${NDATA_SECTIONS} -k
+./h5_read -t ${NTHREADS_FOR_MULTI} -d ${DIM1}x${DIM2} -q ${NDATA_SECTIONS}
 
 echo ""
 echo ""
 echo "Test 2d: Reading single dataset in a single file with Bypass VOL with thread pool"
-./h5_read -t 0 -d ${DIM1}x${DIM2} -q ${NDATA_SECTIONS} -k
+./h5_read -t 0 -d ${DIM1}x${DIM2} -q ${NDATA_SECTIONS}
 
 # The C test must follow the test with Bypass VOL immediately to use info.log file which contains file name and data info
 echo ""
 echo ""
+echo "		===================================================================		"
 echo "Test 3a: Reading single dataset in a single file in C only with no child thread (serial)"
-./posix_read_mthread -t 0 -d ${DIM1}x${DIM2} -q ${NDATA_SECTIONS} -k
+./posix_read_mthread -t 0 -d ${DIM1}x${DIM2} -q ${NDATA_SECTIONS}
 
 echo ""
 echo ""
 echo "Test 3b: Reading single dataset in a single file in C only with multi-thread (no thread pool)"
-./posix_read_mthread -t ${NTHREADS_FOR_MULTI} -d ${DIM1}x${DIM2} -q ${NDATA_SECTIONS} -k
+./posix_read_mthread -t ${NTHREADS_FOR_MULTI} -d ${DIM1}x${DIM2} -q ${NDATA_SECTIONS}
 
 # The C test must follow the test with Bypass VOL immediately to use info.log file which contains file name and data info
 # Avoid checking the correctness of the data if there are more than one section because the thread pool may still be 
@@ -103,4 +105,4 @@ echo "Test 3b: Reading single dataset in a single file in C only with multi-thre
 # The way thread pool is set up doesn't guarantee the data reading is finished during the check.
 echo ""
 echo "Test 3c: Reading single dataset in a single file in C only with thread pool"
-./posix_read_tpool -t ${NTHREADS_FOR_TPOOL} -d ${DIM1}x${DIM2} -m ${NSTEPS_QUEUE} -q ${NDATA_SECTIONS} -k
+./posix_read_tpool -t ${NTHREADS_FOR_TPOOL} -d ${DIM1}x${DIM2} -m ${NSTEPS_QUEUE} -q ${NDATA_SECTIONS}

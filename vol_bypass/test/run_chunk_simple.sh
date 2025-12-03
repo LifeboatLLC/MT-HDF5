@@ -16,7 +16,8 @@
 NTHREADS_FOR_MULTI=4
 NTHREADS_FOR_TPOOL=4
 NSTEPS_QUEUE=1024
-MAX_NELMTS=1048576
+# MAX_NELMTS=1048576
+MAX_NELMTS=67108864
 NDATA_SECTIONS=1
 
 # Dataset size = 32x4 bytes
@@ -53,7 +54,7 @@ unset HDF5_PLUGIN_PATH
 echo ""
 echo ""
 echo "Test 1a: Reading single dataset in a single file with straight HDF5 (no Bypass VOL) with no child thread"
-./h5_read -t 0 -d ${DIM1}x${DIM2} -c ${CHUNK_DIM1}x${CHUNK_DIM2} -q ${NDATA_SECTIONS} -k
+./h5_read -t 0 -d ${DIM1}x${DIM2} -c ${CHUNK_DIM1}x${CHUNK_DIM2} -q ${NDATA_SECTIONS}
 
 echo ""
 echo ""
@@ -73,13 +74,14 @@ export BYPASS_VOL_NO_TPOOL=true
 
 echo ""
 echo ""
+echo "		===================================================================		"
 echo "Test 2a: Reading single dataset in a single file with Bypass VOL running no child thread (no thread pool)"
-./h5_read -t 0 -d ${DIM1}x${DIM2} -c ${CHUNK_DIM1}x${CHUNK_DIM2} -q ${NDATA_SECTIONS} -k
+./h5_read -t 0 -d ${DIM1}x${DIM2} -c ${CHUNK_DIM1}x${CHUNK_DIM2} -q ${NDATA_SECTIONS}
 
 echo ""
 echo ""
 echo "Test 2b: Reading single dataset in a single file with Bypass VOL running multiple threads (no thread pool)"
-./h5_read -t ${NTHREADS_FOR_MULTI} -d ${DIM1}x${DIM2} -c ${CHUNK_DIM1}x${CHUNK_DIM2} -q ${NDATA_SECTIONS} -k
+./h5_read -t ${NTHREADS_FOR_MULTI} -d ${DIM1}x${DIM2} -c ${CHUNK_DIM1}x${CHUNK_DIM2} -q ${NDATA_SECTIONS}
 
 # Use the thread pool
 unset BYPASS_VOL_NO_TPOOL
@@ -87,23 +89,24 @@ unset BYPASS_VOL_NO_TPOOL
 echo ""
 echo ""
 echo "Test 2c: Reading single dataset in a single file running multi-threaded application and the thread pool in the Bypass VOL"
-./h5_read -t ${NTHREADS_FOR_MULTI} -d ${DIM1}x${DIM2} -c ${CHUNK_DIM1}x${CHUNK_DIM2} -q ${NDATA_SECTIONS} -k
+./h5_read -t ${NTHREADS_FOR_MULTI} -d ${DIM1}x${DIM2} -c ${CHUNK_DIM1}x${CHUNK_DIM2} -q ${NDATA_SECTIONS}
 
 echo ""
 echo ""
 echo "Test 2d: Reading single dataset in a single file with Bypass VOL with thread pool (serial application)"
-./h5_read -t 0 -d ${DIM1}x${DIM2} -c ${CHUNK_DIM1}x${CHUNK_DIM2} -q ${NDATA_SECTIONS} -k
+./h5_read -t 0 -d ${DIM1}x${DIM2} -c ${CHUNK_DIM1}x${CHUNK_DIM2} -q ${NDATA_SECTIONS}
 
 # The C test must follow the test with Bypass VOL immediately to use info.log file which contains file name and data info
 echo ""
 echo ""
+echo "		===================================================================		"
 echo "Test 3a: Reading single dataset in a single file in C only with no child thread (serial)"
-./posix_read_mthread -t 0 -d ${DIM1}x${DIM2} -c ${CHUNK_DIM1}x${CHUNK_DIM2} -q ${NDATA_SECTIONS} -k
+./posix_read_mthread -t 0 -d ${DIM1}x${DIM2} -c ${CHUNK_DIM1}x${CHUNK_DIM2} -q ${NDATA_SECTIONS}
 
 echo ""
 echo ""
 echo "Test 3b: Reading single dataset in a single file in C only running multi-thread (no thread pool)"
-./posix_read_mthread -t ${NTHREADS_FOR_MULTI} -d ${DIM1}x${DIM2} -c ${CHUNK_DIM1}x${CHUNK_DIM2} -q ${NDATA_SECTIONS} -k
+./posix_read_mthread -t ${NTHREADS_FOR_MULTI} -d ${DIM1}x${DIM2} -c ${CHUNK_DIM1}x${CHUNK_DIM2} -q ${NDATA_SECTIONS}
 
 # Checking the correctness of the data may not work if there are more than one section because the thread pool may still be 
 # reading the data during the check.  Each section corresponds to a H5Dread.  Sections are seperated by ### in info.log.
@@ -112,4 +115,4 @@ echo "Test 3b: Reading single dataset in a single file in C only running multi-t
 echo ""
 echo ""
 echo "Test 3c: Reading single dataset in a single file in C only with thread pool"
-./posix_read_tpool -t ${NTHREADS_FOR_TPOOL} -d ${DIM1}x${DIM2} -c ${CHUNK_DIM1}x${CHUNK_DIM2} -m ${NSTEPS_QUEUE} -q ${NDATA_SECTIONS} -k
+./posix_read_tpool -t ${NTHREADS_FOR_TPOOL} -d ${DIM1}x${DIM2} -c ${CHUNK_DIM1}x${CHUNK_DIM2} -m ${NSTEPS_QUEUE} -q ${NDATA_SECTIONS}
