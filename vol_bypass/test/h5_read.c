@@ -29,6 +29,8 @@ typedef struct {
     int   num_files;
     hid_t file_id;
     hid_t dset_id;
+    hid_t *dset_id_list;        /* Temporary ID list for reading multiple datasets */
+    hid_t *file_id_list;        /* Temporary ID list for reading multiple files    */
     int   data_section_id;
     int   *data; 
 } args_t;
@@ -153,7 +155,7 @@ void* read_partial_dset_with_hdf5(void* arg)
         free(data);
 
     return NULL;
-}
+} /* read_partial_dset_with_hdf5 */
 
 /*------------------------------------------------------------
  * Function executed by each thread: 
@@ -250,7 +252,74 @@ void* read_multiple_dsets_with_hdf5(void* arg)
     free(data);
 
     return NULL;
-}
+} /* read_multiple_dsets_with_hdf5 */
+
+/*------------------------------------------------------------
+ * Function executed by each thread: 
+ *
+ * Reading multiple datasets with HDF5 in the case of multiple
+ * datasets in a single file.  A temporary test.
+ *------------------------------------------------------------
+ */
+void* read_multiple_dsets_with_hdf5_tmp(void* arg)
+{
+    int thread_id = ((args_t *)arg)->thread_id;
+    hid_t file = ((args_t *)arg)->file_id;
+    hid_t *dset_id_list = ((args_t *)arg)->dset_id_list;
+    char dset_name[1024];
+    int *data, *p;
+    hsize_t dimsm[2];    /* memory space dimensions */
+    hid_t dataset;
+    hid_t dataspace, memspace;
+    htri_t is_regular_hyperslab;
+    hsize_t count[2];      /* size of the hyperslab in the file */
+    hsize_t offset[2];     /* hyperslab offset in the file */
+    hsize_t count_out[2];  /* size of the hyperslab in memory */
+    hsize_t offset_out[2]; /* hyperslab offset in memory */
+    int num_dsets_local;
+    int nerrors = 0;
+    int i, j, k;
+
+    if (hand.num_threads > 0)
+        num_dsets_local = hand.num_dsets / hand.num_threads;
+    else
+        num_dsets_local = hand.num_dsets; 
+
+
+    data = (int *)malloc(hand.dset_dim1 * hand.dset_dim2 * sizeof(int)); /* output buffer */
+
+    if (!data)
+        printf("data buffer is NULL\n");
+
+    for (k = 0; k < num_dsets_local; k++) {
+        //printf("thread_id=%d. dset_id_list[%d]=%ld\n", thread_id, k, dset_id_list[k]);
+
+	/* Read data */
+        H5Dread(dset_id_list[k], H5T_NATIVE_INT, H5S_ALL, H5S_ALL, H5P_DEFAULT, data);
+
+        /* Data verification if enabled */
+        if (hand.check_data && !hand.random_data) {
+	    /* Checking the correctness of the data if there are more than one H5Dread may not pass because the thread pool may still be 
+	     * reading the data during the check.  The way thread pool is set up doesn't guarantee the data reading is finished during the check.
+	     * Sleeping for a while may give the thread pool enough time to finish reading the data.
+	     */
+	    //sleep(1);
+
+            if (hand.num_threads > 0)
+                nerrors = check_data(data, (k * hand.num_threads + thread_id), 0);
+            else
+                nerrors = check_data(data, k, 0);
+        }
+
+        if (nerrors > 0)
+            printf("%d errors during data verification at line %d in the function %s\n", nerrors, __LINE__, __func__);
+    }
+
+    free(data);
+
+    return NULL;
+} /* read_multiple_dsets_with_hdf5_tmp */
+
 
 void* read_multiple_dsets_with_hdf5_multi(void* arg)
 {
@@ -328,7 +397,7 @@ void* read_multiple_dsets_with_hdf5_multi(void* arg)
         free(mem_dtype_ids);
 
     return NULL;
-}
+} /* read_multiple_dsets_with_hdf5_multi */
 
 /*------------------------------------------------------------
  * Function executed by each thread: 
@@ -337,6 +406,48 @@ void* read_multiple_dsets_with_hdf5_multi(void* arg)
  * dataset in multiple files
  *------------------------------------------------------------
  */
+void* read_multiple_files_with_hdf5_tmp(void* arg)
+{
+    int thread_id = ((args_t *)arg)->thread_id;
+    hid_t *dset_id_list = ((args_t *)arg)->dset_id_list;
+    int  num_files_local = 0;
+    int *data;
+    int nerrors = 0;
+    int i, j;
+
+    if (hand.num_threads > 0)
+        num_files_local = hand.num_files / hand.num_threads;
+    else
+        num_files_local = hand.num_files; 
+
+    data      = (int *)malloc(hand.dset_dim1 * hand.dset_dim2 * sizeof(int)); /* output buffer */
+
+    if (!data)
+        printf("data_out is NULL\n");
+
+    for (i = 0; i < num_files_local; i++) {
+        /* Read data */
+        H5Dread(dset_id_list[i], H5T_NATIVE_INT, H5S_ALL, H5S_ALL, H5P_DEFAULT, data);
+
+        /* Data verification if enabled */
+        if (hand.check_data && !hand.random_data) {
+            if (hand.num_threads > 0)
+                nerrors = check_data(data, (i * hand.num_threads + thread_id), 0);
+            else
+                nerrors = check_data(data, i, 0);
+        }
+
+        if (nerrors > 0)
+            printf("%d errors during data verification at line %d in the function %s\n", nerrors, __LINE__, __func__);
+    }
+
+    if (data)
+        free(data);
+
+    return NULL;
+} /* read_multiple_files_with_hdf5_tmp */
+
+
 void* read_multiple_files_with_hdf5(void* arg)
 {
     int thread_id = ((args_t *)arg)->thread_id;
@@ -449,7 +560,7 @@ void* read_multiple_files_with_hdf5(void* arg)
         free(memspace);
 
     return NULL;
-}
+} /* read_multiple_files_with_hdf5 */
 
 void* read_multiple_files_with_hdf5_multi(void* arg)
 {
@@ -572,7 +683,7 @@ void* read_multiple_files_with_hdf5_multi(void* arg)
         free(mem_dtype_ids);
 
     return NULL;
-}
+} /* read_multiple_files_with_hdf5_multi */
 
 /*------------------------------------------------------------
  * Start to test the case of a single dataset in a single file
@@ -768,7 +879,7 @@ launch_single_file_single_dset_read(void)
 
 error:
     return -1;
-}
+} /* launch_single_file_single_dset_read */
 
 /*------------------------------------------------------------
  * Start to test the case of multiple datasets in a single file
@@ -839,13 +950,259 @@ launch_single_file_multiple_dset_read()
 
 error:
     return -1;
-}
+} /* launch_single_file_multiple_dset_read */
+
+/*------------------------------------------------------------
+ * Start to test the case of multiple datasets in a single file
+ * with multi-thread with HDF5.  At this moment, only H5Dread 
+ * is thread-safe.
+ *------------------------------------------------------------
+ */
+int
+launch_single_file_multiple_dset_read_tmp()
+{
+    hid_t       file;
+    hid_t       dataset; /* handles */
+    int         i, j, k;
+    pthread_t threads[hand.num_threads];
+    int thread_ids[hand.num_threads];
+    args_t info[hand.num_threads];
+    int *p, *data_out = NULL;
+    char file_name[1024];
+    char dset_name[1024];
+    int fp;
+    struct timeval begin, end;
+
+    sprintf(file_name, "%s.h5", FILE_NAME);
+
+    /* Make sure the info.log file is deleted before running each round */
+    if (access("info.log", F_OK) == 0 && remove("info.log") != 0) {
+	printf("unable to delete existing info.log.  Must delete it by hand before running this test.\n");
+	exit(1);
+    }
+
+    /* Open the file */
+    file = H5Fopen(file_name, H5F_ACC_RDONLY, H5P_DEFAULT);
+
+    if (hand.num_threads == 0) {
+        args_t single_info;
+
+	single_info.thread_id = 0;
+	single_info.file_id = file;
+	single_info.data = NULL;  /* Memory buffer is allocated in the function read_multiple_files_with_hdf5 */
+
+        single_info.dset_id_list = (hid_t *)malloc(sizeof(hid_t) * hand.num_dsets);
+
+        /* Open all datasets */
+        for (i = 0; i < hand.num_dsets; i++) {
+            sprintf(dset_name, "%s%d", DATASETNAME, i + 1);
+            single_info.dset_id_list[i] = H5Dopen2(file, dset_name, H5P_DEFAULT);
+        }
+ 
+        gettimeofday(&begin, 0);
+
+	/* Use H5Dread_multi to read from multiple datasets if enabled */
+        if (hand.multi_dsets)
+            read_multiple_dsets_with_hdf5_multi(&single_info);
+        else
+            read_multiple_dsets_with_hdf5_tmp(&single_info);
+
+        gettimeofday(&end, 0);
+
+	/* Close all datasets */
+        for (i = 0; i < hand.num_dsets; i++) {
+            H5Dclose(single_info.dset_id_list[i]);
+        }
+
+        free(single_info.dset_id_list);
+    } else {
+        int num_dsets_local;
+
+        num_dsets_local = hand.num_dsets / hand.num_threads;
+
+	for (i = 0; i < hand.num_threads; i++)
+            info[i].dset_id_list = (hid_t *)malloc(sizeof(hid_t) * num_dsets_local);
+
+        /* Open all datasets */
+        k = 0;
+
+        for (i = 0; i < hand.num_threads; i++) {
+            for (j = 0; j < num_dsets_local; j++) {
+                k++;
+                sprintf(dset_name, "%s%d", DATASETNAME, k);
+                info[i].dset_id_list[j] = H5Dopen2(file, dset_name, H5P_DEFAULT);
+            } 
+        }
+
+        gettimeofday(&begin, 0);
+
+	/* Create threads to read the multiple datasets */
+	for (i = 0; i < hand.num_threads; i++) {
+	    info[i].thread_id = i;
+	    info[i].file_id = file;
+	    pthread_create(&threads[i], NULL, read_multiple_dsets_with_hdf5_tmp, &info[i]);
+	}
+
+	/* Wait for threads to complete */
+	for (i = 0; i < hand.num_threads; i++) {
+	    pthread_join(threads[i], NULL);
+	}
+
+        gettimeofday(&end, 0);
+
+	/* Close all datasets */
+        for (i = 0; i < hand.num_threads; i++) {
+            for (j = 0; j < num_dsets_local; j++) {
+                H5Dclose(info[i].dset_id_list[j]);
+            }
+        }
+
+	for (i = 0; i < hand.num_threads; i++)
+            free(info[i].dset_id_list);
+    }
+
+    save_statistics(begin, end);
+
+    H5Fclose(file);
+
+    return 0;
+
+error:
+    return -1;
+} /* launch_single_file_multiple_dset_read_tmp */
 
 /*------------------------------------------------------------
  * Start to test the case of a single dataset in multiple files
  * with multi-thread with HDF5 and C
  *------------------------------------------------------------
  */
+int
+launch_multiple_file_read_tmp(int num_files)
+{
+    pthread_t threads[hand.num_threads];
+    int thread_ids[hand.num_threads];
+    args_t info[hand.num_threads];
+    int  num_files_local = 0;
+    char file_name[1024];
+    char dset_name[1024];
+    int  i, j, k;
+    int  *data_out = NULL;
+    struct timeval begin, end;
+
+    /* Make sure the info.log file is deleted before running each round */
+    if (access("info.log", F_OK) == 0 && remove("info.log") != 0) {
+	printf("unable to delete existing info.log.  Must delete it by hand before running this test.\n");
+	exit(1);
+    }
+
+    if (hand.num_threads == 0) {
+        args_t info;
+
+        num_files_local = hand.num_files; 
+
+        info.file_id_list   = (hid_t *)malloc(num_files_local * sizeof(hid_t));
+        info.dset_id_list   = (hid_t *)malloc(num_files_local * sizeof(hid_t));
+
+	/* Open all the files and their datasets */
+        for (i = 0; i < num_files_local; i++) {
+	    /* When a single dataset in multiple files is created, different dataset names were used
+	     * since Bypass VOL uses names to identify datasets.  The numbers in dataset names match
+             * the number in file names.
+	     */
+            sprintf(file_name, "%s%d.h5", FILE_NAME, i + 1);
+	    sprintf(dset_name, "%s%d", DATASETNAME, i + 1);
+
+            /* Open the file and the dataset */
+            info.file_id_list[i]    = H5Fopen(file_name, H5F_ACC_RDONLY, H5P_DEFAULT);
+
+            info.dset_id_list[i] = H5Dopen2(info.file_id_list[i], dset_name, H5P_DEFAULT);
+        }
+
+        gettimeofday(&begin, 0);
+
+	/* Use H5Dread_multi to read from multiple datasets in different files if enabled */
+        if (hand.multi_dsets)
+            read_multiple_files_with_hdf5_multi(&info);
+        else
+            read_multiple_files_with_hdf5_tmp(&info);
+        
+	gettimeofday(&end, 0);
+
+	/* Close all the files and their datasets */
+        for (i = 0; i < num_files_local; i++) {
+            H5Dclose(info.dset_id_list[i]);
+            H5Fclose(info.file_id_list[i]);
+        }
+
+        if (info.file_id_list)
+            free(info.file_id_list);
+        if (info.dset_id_list)
+            free(info.dset_id_list);
+    } else {
+        args_t info[hand.num_threads];
+
+        num_files_local = hand.num_files / hand.num_threads;
+
+	for (i = 0; i < hand.num_threads; i++) {
+            info[i].file_id_list = (hid_t *)malloc(sizeof(hid_t) * num_files_local);
+            info[i].dset_id_list = (hid_t *)malloc(sizeof(hid_t) * num_files_local);
+        }
+
+	/* Open all files and their datasets */
+        k = 0;
+
+        for (i = 0; i < hand.num_threads; i++) {
+            for (j = 0; j < num_files_local; j++) {
+                k++;
+
+                sprintf(file_name, "%s%d.h5", FILE_NAME, k);
+                info[i].file_id_list[j]    = H5Fopen(file_name, H5F_ACC_RDONLY, H5P_DEFAULT);
+
+                sprintf(dset_name, "%s%d", DATASETNAME, k);
+                info[i].dset_id_list[j] = H5Dopen2(info[i].file_id_list[j], dset_name, H5P_DEFAULT);
+            } 
+        }
+
+	gettimeofday(&begin, 0);
+
+	/* Create threads to read the multiple files with HDF5 */
+	for (i = 0; i < hand.num_threads; i++) {
+	    info[i].thread_id = i;
+	    info[i].num_files = num_files; /* Change it to num_files_local? */
+
+	    pthread_create(&threads[i], NULL, read_multiple_files_with_hdf5_tmp, &info[i]);
+	}
+
+	/* Wait for threads to complete */
+	for (i = 0; i < hand.num_threads; i++) {
+	    pthread_join(threads[i], NULL);
+	}
+
+	gettimeofday(&end, 0);
+
+	/* Close all files and their datasets */
+        for (i = 0; i < hand.num_threads; i++) {
+            for (j = 0; j < num_files_local; j++) {
+                H5Dclose(info[i].dset_id_list[j]);
+                H5Fclose(info[i].file_id_list[j]);
+            }
+        }
+
+	for (i = 0; i < hand.num_threads; i++) {
+            free(info[i].dset_id_list);
+            free(info[i].file_id_list);
+    	}
+    }
+
+    save_statistics(begin, end);
+
+    return 0;
+
+error:
+    return -1;
+} /* launch_multiple_file_read_tmp */
+
+
 int
 launch_multiple_file_read(int num_files)
 {
@@ -898,7 +1255,7 @@ launch_multiple_file_read(int num_files)
 
 error:
     return -1;
-}
+} /* launch_multiple_file_read */
 
 /*------------------------------------------------------------
  * Main function
@@ -920,12 +1277,13 @@ main(int argc, char **argv)
     if (hand.num_files == 1 && hand.num_dsets == 1)
         launch_single_file_single_dset_read();
     else if (hand.num_files == 1 && hand.num_dsets > 1)
-        launch_single_file_multiple_dset_read();
+        //launch_single_file_multiple_dset_read();
+        launch_single_file_multiple_dset_read_tmp();
     else if (hand.num_files > 1)
-        launch_multiple_file_read(hand.num_files);
+        launch_multiple_file_read_tmp(hand.num_files);
 
     /* Print out the performance statistics */
     report_statistics();
 
     return 0;
-}
+} /* main */

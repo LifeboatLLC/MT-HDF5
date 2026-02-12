@@ -26,8 +26,8 @@
 #define H5VL_BYPASS_VERSION     0
 
 #define POSIX_MAX_IO_BYTES INT_MAX
-#define FILE_STUFF_SIZE    32
-#define DSET_INFO_SIZE     32
+//#define FILE_STUFF_SIZE    32
+//#define DSET_INFO_SIZE     32
 #define INFO_SIZE          1024
 #define SEL_SIZE           1024
 #define DIM_RANK_MAX       32
@@ -35,6 +35,7 @@
 #define LOCAL_VECTOR_LEN   1024
 #define NUM_LOCAL_THREADS  4
 #define THREAD_STEP        1024
+#define NTHREADS_MIN       1
 #define NTHREADS_MAX       32
 #define BYPASS_NAME_SIZE_LONG   1024
 #define MIN(a, b)          (((a) < (b)) ? (a) : (b))
@@ -43,8 +44,6 @@
 
 pthread_mutex_t mutex_local;
 pthread_cond_t  cond_local;
-pthread_cond_t  cond_read_finished;
-pthread_cond_t  continue_local;
 
 int  nthreads_tpool       = NUM_LOCAL_THREADS;
 int  nsteps_tpool         = THREAD_STEP;
@@ -139,8 +138,6 @@ typedef struct task_queue_t {
     Bypass_task_t *bypass_queue_head_g;
     Bypass_task_t *bypass_queue_tail_g;
     int            tasks_in_queue;      /* Used only by the queue local to each thread when the thread pool isn't used */
-    int            tasks_unfinished;    /* The next two fields are only used for thread pool */
-    bool           all_tasks_enqueued;  /* Flag for H5Dread to notify the thread pool that it finished putting tasks in the queue */
 } task_queue_t;
 
 task_queue_t queue_for_tpool;

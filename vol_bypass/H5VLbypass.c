@@ -638,13 +638,11 @@ H5VL_bypass_init(hid_t vipl_id)
     if (nthreads_str)
         nthreads_tpool = atoi(nthreads_str);
 
-    /* The minimal number of threads is 1 while the maximal is 32
-     * TODO: change the number 32 to a macro
-     */
-    if (nthreads_tpool < 1)
-        nthreads_tpool = 1;
-    else if (nthreads_tpool > 32)
-        nthreads_tpool = 32;
+    /* The minimal number of threads is 1 while the maximal is 32 */
+    if (nthreads_tpool < NTHREADS_MIN)
+        nthreads_tpool = NTHREADS_MIN;
+    else if (nthreads_tpool > NTHREADS_MAX)
+        nthreads_tpool = NTHREADS_MAX;
 
     /* Retrieve the number of steps for the thread pool from the user's input.
      * The thread pool accumulates the number of steps (jobs) in the queue before
@@ -688,8 +686,6 @@ H5VL_bypass_init(hid_t vipl_id)
     pthread_mutex_init(&mutex_local, &attr);
 
     pthread_cond_init(&cond_local, NULL);
-    pthread_cond_init(&continue_local, NULL);
-    pthread_cond_init(&cond_read_finished, NULL);
 
     /* Start threads for the thread pool to process the data */
     for (i = 0; i < nthreads_tpool; i++) {
@@ -724,6 +720,7 @@ H5VL_bypass_term(void)
     FILE *log_fp;
     int   i;
     void  *thread_ret = NULL;
+    bool  locked = false;
     herr_t ret_value = 0;
 
 #ifdef ENABLE_BYPASS_LOGGING
@@ -738,11 +735,25 @@ H5VL_bypass_term(void)
 
     /* If H5Dread isn't even called in the application, the thread pool is waiting
      * for this condition variable. This broadcast tells the thread pool to stop
-     * waiting.  Turning on the 'all_tasks_enqueued' variable stops the while
-     * loop for pthread_cond_wait in thread pool. */
-    queue_for_tpool.all_tasks_enqueued = true;
+     * waiting.
+     */  
+    if (pthread_mutex_lock(&mutex_local) < 0) {
+        printf("In %s of %s at line %d: pthread_mutex_lock failed\n", __func__, __FILE__, __LINE__);
+        ret_value = -1;
+        goto done;
+    }
+
+    locked = true;
 
     pthread_cond_broadcast(&cond_local);
+
+    if (pthread_mutex_unlock(&mutex_local) < 0) {
+        printf("In %s of %s at line %d: pthread_mutex_unlock failed\n", __func__, __FILE__, __LINE__);
+        ret_value = -1;
+        goto done;
+    }
+
+    locked = false;
 
     /* Doesn't stop if an error happens */
     for (i = 0; i < nthreads_tpool; i++) {
@@ -754,6 +765,7 @@ H5VL_bypass_term(void)
         }
     }
 
+#ifdef TMP
     /* Open the log file and output the following info:
      * - file name
      * - dataset name
@@ -785,6 +797,7 @@ H5VL_bypass_term(void)
 	fprintf(log_fp, "###\n");
 
     fclose(log_fp);
+#endif
 
     /* pthread_join has been called, just destroy the queue directly */
     bypass_queue_destroy(&queue_for_tpool, true);
@@ -797,8 +810,10 @@ H5VL_bypass_term(void)
     /* Release thread resources */
     pthread_mutex_destroy(&mutex_local);
     pthread_cond_destroy(&cond_local);
-    pthread_cond_destroy(&cond_read_finished);
-    pthread_cond_destroy(&continue_local);
+
+done:
+    if (locked)
+        pthread_mutex_unlock(&mutex_local);
 
     return ret_value;
 } /* end H5VL_bypass_term() */
@@ -2018,13 +2033,14 @@ start_thread_for_pool(void *args)
             goto done;
         }
 
-        // fprintf(stderr, "thread %d: before wait\n", thread_id);
-        /* If no tasks are available to work on, just wait.  Not sure if stop_tpool is useful. */
+	//fprintf(stderr, "\t%s: %d: thread %d before wait\n", __func__, __LINE__, thread_id);
+
+	/* If no tasks are available to work on, just wait.  Not sure if stop_tpool is useful. */
         while (queue_for_tpool.tasks_in_queue == 0 && !stop_tpool) {
             pthread_cond_wait(&cond_local, &mutex_local);
         }
 
-        // fprintf(stderr, "after wait\n");
+	//fprintf(stderr, "\t%s: %d: thread %d after wait\n", __func__, __LINE__, thread_id);
 
         /* tasks_in_queue can be smaller (LEFTOVER being passed into
          * submit_task() in process_vectors()) or larger (submit_task() keeps adding
@@ -2050,8 +2066,9 @@ start_thread_for_pool(void *args)
             goto done;
         }
 
-        // fprintf(stderr, "before reading data\n");
-        for (i = 0; i < local_count; i++) {
+	//fprintf(stderr, "\t%s: %d: thread %d before reading data, local_count = %d\n", __func__, __LINE__, thread_id, local_count);
+
+	for (i = 0; i < local_count; i++) {
             if (read_big_data(tasks[i]->file->u.file.fd, tasks[i]->vec_buf, tasks[i]->size,
                           tasks[i]->addr) < 0)
             {
@@ -2069,27 +2086,34 @@ start_thread_for_pool(void *args)
 
             tasks[i]->file->u.file.num_reads--;
 
+	    load_task_count = atomic_load(tasks[i]->task_count_ptr);
+
+	    //fprintf(stderr, "\t%s: %d: thread %d, i = %d load_task_count = %d\n", __func__, __LINE__, thread_id, i, load_task_count);
+
 	    /* Decrement the task count that this pointer points to */
 	    atomic_fetch_sub(tasks[i]->task_count_ptr, 1);
 
 	    load_task_count = atomic_load(tasks[i]->task_count_ptr);
 
+	    /* When the task count drops to zerp, notify the invoking thread to finish the dataset
+	     * read function.  Use the signal function instead of broadcast because it's notifying
+	     * one thread only.
+	     */
 	    if (load_task_count == 0)
-	        pthread_cond_broadcast(tasks[i]->local_condition_ptr);
+	        //pthread_cond_broadcast(tasks[i]->local_condition_ptr);
+	        pthread_cond_signal(tasks[i]->local_condition_ptr);
+
+	    //fprintf(stderr, "\t%s: %d: thread %d, i = %d, load_task_count = %d\n", __func__, __LINE__, thread_id, i, load_task_count);
 
             /* When there is no task left in the queue and all the reads finish for
              * the current file, signal the main process that this file can be closed.
              */
-            if ((queue_for_tpool.tasks_in_queue == 0) && queue_for_tpool.all_tasks_enqueued &&
-                tasks[i]->file->u.file.num_reads == 0) {
-
+	    if ((queue_for_tpool.tasks_in_queue == 0) && tasks[i]->file->u.file.num_reads == 0) {
                 /* There are currently no reads active on this file - it may be closed */
                 tasks[i]->file->u.file.read_started = false;
 
-                pthread_cond_signal(&(tasks[i]->file->u.file.close_ready));
+                pthread_cond_broadcast(&(tasks[i]->file->u.file.close_ready));
             }
-
-            queue_for_tpool.tasks_unfinished--;
 
             if (pthread_mutex_unlock(&mutex_local) != 0) {
                 fprintf(stderr, "failed to unlock mutex\n");
@@ -2105,29 +2129,11 @@ start_thread_for_pool(void *args)
 
             tasks[i] = NULL;
         }
-
-#ifdef TMP
-        if (pthread_mutex_lock(&mutex_local) != 0) {
-            fprintf(stderr, "failed to lock mutex\n");
-            ret_value = (void*) -1;
-            goto done;
-        }
-
-        /* Signal that all tasks finished in the queue */
-	if (queue_for_tpool.tasks_unfinished == 0)
-	    pthread_cond_broadcast(&cond_read_finished);
-
-	if (pthread_mutex_unlock(&mutex_local) != 0) {
-	    fprintf(stderr, "failed to unlock mutex\n");
-	    ret_value = (void*) -1;
-	    goto done;
-	}
-#endif
     }
 
 done:
     /* Attempt to clean up queue memory that we took ownership of */
-    if (ret_value < 0) {
+    if (ret_value < (void*) 0) {
         fprintf(stderr, "thread idx %d in pool failed\n", thread_id);
 
         for (i = 0; i < local_count; i++) {
@@ -2308,15 +2314,7 @@ process_vectors(task_queue_t *task_queue, void *rbuf, sel_info_t *selection_info
 		goto done;
 	    }
 
-	    task_queue->tasks_unfinished++;
-
 	    local_count_for_signal++;
-
-	    if (pthread_mutex_unlock(&mutex_local) != 0) {
-		fprintf(stderr, "failed to unlock local mutex\n");
-		ret_value = -1;
-		goto done;
-	    }
 
 	    /* Let the queue accumulate nsteps_tpool entries then signal the thread pool
 	     * to read them */
@@ -2324,8 +2322,15 @@ process_vectors(task_queue_t *task_queue, void *rbuf, sel_info_t *selection_info
 		pthread_cond_broadcast(&cond_local);
 		local_count_for_signal = 0;
 	    }
+
+	    if (pthread_mutex_unlock(&mutex_local) != 0) {
+		fprintf(stderr, "failed to unlock local mutex\n");
+		ret_value = -1;
+		goto done;
+	    }
 	}
 
+#ifdef TMP
         /* Save the info for the C log file */
         {
 	    if (pthread_mutex_lock(&mutex_local) != 0) {
@@ -2368,6 +2373,7 @@ process_vectors(task_queue_t *task_queue, void *rbuf, sel_info_t *selection_info
 		goto done;
 	    }
 	}
+#endif
 
         /* Update file sequence */
         if (io_len == file_len[file_seq_i])
@@ -2388,8 +2394,21 @@ process_vectors(task_queue_t *task_queue, void *rbuf, sel_info_t *selection_info
 
     /* If there is any leftover entries in the queue, signal the thread pool to
      * read them.  The tasks have been enqueued earlier. */
-    if (local_count_for_signal > 0 && local_count_for_signal < nsteps_tpool)
+    if (local_count_for_signal > 0 && local_count_for_signal < nsteps_tpool) {
+        if (pthread_mutex_lock(&mutex_local) != 0) {
+	    printf("In %s of %s at line %d: pthread_mutex_lock failed\n", __func__, __FILE__, __LINE__);
+	    ret_value = -1;
+	    goto done;
+        }
+
         pthread_cond_broadcast(&cond_local);
+
+        if (pthread_mutex_unlock(&mutex_local) != 0) {
+	    printf("In %s of %s at line %d: pthread_mutex_unlock failed\n", __func__, __FILE__, __LINE__);
+	    ret_value = -1;
+	    goto done;
+        }
+    }
 
     if (H5Ssel_iter_close(file_iter_id) < 0) {
         fprintf(stderr, "failed to close file sel iterator\n");
@@ -2787,8 +2806,6 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
                 goto done;
             }
 
-            queue_for_tpool.all_tasks_enqueued = false;
-
             /* At least one read is being done through the Bypass VOL.
              * We should block until all tasks are complete. */
             must_block = true;
@@ -2801,6 +2818,9 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
                 ret_value = -1;
                 goto done;
             }
+
+            load_task_count = atomic_load(&local_task_count);
+            //printf("%s: %d: load_task_count = %d\n", __func__, __LINE__, load_task_count);
 
             selection_info.dtype_size = bypass_dset->dtype_info.size;
 
@@ -2847,6 +2867,10 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
 			ret_value = -1;
 			goto done;
 		    }
+
+                    load_task_count = atomic_load(&local_task_count);
+	            //fprintf(stderr, "%s: %d: load_task_count = %d\n", __func__, __LINE__, load_task_count);
+
                 }
             } else {
                 fprintf(stderr, "unsupported dataset layout\n");
@@ -2862,6 +2886,8 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
 	    }
 
 	    acquired_global = false;
+
+            //printf("%s: %d\n", __func__, __LINE__);
 
             /* Each thread reads from its own task queue if 'BYPASS_VOL_NO_TPOOL' environment variable is set */
             if (no_tpool) {
@@ -2888,6 +2914,7 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
                 }
             }
 
+#ifdef TMP
             /* Save the info for the C log file */
             {
 		if (pthread_mutex_lock(&mutex_local) != 0) {
@@ -2916,6 +2943,8 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
 		    goto done;
 		}
             }
+#endif
+
         }
 
     }
@@ -2925,51 +2954,44 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
         *req = H5VL_bypass_new_obj(*req, under_vol_id);
 
     if (!no_tpool) {
-	/* Signal the thread pool to finish this read. Notify the thread pool that it finished putting tasks in the queue. */
-	pthread_mutex_lock(&mutex_local);
-	queue_for_tpool.all_tasks_enqueued = true;
-	pthread_cond_broadcast(&cond_local);  /* Why do this signal/broadcast? */
-	pthread_mutex_unlock(&mutex_local);
-
 	/* Do not return until the thread pool finishes the read */
 	/* TBD: Enforcing this will become more complicated once multiple
 	 * application threads making concurrent H5Dread() calls is supported. */
-	/*if (pthread_mutex_lock(&mutex_local) < 0) {
+	if (pthread_mutex_lock(&mutex_local) < 0) {
 	    printf("In %s of %s at line %d: pthread_mutex_lock failed\n", __func__, __FILE__, __LINE__);
 	    ret_value = -1;
 	    goto done;
-	}*/
+	}
 
-	//locked = true;
+	locked = true;
 
 	/* Only finish H5Dread() once all threads are inactive and no tasks are undone */
 	/* Only block here if Bypass VOL was used for the read */
 	if (must_block) {
-	    do {
-		load_task_count = atomic_load(&local_task_count);
-		//printf("load_task_count = %d\n", load_task_count);
-		//pthread_cond_wait(&cond_read_finished, &mutex_local);
+	    load_task_count = atomic_load(&local_task_count);
+	    //fprintf(stderr, "%s: %d: load_task_count = %d\n", __func__, __LINE__, load_task_count);
+
+	    while (load_task_count > 0) {
 		pthread_cond_wait(&local_condition, &mutex_local);
-	    } while (load_task_count > 0);
+		load_task_count = atomic_load(&local_task_count);
+	        //fprintf(stderr, "%s: %d: load_task_count = %d\n", __func__, __LINE__, load_task_count);
+            }
 	}
 
-	if (ret_value < 0) {
-	    fprintf(stderr, "Unable to query thread active status\n");
-	    goto done;
-	}
+	//fprintf(stderr, "%s: %d: load_task_count = %d\n", __func__, __LINE__, load_task_count);
 
-	/*if (pthread_mutex_unlock(&mutex_local) < 0) {
+	if (pthread_mutex_unlock(&mutex_local) < 0) {
 	    printf("In %s of %s at line %d: pthread_mutex_unlock failed\n", __func__, __FILE__, __LINE__);
 	    ret_value = -1;
 	    goto done;
 	}
 
-	locked = false;*/
-
-	//assert(queue_for_tpool.tasks_unfinished == 0);
+	locked = false;
     }
 
     pthread_cond_destroy(&local_condition);
+
+    //fprintf(stderr, "%s: %d\n", __func__, __LINE__);
 
 done:
     if (locked)

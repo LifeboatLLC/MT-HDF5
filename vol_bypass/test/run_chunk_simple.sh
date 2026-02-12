@@ -2,7 +2,7 @@
 
 # Modify the following variables as command line options for the h5_create.c, h5_read.c.
 # The number of data sections isn't used in posix_read_mthread.c, and posix_read_tpool.c:
-#     NTHREADS_FOR_MULTI: number of threads for the multi-thread application
+#     NTHREADS_FOR_MULTI: number of threads for the multi-threaded application
 #     NTHREADS_FOR_TPOOL: number of threads for the thread pool
 #     NSTEPS_QUEUE:       number of tasks to be put into thread pool queue in each step
 #     MAX_NELMTS:         maximal number of data elements (not in bytes) for each data pieces to be read
@@ -16,9 +16,8 @@
 NTHREADS_FOR_MULTI=4
 NTHREADS_FOR_TPOOL=4
 NSTEPS_QUEUE=1024
-# MAX_NELMTS=1048576
-MAX_NELMTS=67108864
-NDATA_SECTIONS=1
+MAX_NELMTS=1048576
+NDATA_SECTIONS=4
 
 # Dataset size = 32x4 bytes
 # DIM1=4
@@ -65,6 +64,7 @@ echo "Test 1b: Reading single dataset in a single file with straight HDF5 (no By
 export HDF5_PLUGIN_PATH=/Users/raylu/Lifeboat/HDF/Matt/MT-HDF5_no_tpool/vol_bypass
 export HDF5_VOL_CONNECTOR="bypass under_vol=0;under_info={};"
 export DYLD_LIBRARY_PATH=$DYLD_LIBRARY_PATH:/Users/raylu/Lifeboat/HDF/Jordan/build/hdf5/lib:$HDF5_PLUGIN_PATH
+
 export BYPASS_VOL_NTHREADS=${NTHREADS_FOR_TPOOL}
 export BYPASS_VOL_NSTEPS=${NSTEPS_QUEUE}
 export BYPASS_VOL_MAX_NELMTS=${MAX_NELMTS}
@@ -97,22 +97,22 @@ echo "Test 2d: Reading single dataset in a single file with Bypass VOL with thre
 ./h5_read -t 0 -d ${DIM1}x${DIM2} -c ${CHUNK_DIM1}x${CHUNK_DIM2} -q ${NDATA_SECTIONS}
 
 # The C test must follow the test with Bypass VOL immediately to use info.log file which contains file name and data info
-echo ""
-echo ""
-echo "		===================================================================		"
-echo "Test 3a: Reading single dataset in a single file in C only with no child thread (serial)"
-./posix_read_mthread -t 0 -d ${DIM1}x${DIM2} -c ${CHUNK_DIM1}x${CHUNK_DIM2} -q ${NDATA_SECTIONS}
+# echo ""
+# echo ""
+# echo "		===================================================================		"
+# echo "Test 3a: Reading single dataset in a single file in C only with no child thread (serial)"
+# ./posix_read_mthread -t 0 -d ${DIM1}x${DIM2} -c ${CHUNK_DIM1}x${CHUNK_DIM2} -q ${NDATA_SECTIONS}
 
-echo ""
-echo ""
-echo "Test 3b: Reading single dataset in a single file in C only running multi-thread (no thread pool)"
-./posix_read_mthread -t ${NTHREADS_FOR_MULTI} -d ${DIM1}x${DIM2} -c ${CHUNK_DIM1}x${CHUNK_DIM2} -q ${NDATA_SECTIONS}
+# echo ""
+# echo ""
+# echo "Test 3b: Reading single dataset in a single file in C only running multi-thread (no thread pool)"
+# ./posix_read_mthread -t ${NTHREADS_FOR_MULTI} -d ${DIM1}x${DIM2} -c ${CHUNK_DIM1}x${CHUNK_DIM2} -q ${NDATA_SECTIONS}
 
 # Checking the correctness of the data may not work if there are more than one section because the thread pool may still be 
 # reading the data during the check.  Each section corresponds to a H5Dread.  Sections are seperated by ### in info.log.
 # The way thread pool is set up doesn't guarantee the data reading is finished during the check. The test program sleeps for
 # a second before checking the data, trying to give the thread pool enough time to finish reading the data.
-echo ""
-echo ""
-echo "Test 3c: Reading single dataset in a single file in C only with thread pool"
-./posix_read_tpool -t ${NTHREADS_FOR_TPOOL} -d ${DIM1}x${DIM2} -c ${CHUNK_DIM1}x${CHUNK_DIM2} -m ${NSTEPS_QUEUE} -q ${NDATA_SECTIONS}
+# echo ""
+# echo ""
+# echo "Test 3c: Reading single dataset in a single file in C only with thread pool"
+# ./posix_read_tpool -t ${NTHREADS_FOR_TPOOL} -d ${DIM1}x${DIM2} -c ${CHUNK_DIM1}x${CHUNK_DIM2} -m ${NSTEPS_QUEUE} -q ${NDATA_SECTIONS}
