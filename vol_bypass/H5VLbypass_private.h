@@ -124,13 +124,12 @@ typedef struct H5VL_bypass_t {
 typedef struct Bypass_task_t Bypass_task_t;
 
 typedef struct Bypass_task_t {
-    int            file_index; /* Ray: Remove it.  Index of the file containing the dset to read from in the file_stuff array */
     H5VL_bypass_t *file;
-    haddr_t        addr;       /* Location in filesystem file to read from */
+    haddr_t        addr;                 /* Location of filesystem file to read from or write to*/
     size_t         size;
-    void          *vec_buf;    /* User buffer to populate */
-    atomic_int    *task_count_ptr;
-    pthread_cond_t *local_condition_ptr;
+    void          *vec_buf;              /* User buffer */
+    atomic_int    *task_count_ptr;       /* This pointer keeps track of the number of tasks in the queue for the current thread */
+    pthread_cond_t *local_condition_ptr; /* This pointer passes the local condition variable for the current thread to the thread pool */
     Bypass_task_t *next;
 } Bypass_task_t;
 
