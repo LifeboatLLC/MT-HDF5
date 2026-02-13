@@ -347,8 +347,6 @@ launch_single_file_single_dset_read(void)
 		c_info[i].data = data_out;
 		c_info[i].fp = fp;
 
-		//printf("c_info[%d].file_info_entry_num = %d, file_info_num_allocated = %d\n", i, c_info[i].file_info_entry_num, file_info_num_allocated);
-
 		pthread_create(&threads[i], NULL, read_partial_dset_with_multiple_threads, &c_info[i]);
             }
 

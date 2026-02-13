@@ -2658,7 +2658,6 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
         ret_value = -1;
         goto done;
     }
-
     //fprintf(stderr, "In %s of %s at line %d: has_global = %d\n", __func__, __FILE__, __LINE__, has_global);
 
     /* Grab the global lock of the HDF5 library */
@@ -2755,6 +2754,14 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
             || file_space_id[j] == H5S_BLOCK || mem_space_id[j] == H5S_PLIST || file_space_id[j] == H5S_PLIST;
 
         if (read_use_native) {
+            /* Let go the global lock of the HDF5 library */
+	    if (acquired_global && H5TSmutex_release(&lock_count) != 0) {
+		fprintf(stderr, "In %s of %s at line %d: H5TSmutex_release failed\n", __func__, __FILE__, __LINE__);
+		ret_value = -1;
+		goto done;
+	    }
+
+	    acquired_global = false;
 
             /* Populate the array of under objects */
             under_vol_id = ((H5VL_bypass_t *)(dset[0]))->under_vol_id;
@@ -2886,8 +2893,6 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
 	    }
 
 	    acquired_global = false;
-
-            //printf("%s: %d\n", __func__, __LINE__);
 
             /* Each thread reads from its own task queue if 'BYPASS_VOL_NO_TPOOL' environment variable is set */
             if (no_tpool) {
