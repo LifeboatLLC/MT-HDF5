@@ -1,13 +1,12 @@
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *
- * Copyright by The HDF Group.                                               *
+ * Copyright by Lifeboat, LLC                                                *
  * All rights reserved.                                                      *
  *                                                                           *
- * This file is part of HDF5.  The full HDF5 copyright notice, including     *
- * terms governing use, modification, and redistribution, is contained in    *
- * the COPYING file, which can be found at the root of the source code       *
- * distribution tree, or in https://support.hdfgroup.org/ftp/HDF5/releases.  *
+ * The full copyright notice, including terms governing use, modification,   *
+ * and redistribution, is contained in the COPYING file, which can be found  *
+ * at the root of the source code distribution tree.                         *
  * If you do not have access to either file, you may request a copy from     *
- * help@hdfgroup.org.                                                        *
+ * help@lifeboat.llc                                                         *
  * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
 /*
@@ -128,7 +127,9 @@ typedef struct Bypass_task_t {
     haddr_t        addr;                 /* Location of filesystem file to read from or write to*/
     size_t         size;
     void          *vec_buf;              /* User buffer */
-    atomic_int    *task_count_ptr;       /* This pointer keeps track of the number of tasks in the queue for the current thread */
+    bool           read_data;            /* reading or writing data */
+    atomic_int    *task_count_ptr;       /* These two fields are used for multi-threaded application (not using the thread pool).
+                                          * This pointer keeps track of the number of tasks in the queue for the current thread */
     pthread_cond_t *local_condition_ptr; /* This pointer passes the local condition variable for the current thread to the thread pool */
     Bypass_task_t *next;
 } Bypass_task_t;
@@ -139,6 +140,9 @@ typedef struct task_queue_t {
     int            tasks_in_queue;      /* Used only by the queue local to each thread when the thread pool isn't used */
 } task_queue_t;
 
+/* The task queue for the thread pool.  If the application chooses not to use the thread pool (running multi-threaded),
+ * each thread has its own task queue.
+ */
 task_queue_t queue_for_tpool;
 
 typedef struct {
@@ -154,8 +158,10 @@ typedef struct {
     int     dtype_size;
 
     bool    memory_allocated;
-    atomic_int *task_count_ptr;
-    pthread_cond_t *local_condition_ptr;
+    atomic_int    *task_count_ptr;       /* These two fields are used for multi-threaded application (not using the thread pool).
+                                          * This pointer keeps track of the number of tasks in the queue for the current thread */
+    pthread_cond_t *local_condition_ptr; /* This pointer passes the local condition variable for the current thread to the thread pool */
+    bool    read_data;                   /* reading or writing data */
 } sel_info_t;
 
 static info_t *info_stuff;
