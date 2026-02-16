@@ -1,13 +1,12 @@
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *
- * Copyright by The HDF Group.                                               *
+ * Copyright by Lifeboat, LLC                                                *
  * All rights reserved.                                                      *
  *                                                                           *
- * This file is part of HDF5.  The full HDF5 copyright notice, including     *
- * terms governing use, modification, and redistribution, is contained in    *
- * the COPYING file, which can be found at the root of the source code       *
- * distribution tree, or in https://support.hdfgroup.org/ftp/HDF5/releases.  *
+ * The full copyright notice, including terms governing use, modification,   *
+ * and redistribution, is contained in the COPYING file, which can be found  *
+ * at the root of the source code distribution tree.                         *
  * If you do not have access to either file, you may request a copy from     *
- * help@hdfgroup.org.                                                        *
+ * help@lifeboat.llc                                                         *
  * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
 /*
@@ -1950,38 +1949,43 @@ done:
     return ret_value;
 }
 
-/* Break down into smaller sections if the data size is 2GB or bigger.  Need to change the type
- * of BUF to VOID to be more general */
+/* Break down into smaller sections if the data size is 2GB or bigger. */
 static herr_t
-read_big_data(int fd, int *buf, size_t size, off_t offset)
+read_or_write_data(int fd, void *buf, size_t size, off_t offset, bool read_data)
 {
-    herr_t ret_value = 0;
+    herr_t  ret_value = 0;
+    size_t  nbytes   = 0;  /* # of bytes to read       */
+    ssize_t bytes_processed = -1; /* # of bytes actually read */
 
     while (size > 0) {
-        int bytes_in   = 0;  /* # of bytes to read       */
-        int bytes_read = -1; /* # of bytes actually read */
+        nbytes   = 0;
+        bytes_processed = -1;
 
         /* Trying to read more bytes than the return type can handle is
          * undefined behavior in POSIX.
          */
         if (size > POSIX_MAX_IO_BYTES)
-            bytes_in = POSIX_MAX_IO_BYTES;
+            nbytes = POSIX_MAX_IO_BYTES;
         else
-            bytes_in = (int) size;
+            nbytes = size;
 
         do {
-            bytes_read = pread(fd, buf, bytes_in, offset);
-            if (bytes_read > 0)
-                offset += bytes_read;
+            if (read_data)
+                bytes_processed = pread(fd, buf, nbytes, offset);
+            else
+                bytes_processed = pwrite(fd, buf, nbytes, offset);
+
+            if (bytes_processed > 0)
+                offset += bytes_processed;
             
-            if (bytes_read == 0) {
+            if (bytes_processed == 0) {
                 fprintf(stderr, "file read encountered EOF\n");
                 ret_value = -1;
                 goto done;
             }
 
             /* Error messages for unexpected values of errno */
-            if (-1 == bytes_read) {
+            if (-1 == bytes_processed) {
                 switch (errno) {
                     case EAGAIN:
                     case EINTR:
@@ -1992,14 +1996,11 @@ read_big_data(int fd, int *buf, size_t size, off_t offset)
                         goto done;
                 }
             }
+        } while (-1 == bytes_processed && EINTR == errno);
 
-        } while (-1 == bytes_read && EINTR == errno);
-
-
-
-        if (bytes_read > 0) {
-            size -= (size_t)bytes_read;
-            buf = (int *)((char *)buf + bytes_read);
+        if (bytes_processed > 0) {
+            size -= (size_t)bytes_processed;
+            buf = (void *)((char *)buf + bytes_processed);
         }
     } /* end while */
 
@@ -2069,14 +2070,13 @@ start_thread_for_pool(void *args)
 	//fprintf(stderr, "\t%s: %d: thread %d before reading data, local_count = %d\n", __func__, __LINE__, thread_id, local_count);
 
 	for (i = 0; i < local_count; i++) {
-            if (read_big_data(tasks[i]->file->u.file.fd, tasks[i]->vec_buf, tasks[i]->size,
-                          tasks[i]->addr) < 0)
-            {
-                fprintf(stderr, "read_big_data failed within file %s\n", tasks[i]->file->u.file.name);
-                /* Return a failure code, but try to complete the rest of the read request.
-                 * This is important to properly decrement the reference count/num_reads on the local file object */
-                ret_value = (void *)-1;
-            }
+	    if (read_or_write_data(tasks[i]->file->u.file.fd, tasks[i]->vec_buf, tasks[i]->size,
+		       tasks[i]->addr, tasks[i]->read_data) < 0) {
+	        fprintf(stderr, "read_or_write_data failed within file %s\n", tasks[i]->file->u.file.name);
+	        /* Return a failure code, but try to complete the rest of the read request.
+	         * This is important to properly decrement the reference count/num_reads on the local file object */
+	        ret_value = (void *)-1;
+	    }
 
             if (pthread_mutex_lock(&mutex_local) != 0) {
                 fprintf(stderr, "failed to lock mutex\n");
@@ -2837,6 +2837,9 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
 	    /* This pointer passes the local condition variable for the current thread to the thread pool */
 	    selection_info.local_condition_ptr = &local_condition;
 
+            /* Indicate this operation is a read */
+            selection_info.read_data = true;
+
             if (H5D_CHUNKED == bypass_dset->layout) {
                 /* Iterate through all chunks and map the data selection in each chunk to the memory.
                  * Put the selections into a queue for the thread pool to read the data */
@@ -2905,8 +2908,8 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
 			goto done;
 		    }
 
-		    if (read_big_data(task->file->u.file.fd, task->vec_buf, task->size, task->addr) < 0) {
-			fprintf(stderr, "read_big_data failed within file %s\n", task->file->u.file.name);
+		    if (read_or_write_data(task->file->u.file.fd, task->vec_buf, task->size, task->addr, task->read_data) < 0) {
+			fprintf(stderr, "read_or_write_data failed within file %s\n", task->file->u.file.name);
 			/* Return a failure code, but try to complete the rest of the read request.
 			 * This is important to properly decrement the reference count/num_reads on the local file object */
 			ret_value = -1;
@@ -5703,6 +5706,7 @@ bypass_task_create(sel_info_t *sel_info, haddr_t addr, size_t size, void *buf) {
     ret_value->vec_buf = buf;
     ret_value->task_count_ptr = sel_info->task_count_ptr;
     ret_value->local_condition_ptr = sel_info->local_condition_ptr;
+    ret_value->read_data = sel_info->read_data;
 
     /* Will be populated after this task is inserted into queue */
     ret_value->next = NULL;
