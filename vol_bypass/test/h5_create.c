@@ -1,20 +1,16 @@
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *
- * Copyright by The HDF Group.                                               *
+ * Copyright by Lifeboat, LLC                                                *
  * All rights reserved.                                                      *
  *                                                                           *
- * This file is part of HDF5.  The full HDF5 copyright notice, including     *
- * terms governing use, modification, and redistribution, is contained in    *
- * the COPYING file, which can be found at the root of the source code       *
- * distribution tree, or in https://www.hdfgroup.org/licenses.               *
+ * The full copyright notice, including terms governing use, modification,   *
+ * and redistribution, is contained in the COPYING file, which can be found  *
+ * at the root of the source code distribution tree.                         *
  * If you do not have access to either file, you may request a copy from     *
- * help@hdfgroup.org.                                                        *
+ * help@lifeboat.llc                                                         *
  * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
-/*
- *   This example reads hyperslab from the SDS.h5 file
- *   created by h5_write.c program into two-dimensional
- *   plane of the three-dimensional array.
- *   Information about dataset in the SDS.h5 file is obtained.
+/* 
+ * Create the file for benchmarking the performance of data reading
  */
 #include "common.h"
 #include "common.c"

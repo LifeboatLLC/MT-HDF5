@@ -1,20 +1,16 @@
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *
- * Copyright by The HDF Group.                                               *
+ * Copyright by Lifeboat, LLC                                                *
  * All rights reserved.                                                      *
  *                                                                           *
- * This file is part of HDF5.  The full HDF5 copyright notice, including     *
- * terms governing use, modification, and redistribution, is contained in    *
- * the COPYING file, which can be found at the root of the source code       *
- * distribution tree, or in https://www.hdfgroup.org/licenses.               *
+ * The full copyright notice, including terms governing use, modification,   *
+ * and redistribution, is contained in the COPYING file, which can be found  *
+ * at the root of the source code distribution tree.                         *
  * If you do not have access to either file, you may request a copy from     *
- * help@hdfgroup.org.                                                        *
+ * help@lifeboat.llc                                                         *
  * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
 /*
- *   This example reads hyperslab from the SDS.h5 file
- *   created by h5_write.c program into two-dimensional
- *   plane of the three-dimensional array.
- *   Information about dataset in the SDS.h5 file is obtained.
+ *   Benchmark the performance of reading data
  */
 #include "common.h"
 #include "common.c"
@@ -741,8 +737,6 @@ launch_single_file_single_dset_read(void)
     file    = H5Fopen(file_name, H5F_ACC_RDONLY, fapl);
     dataset = H5Dopen2(file, DATASETNAME, H5P_DEFAULT);
 
-    gettimeofday(&begin, 0);
-
     if (hand.num_threads == 0) {
         args_t info;
 
@@ -757,6 +751,9 @@ launch_single_file_single_dset_read(void)
 		printf("data_out is NULL\n");
 		goto error;
 	    }
+
+            /* Start the time */
+            gettimeofday(&begin, 0);
 
 	    for (j = 0; j < hand.num_data_sections; j++) {
 		info.thread_id = 0;
@@ -773,6 +770,9 @@ launch_single_file_single_dset_read(void)
 		if (nerrors > 0)
 		    printf("%d errors during data verification at line %d in the function %s\n", nerrors, __LINE__, __func__);
             }
+
+	    /* Stop time */
+	    gettimeofday(&end, 0);
         } else {
 	    data_out = (int *)calloc(hand.dset_dim1 * hand.dset_dim2, sizeof(int)); /* output buffer */
 
@@ -786,7 +786,13 @@ launch_single_file_single_dset_read(void)
 	    info.data_section_id = 0; /* No section */
 	    info.data = data_out;
 
+            /* Start the time */
+            gettimeofday(&begin, 0);
+
 	    read_partial_dset_with_hdf5(&info);
+
+	    /* Stop time */
+	    gettimeofday(&end, 0);
 
 	    /* Data verification if enabled.  Do not enable this option (-k) for performance study */
 	    if (hand.check_data && !hand.random_data)
@@ -809,6 +815,9 @@ launch_single_file_single_dset_read(void)
 		printf("data_out is NULL\n");
 		goto error;
 	    }
+
+            /* Start the time */
+            gettimeofday(&begin, 0);
 
             /* Read the data section by section and check its correctness */
 	    for (j = 0; j < hand.num_data_sections; j++) {
@@ -833,6 +842,9 @@ launch_single_file_single_dset_read(void)
 		if (nerrors > 0)
 		    printf("%d errors during data verification at line %d in the function %s\n", nerrors, __LINE__, __func__);
             }
+
+            /* Stop time */
+	    gettimeofday(&end, 0);
         } else {
 	    data_out = (int *)calloc(hand.dset_dim1 * hand.dset_dim2, sizeof(int)); /* output buffer */
 
@@ -840,6 +852,9 @@ launch_single_file_single_dset_read(void)
 		printf("data_out is NULL\n");
 		goto error;
 	    }
+
+            /* Start the time */
+            gettimeofday(&begin, 0);
 
 	    /* Create threads to read the data in the entire buffer */
 	    for (i = 0; i < hand.num_threads; i++) {
@@ -854,6 +869,9 @@ launch_single_file_single_dset_read(void)
 		pthread_join(threads[i], NULL);
 	    }
 
+	    /* Stop time */
+	    gettimeofday(&end, 0);
+
 	    /* Data verification if enabled.  Do not enable this option (-k) for performance study */
 	    if (hand.check_data && !hand.random_data)
 		nerrors = check_data(data_out, 0, 0);
@@ -863,15 +881,13 @@ launch_single_file_single_dset_read(void)
         }
     }
 
+    /* Calculate and print the performance data */
+    save_statistics(begin, end);
+
     /* Close/release resources */
     H5Dclose(dataset);
     H5Fclose(file);
     H5Pclose(fapl);
-
-    /* Stop time after file closing to match the design of the Bypass VOL */
-    gettimeofday(&end, 0);
-
-    save_statistics(begin, end);
 
     free(data_out);
 
