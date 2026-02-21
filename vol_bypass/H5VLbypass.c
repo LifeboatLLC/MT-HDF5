@@ -1949,9 +1949,9 @@ done:
     return ret_value;
 }
 
-/* Break down into smaller sections if the data size is 2GB or bigger. */
+/* Read or write the data.  Break down into smaller sections if the data size is 2GB or bigger. */
 static herr_t
-read_or_write_data(int fd, void *buf, size_t size, off_t offset, bool read_data)
+operate_data_io(int fd, void *buf, size_t size, off_t offset, bool read_data)
 {
     herr_t  ret_value = 0;
     size_t  nbytes   = 0;  /* # of bytes to read       */
@@ -2070,9 +2070,9 @@ start_thread_for_pool(void *args)
 	//fprintf(stderr, "\t%s: %d: thread %d before reading data, local_count = %d\n", __func__, __LINE__, thread_id, local_count);
 
 	for (i = 0; i < local_count; i++) {
-	    if (read_or_write_data(tasks[i]->file->u.file.fd, tasks[i]->vec_buf, tasks[i]->size,
+	    if (operate_data_io(tasks[i]->file->u.file.fd, tasks[i]->vec_buf, tasks[i]->size,
 		       tasks[i]->addr, tasks[i]->read_data) < 0) {
-	        fprintf(stderr, "read_or_write_data failed within file %s\n", tasks[i]->file->u.file.name);
+	        fprintf(stderr, "operate_data_io failed within file %s\n", tasks[i]->file->u.file.name);
 	        /* Return a failure code, but try to complete the rest of the read request.
 	         * This is important to properly decrement the reference count/num_reads on the local file object */
 	        ret_value = (void *)-1;
@@ -2908,8 +2908,8 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
 			goto done;
 		    }
 
-		    if (read_or_write_data(task->file->u.file.fd, task->vec_buf, task->size, task->addr, task->read_data) < 0) {
-			fprintf(stderr, "read_or_write_data failed within file %s\n", task->file->u.file.name);
+		    if (operate_data_io(task->file->u.file.fd, task->vec_buf, task->size, task->addr, task->read_data) < 0) {
+			fprintf(stderr, "operate_data_io failed within file %s\n", task->file->u.file.name);
 			/* Return a failure code, but try to complete the rest of the read request.
 			 * This is important to properly decrement the reference count/num_reads on the local file object */
 			ret_value = -1;
@@ -3037,6 +3037,8 @@ H5VL_bypass_dataset_write(size_t count, void *dset[], hid_t mem_type_id[], hid_t
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL DATASET Write\n");
 #endif
+
+    fprintf(stderr, "%s: %d\n", __func__, __LINE__);
 
     /* Populate the array of under objects */
     under_vol_id = ((H5VL_bypass_t *)(dset[0]))->under_vol_id;
