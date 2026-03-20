@@ -80,6 +80,8 @@ typedef struct dtype_info_t {
 typedef struct Bypass_file_t {
     char name[BYPASS_NAME_SIZE_LONG];
     int  fd;                /* C file descriptor  */
+    bool flags_set;         /* Whether the flag has been set */
+    int  flags;             /* Saved flag for file open */
     /* void *vfd_file_handle;  Currently not used */
     unsigned ref_count;     /* Reference count to keep track of objects like datasets or groups in this file */
     int  num_reads;         /* Number of reads still left undone */
@@ -101,8 +103,8 @@ typedef struct Bypass_dataset_t {
     H5D_layout_t layout;
     int num_filters;
     dtype_info_t dtype_info;
-    bool use_native;             /* Ray: remove this line */
-    bool use_native_checked;     /* Ray: remove this line */
+    bool use_native;             /* Indicating if using the native library for IO */
+    bool use_native_checked;     /* Indicating if using the native library has been decided */
     struct H5VL_bypass_t *file;  /* Use the forward-declared type */
 } Bypass_dataset_t;
 

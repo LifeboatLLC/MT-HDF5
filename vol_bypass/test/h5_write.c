@@ -176,12 +176,13 @@ launch_single_file_single_dset_write(void)
     herr_t  status;
 
     int         i, j, k;
-    pthread_t threads[hand.num_threads];
-    int thread_ids[hand.num_threads];
-    int *p, *data_out = NULL;
-    char file_name[1024];
-    char    dset_name[1024];
-    int nerrors = 0;
+    pthread_t   threads[hand.num_threads];
+    int         thread_ids[hand.num_threads];
+    int         *p, *data_out = NULL;
+    char        file_name[1024];
+    char        dset_name[1024];
+    H5D_alloc_time_t alloc_time = H5D_ALLOC_TIME_EARLY;
+    int         nerrors = 0;
 
     struct timeval begin, end;
 
@@ -212,6 +213,12 @@ launch_single_file_single_dset_write(void)
         chunk_dims[1] = hand.chunk_dim2;
           
         H5Pset_chunk(dcpl, RANK, chunk_dims); 
+    }
+
+    /* Bypass VOL only handles early allocation */
+    if (H5Pset_alloc_time(dcpl, alloc_time) < 0) {
+        printf("H5Pset_alloc_time failed at line %d\n", __LINE__);
+        goto error;
     }
 
     /* Create the dataspace */
