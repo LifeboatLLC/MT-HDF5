@@ -258,7 +258,7 @@ static herr_t release_group_info(Bypass_group_t *group);
 static herr_t get_dset_location(H5VL_bypass_t *dset_obj, hid_t dxpl_id, void **req, haddr_t *location);
 
 /* Check if any property of the dataset (type, layout, etc.) should force use of Native VOL */
-static herr_t should_dset_use_native(Bypass_dataset_t *dset);
+static herr_t should_dset_use_native(Bypass_dataset_t *dset, bool read_data);
 
 /* Compare two datatype instances for equivalence*/
 static bool bypass_types_equal(dtype_info_t *type_info1, dtype_info_t *type_info2);
@@ -1970,9 +1970,10 @@ operate_data_io(int fd, void *buf, size_t size, off_t offset, bool read_data)
             nbytes = size;
 
         do {
-            if (read_data)
+            if (read_data) {
+                fprintf(stderr, "%s, %d: offset = %lu, nbytes = %lu\n", __func__, __LINE__, offset, nbytes);
                 bytes_processed = pread(fd, buf, nbytes, offset);
-            else
+            } else
                 bytes_processed = pwrite(fd, buf, nbytes, offset);
 
             if (bytes_processed > 0)
@@ -1991,7 +1992,7 @@ operate_data_io(int fd, void *buf, size_t size, off_t offset, bool read_data)
                     case EINTR:
                         break;
                     default:
-                        fprintf(stderr, "pread failed with error: %s\n", strerror(errno));
+                        fprintf(stderr, "%s, %d: pread/pwrite failed with error: %s\n", __func__, __LINE__, strerror(errno));
                         ret_value = -1;
                         goto done;
                 }
@@ -2072,7 +2073,7 @@ start_thread_for_pool(void *args)
 	for (i = 0; i < local_count; i++) {
 	    if (operate_data_io(tasks[i]->file->u.file.fd, tasks[i]->vec_buf, tasks[i]->size,
 		       tasks[i]->addr, tasks[i]->read_data) < 0) {
-	        fprintf(stderr, "operate_data_io failed within file %s\n", tasks[i]->file->u.file.name);
+	        fprintf(stderr, "operate_data_io failed within file %s, read_data = %d\n", tasks[i]->file->u.file.name, tasks[i]->read_data);
 	        /* Return a failure code, but try to complete the rest of the read request.
 	         * This is important to properly decrement the reference count/num_reads on the local file object */
 	        ret_value = (void *)-1;
@@ -2086,8 +2087,7 @@ start_thread_for_pool(void *args)
 
             tasks[i]->file->u.file.num_reads--;
 
-	    load_task_count = atomic_load(tasks[i]->task_count_ptr);
-
+	    //load_task_count = atomic_load(tasks[i]->task_count_ptr);
 	    //fprintf(stderr, "\t%s: %d: thread %d, i = %d load_task_count = %d\n", __func__, __LINE__, thread_id, i, load_task_count);
 
 	    /* Decrement the task count that this pointer points to */
@@ -2484,7 +2484,7 @@ process_chunk_cb(const hsize_t *chunk_offsets, unsigned filter_mask,
         goto done;
 
     /* Key function: get the data selection in memory which matches the file space selection falling
-        * into this chunk */
+     * into this chunk */
     if ((mem_selection_id = H5Sselect_project_intersection(cb_info->file_space,
         cb_info->mem_space, cb_info->file_space_copy)) < 0) {
         fprintf(stderr, "unable to get projected dataspace intersection\n");
@@ -2644,7 +2644,7 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
     bool         has_global = false, acquired_global = false;
     unsigned int lock_count = 1;
     atomic_int   local_task_count = 0;
-    int          load_task_count = 0;;
+    int          load_local_task_count = 0;;
     pthread_cond_t  local_condition;
 
 #ifdef ENABLE_BYPASS_LOGGING
@@ -2699,7 +2699,7 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
 
         /* Let the native function handle datatype conversion.  Also check the flag for filters, virtual
          * dataset and reference datatype */
-        if (!bypass_dset->use_native_checked && should_dset_use_native(bypass_dset) < 0) {
+        if (!bypass_dset->use_native_checked && should_dset_use_native(bypass_dset, true) < 0) {
             fprintf(stderr, "failed to determine if native function should be used\n");
             ret_value = -1;
             goto done;
@@ -2800,6 +2800,7 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
             pthread_mutex_lock(&mutex_local);
             locked = true;
 
+            /* TODO: remove it because No need to flush the file */
             /* Future optimization: Only flush when a write has been performed.
              * Currently, some tests (specifically H5TEST-objcopy, likely others) fail because the Bypass VOL
              * attempts to read a dataset under the assumption that all written data has been flushed to file,
@@ -2807,11 +2808,11 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
              * write requests that went out of bounds of the posix file.  By flushing before each file before
              * read, we make sure that all previous writes are reflected in the filesystem.
              */
-            if (flush_containing_file((H5VL_bypass_t *)dset[j]) < 0) {
+            /* if (flush_containing_file((H5VL_bypass_t *)dset[j]) < 0) {
                 fprintf(stderr, "failed to flush dataset\n");
                 ret_value = -1;
                 goto done;
-            }
+            } */
 
             /* At least one read is being done through the Bypass VOL.
              * We should block until all tasks are complete. */
@@ -2826,15 +2827,17 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
                 goto done;
             }
 
-            load_task_count = atomic_load(&local_task_count);
-            //printf("%s: %d: load_task_count = %d\n", __func__, __LINE__, load_task_count);
+            //load_local_task_count = atomic_load(&local_task_count);
+            //printf("%s: %d: load_local_task_count = %d\n", __func__, __LINE__, load_local_task_count);
 
             selection_info.dtype_size = bypass_dset->dtype_info.size;
 
-	    /* This pointer keeps track of the number of tasks in the queue for the current thread */
+	    /* When the application is multi-threaded, this pointer keeps track of the number of tasks
+             * in the queue for the current thread */
 	    selection_info.task_count_ptr = &local_task_count;
 
-	    /* This pointer passes the local condition variable for the current thread to the thread pool */
+	    /* When the application is multi-threaded, This pointer passes the local condition variable
+             * for the current thread to the thread pool */
 	    selection_info.local_condition_ptr = &local_condition;
 
             /* Indicate this operation is a read */
@@ -2878,8 +2881,8 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
 			goto done;
 		    }
 
-                    load_task_count = atomic_load(&local_task_count);
-	            //fprintf(stderr, "%s: %d: load_task_count = %d\n", __func__, __LINE__, load_task_count);
+                    //load_local_task_count = atomic_load(&local_task_count);
+	            //fprintf(stderr, "%s: %d: load_local_task_count = %d\n", __func__, __LINE__, load_local_task_count);
 
                 }
             } else {
@@ -2976,17 +2979,17 @@ H5VL_bypass_dataset_read(size_t count, void *dset[], hid_t mem_type_id[], hid_t 
 	/* Only finish H5Dread() once all threads are inactive and no tasks are undone */
 	/* Only block here if Bypass VOL was used for the read */
 	if (must_block) {
-	    load_task_count = atomic_load(&local_task_count);
-	    //fprintf(stderr, "%s: %d: load_task_count = %d\n", __func__, __LINE__, load_task_count);
+	    load_local_task_count = atomic_load(&local_task_count);
+	    //fprintf(stderr, "%s: %d: load_local_task_count = %d\n", __func__, __LINE__, load_local_task_count);
 
-	    while (load_task_count > 0) {
+	    while (load_local_task_count > 0) {
 		pthread_cond_wait(&local_condition, &mutex_local);
-		load_task_count = atomic_load(&local_task_count);
-	        //fprintf(stderr, "%s: %d: load_task_count = %d\n", __func__, __LINE__, load_task_count);
+		load_local_task_count = atomic_load(&local_task_count);
+	        //fprintf(stderr, "%s: %d: load_local_task_count = %d\n", __func__, __LINE__, load_local_task_count);
             }
 	}
 
-	//fprintf(stderr, "%s: %d: load_task_count = %d\n", __func__, __LINE__, load_task_count);
+	//fprintf(stderr, "%s: %d: load_local_task_count = %d\n", __func__, __LINE__, load_local_task_count);
 
 	if (pthread_mutex_unlock(&mutex_local) < 0) {
 	    printf("In %s of %s at line %d: pthread_mutex_unlock failed\n", __func__, __FILE__, __LINE__);
@@ -3030,29 +3033,336 @@ static herr_t
 H5VL_bypass_dataset_write(size_t count, void *dset[], hid_t mem_type_id[], hid_t mem_space_id[],
                           hid_t file_space_id[], hid_t plist_id, const void *buf[], void **req)
 {
+
     void  *o_arr[count]; /* Array of under objects */
     hid_t  under_vol_id; /* VOL ID for all objects */
     herr_t ret_value = 0;
+
+    hid_t        file_space_id_copy = H5I_INVALID_HID;
+    hid_t        mem_space_id_copy = H5I_INVALID_HID;
+    H5VL_bypass_t *bypass_obj = NULL;
+    Bypass_dataset_t *bypass_dset = NULL;
+    sel_info_t   selection_info;
+    int          i;
+    bool         read_use_native   = false;
+    H5S_sel_type mem_sel_type = H5S_SEL_ERROR;
+    H5S_sel_type file_sel_type = H5S_SEL_ERROR;
+    bool types_equal = false;
+    bool must_block = false;
+    bool locked = false;
+    dtype_info_t mem_type_info;
+    task_queue_t local_queue;
+    H5D_space_status_t dset_space_status = H5D_SPACE_STATUS_ERROR;
+    bool         has_global = false, acquired_global = false;
+    unsigned int lock_count = 1;
+    atomic_int   local_task_count = 0;
+    int          load_local_task_count = 0;;
+    pthread_cond_t  local_condition;
+
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL DATASET Write\n");
 #endif
 
-    fprintf(stderr, "%s: %d\n", __func__, __LINE__);
+    //fprintf(stderr, "%s: %d\n", __func__, __LINE__);
 
-    /* Populate the array of under objects */
-    under_vol_id = ((H5VL_bypass_t *)(dset[0]))->under_vol_id;
-    for (size_t u = 0; u < count; u++) {
-        o_arr[u] = ((H5VL_bypass_t *)(dset[u]))->under_object;
-        assert(under_vol_id == ((H5VL_bypass_t *)(dset[u]))->under_vol_id);
+    pthread_cond_init(&local_condition, NULL);
+
+    if (H5TShave_mutex(&has_global) < 0) {
+        fprintf(stderr, "In %s of %s at line %d: H5TShave_mutex failed\n", __func__, __FILE__, __LINE__);
+        ret_value = -1;
+        goto done;
     }
 
-    ret_value = H5VLdataset_write(count, o_arr, under_vol_id, mem_type_id, mem_space_id, file_space_id,
-                                  plist_id, buf, req);
+    /* Grab the global lock of the HDF5 library */
+    if (!has_global) {
+	/* TODO: Use a condition variable instead of this while loop */
+        while (!acquired_global) {
+            if (H5TSmutex_acquire(lock_count, &acquired_global) < 0) {
+                fprintf(stderr, "In %s of %s at line %d: H5TSmutex_acquire failed\n", __func__, __FILE__, __LINE__);
+                ret_value = -1;
+                goto done;
+	    }
+        }
+    }
+
+    /* Loop through all datasets and process them individually */
+    for (i = 0; i < count; i++) {
+        /* Prevent information persisting between iterations */
+        memset(&selection_info, 0, sizeof(sel_info_t));
+        memset(&mem_type_info, 0, sizeof(dtype_info_t));
+        read_use_native = false;
+        mem_sel_type = H5S_SEL_ERROR;
+        file_sel_type = H5S_SEL_ERROR;
+        file_space_id_copy = H5I_INVALID_HID;
+        mem_space_id_copy = H5I_INVALID_HID;
+
+        bypass_obj = (H5VL_bypass_t*)dset[i];
+
+        if (bypass_obj->type != H5I_DATASET) {
+            fprintf(stderr, "object provided for bypass dataset write is not a dataset\n");
+            ret_value = -1;
+            goto done;
+        }
+
+        bypass_dset = (Bypass_dataset_t*)&bypass_obj->u.dataset;
+
+        /* Let the native function handle datatype conversion.  Also check the flag for filters, virtual
+         * dataset and reference datatype */
+        if (!bypass_dset->use_native_checked && should_dset_use_native(bypass_dset, false) < 0) {
+            fprintf(stderr, "failed to determine if native function should be used\n");
+            ret_value = -1;
+            goto done;
+        }
+
+        selection_info.file = bypass_dset->file;
+
+        /* Check selection type */
+        if (mem_space_id[i] == H5S_ALL) {
+            mem_sel_type = H5S_SEL_ALL;
+        } else if (mem_space_id[i] != H5S_BLOCK && mem_space_id[i] != H5S_PLIST &&
+            (mem_sel_type = H5Sget_select_type(mem_space_id[i])) < 0) {
+            fprintf(stderr, "failed to get selection type\n");
+            ret_value = -1;
+            goto done;
+        }
+
+        if (mem_sel_type == H5S_SEL_NONE)
+            continue;
+
+        if (file_space_id[i] == H5S_ALL) {
+            file_sel_type = H5S_SEL_ALL;
+        } else if (file_space_id[i] != H5S_BLOCK && file_space_id[i] != H5S_PLIST &&
+            (file_sel_type = H5Sget_select_type(file_space_id[i])) < 0) {
+            fprintf(stderr, "failed to get selection type\n");
+            ret_value = -1;
+            goto done;
+        }
+
+        if (file_sel_type == H5S_SEL_NONE)
+            continue;
+
+        /*fprintf(stderr, "%s: %d, bypass_dset->use_native = %d, bypass_dset->use_native_checked = %d\n",
+            __func__, __LINE__, bypass_dset->use_native, bypass_dset->use_native_checked);*/
+
+        if (get_dtype_info_helper(mem_type_id[i], &mem_type_info) < 0) {
+            fprintf(stderr, "failed to get mem dtype info\n");
+            ret_value = -1;
+            goto done;
+        }
+
+        types_equal = bypass_types_equal(&bypass_dset->dtype_info, &mem_type_info);
+
+        if ((dset_space_status = get_dset_space_status(dset[i], plist_id, req)) < 0) {
+            fprintf(stderr, "failed to get dataset space status\n");
+            ret_value = -1;
+            goto done;
+        }
+
+        read_use_native = bypass_dset->use_native || !types_equal ||
+            mem_sel_type == H5S_SEL_POINTS || file_sel_type == H5S_SEL_POINTS
+            || dset_space_status != H5D_SPACE_STATUS_ALLOCATED || mem_space_id[i] == H5S_BLOCK
+            || file_space_id[i] == H5S_BLOCK || mem_space_id[i] == H5S_PLIST || file_space_id[i] == H5S_PLIST;
+
+        if (read_use_native) {
+            /* Let go the global lock of the HDF5 library */
+	    if (acquired_global && H5TSmutex_release(&lock_count) != 0) {
+		fprintf(stderr, "In %s of %s at line %d: H5TSmutex_release failed\n", __func__, __FILE__, __LINE__);
+		ret_value = -1;
+		goto done;
+	    }
+
+	    acquired_global = false;
+
+	    /* Populate the array of under objects */
+	    under_vol_id = ((H5VL_bypass_t *)(dset[0]))->under_vol_id;
+
+	    o_arr[i] = ((H5VL_bypass_t *)(dset[i]))->under_object;
+	    assert(under_vol_id == ((H5VL_bypass_t *)(dset[i]))->under_vol_id);
+
+	    if ((ret_value = H5VLdataset_write(1, &(o_arr[i]), under_vol_id, &(mem_type_id[i]), &(mem_space_id[i]),
+		    &(file_space_id[i]), plist_id, &(buf[i]), req)) < 0) {
+		fprintf(stderr, "In %s of %s at line %d: H5VLdataset_write failed\n", __func__, __FILE__, __LINE__);
+		goto done;
+	    }
+         } else { /* Coming into Bypass VOL when no data conversion and filter */
+            if (get_dset_location(dset[i], plist_id, req, &selection_info.chunk_addr) < 0) {
+                fprintf(stderr, "failed to get file location of contiguous dataset\n");
+                ret_value = -1;
+                goto done;
+            }
+
+            /* Decide the dataspaces in memory and file */
+            if (check_dspaces_helper(bypass_dset->space_id, file_space_id[i], &file_space_id_copy, mem_space_id[i],
+                                     &mem_space_id_copy) < 0) {
+                printf("In %s of %s at line %d: can't figure out the data space in file or memory\n",
+                       __func__, __FILE__, __LINE__);
+                ret_value = -1;
+                goto done;
+            }
+
+            pthread_mutex_lock(&mutex_local);
+            locked = true;
+
+            /* At least one write is being done through the Bypass VOL.
+             * We should block until all tasks are complete. */
+            must_block = true;
+            pthread_mutex_unlock(&mutex_local);
+            locked = false;
+
+            /* Initialize data selection info */
+            if (get_dset_name_helper((H5VL_bypass_t *)(dset[i]), selection_info.dset_name, req) < 0) {
+                fprintf(stderr, "failed to retrieve dataset name\n");
+                ret_value = -1;
+                goto done;
+            }
+
+            selection_info.dtype_size = bypass_dset->dtype_info.size;
+
+	    /* When the application is multi-threaded, this pointer keeps track of the number of tasks
+             * in the queue for the current thread */
+	    selection_info.task_count_ptr = &local_task_count;
+
+	    /* When the application is multi-threaded, This pointer passes the local condition variable
+             * for the current thread to the thread pool */
+	    selection_info.local_condition_ptr = &local_condition;
+
+            /* Indicate this operation is a write */
+            selection_info.read_data = false;
+
+            if (H5D_CHUNKED == bypass_dset->layout) {
+                /* Iterate through all chunks and map the data selection in each chunk to the memory.
+                 * Put the selections into a queue for the thread pool to read the data */
+                if (no_tpool) {
+                    /* Make sure no garbage in any field */
+                    memset(&local_queue, 0, sizeof(task_queue_t));
+
+                    process_chunks(&local_queue, buf[i], dset[i], bypass_dset->dcpl_id, plist_id, mem_space_id_copy, file_space_id_copy,
+                                   &selection_info, req);
+                } else {
+                    process_chunks(&queue_for_tpool, buf[i], dset[i], bypass_dset->dcpl_id, plist_id, mem_space_id_copy, file_space_id_copy,
+                                   &selection_info, req);
+                }
+            } else if (H5D_CONTIGUOUS == bypass_dset->layout) {
+                selection_info.file_space_id = file_space_id_copy;
+                selection_info.mem_space_id  = mem_space_id_copy;
+
+                /* Handles the hyperslab selection and read the data */
+                if (no_tpool) {
+                    /* Make sure no garbage in any field */
+                    memset(&local_queue, 0, sizeof(task_queue_t));
+
+                    /* Each thread reads puts tasks into its own queue */
+		    if (process_vectors(&local_queue, buf[i], &selection_info) < 0) {
+			fprintf(stderr, "failed to insert vectors into queue\n");
+			ret_value = -1;
+			goto done;
+		    }
+                } else {
+                    /* Use the global instance of task_queue_t for thread pool */
+		    if (process_vectors(&queue_for_tpool, buf[i], &selection_info) < 0) {
+			fprintf(stderr, "failed to insert vectors into queue\n");
+			ret_value = -1;
+			goto done;
+		    }
+                }
+            } else {
+                fprintf(stderr, "unsupported dataset layout\n");
+                ret_value = -1;
+                goto done;
+            }
+
+            /* Let go the global lock of the HDF5 library */
+	    if (acquired_global && H5TSmutex_release(&lock_count) != 0) {
+		fprintf(stderr, "In %s of %s at line %d: H5TSmutex_release failed\n", __func__, __FILE__, __LINE__);
+		ret_value = -1;
+		goto done;
+	    }
+
+	    acquired_global = false;
+
+            /* Each thread reads from its own task queue if 'BYPASS_VOL_NO_TPOOL' environment variable is set */
+            if (no_tpool) {
+                Bypass_task_t *task = NULL;
+
+                while (local_queue.tasks_in_queue) {
+		    if ((task = bypass_queue_pop(&local_queue, false)) == NULL) {
+			fprintf(stderr, "failed to pop task from queue\n");
+			ret_value = -1;
+			goto done;
+		    }
+
+		    if (operate_data_io(task->file->u.file.fd, task->vec_buf, task->size, task->addr, task->read_data) < 0) {
+			fprintf(stderr, "operate_data_io failed within file %s\n", task->file->u.file.name);
+			/* Return a failure code, but try to complete the rest of the read request.
+			 * This is important to properly decrement the reference count/num_reads on the local file object */
+			ret_value = -1;
+		    }
+
+		    if (task != NULL) {
+			bypass_task_release(task);
+			task = NULL;
+		    }
+                }
+            }
+        }
+    }
 
     /* Check for async request */
     if (req && *req)
         *req = H5VL_bypass_new_obj(*req, under_vol_id);
+
+    if (!no_tpool) {
+	/* Do not return until the thread pool finishes the read */
+	/* TBD: Enforcing this will become more complicated once multiple
+	 * application threads making concurrent H5Dread() calls is supported. */
+	if (pthread_mutex_lock(&mutex_local) < 0) {
+	    printf("In %s of %s at line %d: pthread_mutex_lock failed\n", __func__, __FILE__, __LINE__);
+	    ret_value = -1;
+	    goto done;
+	}
+
+	locked = true;
+
+	/* Only finish H5Dread() once all threads are inactive and no tasks are undone */
+	/* Only block here if Bypass VOL was used for the read */
+	if (must_block) {
+	    load_local_task_count = atomic_load(&local_task_count);
+	    //fprintf(stderr, "%s: %d: load_local_task_count = %d\n", __func__, __LINE__, load_local_task_count);
+
+	    while (load_local_task_count > 0) {
+		pthread_cond_wait(&local_condition, &mutex_local);
+		load_local_task_count = atomic_load(&local_task_count);
+	        //fprintf(stderr, "%s: %d: load_local_task_count = %d\n", __func__, __LINE__, load_local_task_count);
+            }
+	}
+
+	//fprintf(stderr, "%s: %d: load_local_task_count = %d\n", __func__, __LINE__, load_local_task_count);
+
+	if (pthread_mutex_unlock(&mutex_local) < 0) {
+	    printf("In %s of %s at line %d: pthread_mutex_unlock failed\n", __func__, __FILE__, __LINE__);
+	    ret_value = -1;
+	    goto done;
+	}
+
+	locked = false;
+    }
+
+    pthread_cond_destroy(&local_condition);
+
+    //fprintf(stderr, "%s: %d\n", __func__, __LINE__);
+
+done:
+    if (locked)
+        pthread_mutex_unlock(&mutex_local);
+
+    /* Let go the global lock of the HDF5 library */
+    if (acquired_global && H5TSmutex_release(&lock_count) != 0) {
+	fprintf(stderr, "In %s of %s at line %d: H5TSmutex_release failed\n", __func__, __FILE__, __LINE__);
+	ret_value = -1;
+    }
+
+    acquired_global = false;
 
     return ret_value;
 } /* end H5VL_bypass_dataset_write() */
@@ -3438,14 +3748,15 @@ H5VL_bypass_datatype_close(void *dt, hid_t dxpl_id, void **req)
         H5VL_bypass_free_obj(o);
 
     return ret_value;
-} /* end H5VL_bypass_datatype_close() */
+} /* end H5VL_bypass_datatype_close */
 
 static herr_t
-c_file_open_helper(H5VL_bypass_t *obj, const char *name)
+c_file_open_helper(H5VL_bypass_t *obj, const char *name, unsigned flags)
 {
-    herr_t ret_value = 0;
+    herr_t        ret_value = 0;
     Bypass_file_t *file = NULL;
     struct rlimit limit;
+    int           o_flags;     /* Flags for open() call    */
 
     assert(obj);
     assert(obj->type == H5I_FILE);
@@ -3453,9 +3764,24 @@ c_file_open_helper(H5VL_bypass_t *obj, const char *name)
 
     file = &obj->u.file;
 
+    /* Figure out the opening flag */
+    if (!file->flags_set) {
+	/* Build the open flag.  Only these two flags (O_RDWR or O_RDONLY) can be used to open the C file.
+         * The other flags (H5F_ACC_TRUNC, H5F_ACC_CREAT, or H5F_ACC_EXCL) are ignored in case that they
+         * conflict with the openning of the HDF5 file.
+         */
+	o_flags = (H5F_ACC_RDWR & flags) ? O_RDWR : O_RDONLY;
+
+        file->flags = o_flags;
+        file->flags_set = true;
+    } else {
+        o_flags = file->flags;
+    }
+
     /* Open the file with the system's function */
-    if ((file->fd = open(name, O_RDONLY)) < 0) {
-        fprintf(stderr, "failed to open file descriptor: %s\n", strerror(errno));
+    if ((file->fd = open(name, o_flags)) < 0) {
+    //if ((file->fd = open(name, O_RDWR)) < 0) {
+        fprintf(stderr, "In %s of %s at line %d: failed to create/open file descriptor: %s\n", __func__, __FILE__, __LINE__, strerror(errno));
 
         /* If the number of files being opened exceeds the system limit, print out the corresponding error message */
 	if (errno == EMFILE) {
@@ -3553,6 +3879,8 @@ H5VL_bypass_file_create(const char *name, unsigned flags, hid_t fcpl_id, hid_t f
 
     file->type = H5I_FILE;
 
+    file->u.file.flags_set = false;
+
     /* Check for async request */
     if (req && *req)
         if ((*req = H5VL_bypass_new_obj(*req, info->under_vol_id)) == NULL) {
@@ -3576,8 +3904,9 @@ H5VL_bypass_file_create(const char *name, unsigned flags, hid_t fcpl_id, hid_t f
     
     info = NULL;
 
-    /* Open the C file and set the fields for the file_t structure */
-    if (c_file_open_helper(file, name) < 0) {
+    /* Open the C file and set the fields for the file_t structure.  Openning the file as a C
+     * file must be after openning the HDF5 file in case that the library truncates the file. */
+    if (c_file_open_helper(file, name, flags) < 0) {
         fprintf(stderr, "error while opening c file\n");
         goto error;
     }
@@ -3716,8 +4045,11 @@ H5VL_bypass_file_open(const char *name, unsigned flags, hid_t fapl_id, hid_t dxp
 
     file->type = H5I_FILE;
 
-    /* Open the C file and set the fields for the file_t structure */
-    if (c_file_open_helper(file, name) < 0) {
+    file->u.file.flags_set = false;
+
+    /* Open the C file and set the fields for the file_t structure.  Openning the file as a C
+     * file must be after openning the HDF5 file in case that the library truncates the file. */
+    if (c_file_open_helper(file, name, flags) < 0) {
         fprintf(stderr, "unable to open c file\n");
         goto error;
     }
@@ -3910,12 +4242,13 @@ H5VL_bypass_file_specific(void *file, H5VL_file_specific_args_t *args, hid_t dxp
 
             new_o = H5VL_bypass_new_obj(*args->args.reopen.file, o->under_vol_id);
             new_o->type = H5I_FILE;
+            new_o->u.file.flags_set = false;
 
             *args->args.reopen.file = new_o;
 
             assert(o->u.file.name);
 
-            if (c_file_open_helper(new_o, o->u.file.name) < 0) {
+            if (c_file_open_helper(new_o, o->u.file.name, o->u.file.flags) < 0) {
                 fprintf(stderr, "error while opening c file\n");
                 goto error;
             }
@@ -5231,7 +5564,7 @@ H5VL_bypass_optional(void *obj, H5VL_optional_args_t *args, hid_t dxpl_id, void 
 } /* end H5VL_bypass_optional() */
 
 static herr_t
-should_dset_use_native(Bypass_dataset_t* dset) {
+should_dset_use_native(Bypass_dataset_t* dset, bool read_data) {
     int num_ext_files = 0;
     herr_t ret_value = 0;
 
@@ -5293,6 +5626,24 @@ should_dset_use_native(Bypass_dataset_t* dset) {
         dset->use_native_checked = true;
 
         goto done;
+    }
+
+    /* For writing data, Bypass VOL only supports early allocation time */
+    if (!read_data) {
+        H5D_alloc_time_t alloc_time;
+
+        if (H5Pget_alloc_time(dset->dcpl_id, &alloc_time) < 0) {
+            fprintf(stderr, "failed to get allocation time for chunked dataset\n");
+            ret_value = -1;
+            goto done;
+        }
+
+        if (alloc_time != H5D_ALLOC_TIME_EARLY) {
+            dset->use_native = true;
+            dset->use_native_checked = true;
+
+            goto done;
+        }
     }
 
 done:
@@ -5507,8 +5858,10 @@ static bool bypass_types_equal(dtype_info_t *type_info1, dtype_info_t *type_info
     if (type_info1->order != type_info2->order)
         ret_value = false;
 
-    if (type_info1->sign != type_info2->sign)
-        ret_value = false;
+    if (type_info1->class == H5T_INTEGER && type_info2->class == H5T_INTEGER) {
+        if (type_info1->sign != type_info2->sign)
+            ret_value = false;
+    }
 
     return ret_value;
 }
