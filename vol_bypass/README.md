@@ -35,12 +35,17 @@ If you're using CMake, change the following path through ccmake or cmake:
 
 - **CMAKE_INSTALL_PREFIX**: path to your hdf5 install/build location, such as hdf5_build/hdf5/
 
-Below are the scripts to run the benchmark:
+Below are the scripts to run the benchmark for reading data:
 
-- run_chunk_simple.sh
-- run_contiguous_simple.sh
-- run_multi_dsets.sh
-- run_multi_files.sh
+- run_chunk_read.sh
+- run_contiguous_read.sh
+- run_multi_dsets_read.sh
+- run_multi_files_read.sh
+
+The scripts to run the benchmark for writing data are as below:
+
+- run_chunk_write.sh
+- run_contiguous_write.sh
 
 To run them correctly, you must modify the three environment variables in these scripts:
 
@@ -55,7 +60,7 @@ There are four other environment variables to be passed into the Bypass VOL:
 - **BYPASS_VOL_MAX_NELMTS**: the maximal number of data elements (not bytes) for each data pieces to be read
 - **BYPASS_VOL_NO_TPOOL**:   if set to be true, the thread pool is not used.  The default is false that the thread pool is used.
 
-The full list of command line options for the test programs are as follow:
+The full list of command line options for the test programs (both h5_read.c and h5_write.c) are as follow:
 >
     % ./h5_read --help     
 
