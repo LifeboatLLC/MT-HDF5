@@ -927,7 +927,7 @@ H5VL_bypass_info_cmp(int *cmp_value, const void *_info1, const void *_info2)
     const H5VL_bypass_info_t *info1 = (const H5VL_bypass_info_t *)_info1;
     const H5VL_bypass_info_t *info2 = (const H5VL_bypass_info_t *)_info2;
     bool                     locked = false;
-    herr_t                   ret_value = -1;
+    herr_t                   ret_value = 0;
 
 #ifdef ENABLE_BYPASS_LOGGING
     printf("------- BYPASS  VOL INFO Compare\n");
@@ -952,14 +952,21 @@ H5VL_bypass_info_cmp(int *cmp_value, const void *_info1, const void *_info2)
     *cmp_value = 0;
 
     /* Compare under VOL connector classes */
-    H5VLcmp_connector_cls(cmp_value, info1->under_vol_id, info2->under_vol_id);
+    if (H5VLcmp_connector_cls(cmp_value, info1->under_vol_id, info2->under_vol_id) < 0) {
+        fprintf(stderr, "%s at %d: H5VLcmp_connector_cls failed\n", __func__, __LINE__);
+        ret_value = -1;
+        goto done;
+    }
+
     if (*cmp_value != 0)
-        return 0;
+        goto done;
 
     /* Compare under VOL connector info objects */
-    H5VLcmp_connector_info(cmp_value, info1->under_vol_id, info1->under_vol_info, info2->under_vol_info);
-    if (*cmp_value != 0)
-        return 0;
+    if (H5VLcmp_connector_info(cmp_value, info1->under_vol_id, info1->under_vol_info, info2->under_vol_info) < 0) {
+        fprintf(stderr, "%s at %d: H5VLcmp_connector_info failed\n", __func__, __LINE__);
+        ret_value = -1;
+        goto done;
+    }
 
 done:
 #ifdef XSLOCK
